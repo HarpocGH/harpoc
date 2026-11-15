@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, DatabaseAction } from "@harpoc/shared";
-import { ErrorCode } from "@harpoc/shared";
+import { DEFAULT_DB_TIMEOUT_MS, ErrorCode } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
 import {
   MockAdapter,
@@ -32,7 +33,17 @@ vi.mock("redis", () => ({
 // hand-registered mock adapter.
 const mongoClientCalls: unknown[] = [];
 const mongoCommandCalls: { name: string; command: unknown; options: unknown }[] = [];
+let mongoCommandHangs = false;
+let mongoCommandNeverSettles = false;
+let mongoCloseCount = 0;
+let mongoCommandIssued: () => void = () => undefined;
 vi.mock("mongodb", () => {
+  class MongoNetworkError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "MongoNetworkError";
+    }
+  }
   class MongoClient {
     constructor(uri: string, options: unknown) {
       mongoClientCalls.push({ uri, options });
@@ -41,23 +52,47 @@ vi.mock("mongodb", () => {
       return Promise.resolve(this);
     }
     close(): Promise<void> {
+      mongoCloseCount += 1;
       return Promise.resolve(undefined);
     }
-    db(name: string): { command: (command: unknown, options?: unknown) => Promise<unknown> } {
+    db(name: string): {
+      command: (command: unknown, options?: { signal?: AbortSignal }) => Promise<unknown>;
+    } {
       return {
-        command: (command: unknown, options?: unknown) => {
+        command: (command: unknown, options?: { signal?: AbortSignal }) => {
           mongoCommandCalls.push({ name, command, options });
+          mongoCommandIssued();
+          if (mongoCommandNeverSettles) return new Promise(() => undefined);
+          if (mongoCommandHangs) {
+            return new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                "abort",
+                () => {
+                  reject(options.signal?.reason as Error);
+                },
+                { once: true },
+              );
+            });
+          }
           return Promise.resolve({ ok: 1 });
         },
       };
     }
   }
-  return { MongoClient };
+  return { MongoClient, MongoNetworkError };
 });
 
 beforeEach(() => {
   mongoClientCalls.length = 0;
   mongoCommandCalls.length = 0;
+  mongoCommandHangs = false;
+  mongoCommandNeverSettles = false;
+  mongoCloseCount = 0;
+  mongoCommandIssued = () => undefined;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 const pgClientConfigsForLazyPin: unknown[] = [];
@@ -207,6 +242,13 @@ describe("DatabaseInjector redis dispatch", () => {
 // now constructs a `MongoAdapter` for engine `mongodb`, and the shared
 // dispatch logic (COMMAND_ENGINES already included mongodb since Task 10)
 // reaches it end to end.
+const NON_DOCUMENT_COMMANDS: ReadonlyArray<readonly [string, unknown]> = [
+  ["null", null],
+  ["undefined", undefined],
+  ["a string", "ping"],
+  ["an array", ["ping"]],
+];
+
 describe("DatabaseInjector mongodb dispatch (Task 11 wiring)", () => {
   function mongoAction(overrides: Partial<DatabaseAction> = {}): DatabaseAction {
     return {
@@ -227,8 +269,111 @@ describe("DatabaseInjector mongodb dispatch (Task 11 wiring)", () => {
     expect(res.rows).toEqual([{ ok: 1 }]);
     expect(mongoCommandCalls).toHaveLength(1);
     expect(mongoCommandCalls[0]?.name).toBe("app_db");
-    expect(mongoCommandCalls[0]?.command).toEqual({ ping: 1 });
+    expect(mongoCommandCalls[0]?.command).toEqual({ ping: 1, maxTimeMS: DEFAULT_DB_TIMEOUT_MS });
   });
+
+  it("a command that never settles ends at the action's timeout_ms as DB_QUERY_FAILED", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    mongoCommandHangs = true;
+    const issued = new Promise<void>((resolve) => {
+      mongoCommandIssued = resolve;
+    });
+    const flushed = (): Promise<void> =>
+      new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+    let settled = false;
+    const run = new DatabaseInjector(null).executeWithSecret(
+      mongoAction({ timeout_ms: 1500 }),
+      SECRET,
+      policy(),
+      undefined,
+    );
+    run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(settled).toBe(true);
+    const err = await expectVaultError(() => run, ErrorCode.DB_QUERY_FAILED);
+    expect(err.message).toContain("command did not complete within 1500 ms");
+  });
+
+  it("a command that never settles even after the abort ends at timeout_ms as DB_QUERY_FAILED, the client closed once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    mongoCommandNeverSettles = true;
+    const issued = new Promise<void>((resolve) => {
+      mongoCommandIssued = resolve;
+    });
+    const flushed = (): Promise<void> =>
+      new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+    let settled = false;
+    const run = new DatabaseInjector(null).executeWithSecret(
+      mongoAction({ timeout_ms: 1500 }),
+      SECRET,
+      policy(),
+      undefined,
+    );
+    run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(settled).toBe(true);
+    const err = await expectVaultError(() => run, ErrorCode.DB_QUERY_FAILED);
+    expect(err.message).toContain("command did not complete within 1500 ms");
+    expect(mongoCloseCount).toBe(1);
+  });
+
+  it.each(NON_DOCUMENT_COMMANDS)(
+    "a command that is %s: INVALID_DATABASE_CONFIG 'command must be a document for mongodb', one failed row, no client",
+    async (_label, value) => {
+      const log = vi.fn();
+      const inj = new DatabaseInjector({ log } as unknown as AuditLogger);
+      const err = await expectVaultError(
+        () =>
+          inj.executeWithSecret(
+            mongoAction({ command: value as DatabaseAction["command"] }),
+            SECRET,
+            policy(),
+            undefined,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_DATABASE_CONFIG,
+      );
+      expect(err.message === "command must be a document for mongodb").toBe(true);
+      expect(mongoClientCalls).toHaveLength(0);
+      expect(log).toHaveBeenCalledTimes(1);
+      const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+      expect(row.success).toBe(false);
+      expect(row.detail).toStrictEqual({
+        context: "database",
+        engine: "mongodb",
+        database: "app_db",
+        error: "INVALID_DATABASE_CONFIG",
+      });
+    },
+  );
 
   it("parses username:password and pins the SSRF-validated address for mongodb too", async () => {
     const injector = new DatabaseInjector(null);

@@ -48,41 +48,25 @@ import { identityCheckerFor } from "./db-adapters.js";
  *        which — dialing an IP with no servername in the unpinned
  *        (`opts.host` itself an IP) case — would check the wrong name.
  *
- * Command-phase timeout (Task 10 carry-forward: `connectTimeoutMS`/
- * `serverSelectionTimeoutMS` bound only the connect handshake, not a
- * long-running command). mongodb@7.5.0's CSOT (`timeoutMS` — the documented
- * replacement for the legacy per-phase timeout options) is passed as a
- * *per-call* option to `db.command()`, verified end-to-end against the
- * compiled driver:
- *   - `db.js`'s `Db.command()` forwards `options.timeoutMS` into a
- *     `RunCommandOperation`; `execute_operation.js` sees a numeric
- *     `timeoutMS` and builds a `CSOTTimeoutContext` for that one operation
- *     (`timeout.js`'s `isCSOTTimeoutContextOptions`) — CSOT does not need to
- *     be enabled client-wide.
- *   - `cmap/connection.js`'s `sendWire` calls
- *     `timeoutContext.addMaxTimeMSToCommand(cmd, options)` for every
- *     outgoing command; `RunCommandOperation.buildCommand` returns the
- *     caller's document unmutated beforehand, so this CSOT injection is the
- *     ONLY thing that adds a bound to a `db.command()` call — `Db.command`'s
- *     `RunCommandOptions` has no public `maxTimeMS` field in this driver
- *     version, only `timeoutMS`. The injected `command.maxTimeMS` tells the
- *     SERVER to abort the command after that many ms.
- *   - `cmap/on_data.js`'s `onData` additionally races the socket read
- *     against `timeoutContext.timeoutForSocketRead`
- *     (`CSOTTimeoutContext.timeoutForSocketRead`, `timeout.js`) — a
- *     CLIENT-side deadline that rejects the pending read once the same
- *     budget elapses even if the server never responds at all (network
- *     partition, or a server that ignores `maxTimeMS`). This is the backstop
- *     an unbounded `$where` loop or a non-cooperative server needs so
- *     `finally`/`client.close()` below is always reached.
- * `socketTimeoutMS` is set alongside as a connection-level idle-read bound
- * for phases CSOT does not cover (the initial handshake, before any
- * operation-scoped `timeoutContext` exists) — defense in depth, mirroring
- * `RedisAdapter`'s `connectTimeout`/`socketTimeout` pair.
+ * Command-phase bound. `connectTimeoutMS`/`serverSelectionTimeoutMS` bound
+ * only the connect; mongodb 7.8 made the per-call `timeoutMS` (CSOT) a no-op,
+ * so the budget is applied here twice, as the pg adapter applies
+ * `statement_timeout` and `query_timeout`:
+ *   - server side, `maxTimeMS` on a copy of the command document — a caller's
+ *     own value is kept only when it is a positive integer below the budget —
+ *     so the server aborts the command at the budget (`MaxTimeMSExpired`);
+ *   - client side, a deadline at the budget that aborts the command's `signal`
+ *     and ends the call even if the driver never settles it. The abort reason
+ *     is a `MongoNetworkError`, built before the deadline is armed: a network
+ *     error makes the driver mark the server Unknown, so `close()` finds no
+ *     selectable server for `endSessions`; with any other reason it sends
+ *     `endSessions` over a new connection, which waits seconds on a server that
+ *     stopped answering.
+ * `socketTimeoutMS` stays the connection-level idle-read bound.
  */
 export class MongoAdapter implements DbCommandAdapter {
   async execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult> {
-    const { MongoClient } = await import("mongodb");
+    const { MongoClient, MongoNetworkError } = await import("mongodb");
 
     // SNI (and the driver's own servername auto-default) forbids an
     // IP-literal servername — supply `database.servername` when configured,
@@ -115,12 +99,29 @@ export class MongoAdapter implements DbCommandAdapter {
     });
 
     await client.connect();
+    const abort = new AbortController();
+    let deadline: NodeJS.Timeout | undefined;
     try {
-      const response = await client
-        .db(opts.database)
-        .command(command as Record<string, unknown>, { timeoutMS: opts.timeoutMs });
+      const reason = new MongoNetworkError(
+        `command did not complete within ${String(opts.timeoutMs)} ms`,
+      );
+      const expired = new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => {
+          abort.abort(reason);
+          reject(reason);
+        }, opts.timeoutMs);
+      });
+      const response = await Promise.race([
+        client
+          .db(opts.database)
+          .command(withMaxTimeMS(command as Record<string, unknown>, opts.timeoutMs), {
+            signal: abort.signal,
+          }),
+        expired,
+      ]);
       return normalizeMongoResult(response as Record<string, unknown>);
     } finally {
+      clearTimeout(deadline);
       try {
         await client.close();
       } catch {
@@ -128,6 +129,15 @@ export class MongoAdapter implements DbCommandAdapter {
       }
     }
   }
+}
+
+function withMaxTimeMS(
+  command: Record<string, unknown>,
+  budgetMs: number,
+): Record<string, unknown> {
+  const own = command.maxTimeMS;
+  const keep = typeof own === "number" && Number.isInteger(own) && own > 0 && own < budgetMs;
+  return { ...command, maxTimeMS: keep ? own : budgetMs };
 }
 
 /**

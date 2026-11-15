@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MongoNetworkError } from "mongodb";
 import type { DbConnectOptions } from "./db-adapters.js";
 import { MongoAdapter } from "./mongo-adapter.js";
 
@@ -10,9 +11,14 @@ import { MongoAdapter } from "./mongo-adapter.js";
 // that records the constructor's `(uri, options)` and the `db().command()`
 // call is therefore enough to assert on the exact wire shape without a live
 // server, mirroring RedisAdapter's test strategy.
+interface FakeCommandOptions {
+  signal?: AbortSignal;
+  timeoutMS?: number;
+}
+
 interface FakeCommandCall {
   command: unknown;
-  options: { timeoutMS?: number } | undefined;
+  options: FakeCommandOptions | undefined;
 }
 
 interface FakeBehavior {
@@ -20,6 +26,10 @@ interface FakeBehavior {
   closeError?: Error;
   commandResult?: unknown;
   commandError?: Error;
+  /** The command settles only when its `signal` aborts, as the driver's does. */
+  commandHangs?: boolean;
+  commandSettlesWith?: Promise<unknown>;
+  reasonConstructorThrows?: boolean;
 }
 
 const mongoClientCalls: { uri: string; options: MongoClientOptionsShape }[] = [];
@@ -27,6 +37,7 @@ const dbCalls: string[] = [];
 const commandCalls: FakeCommandCall[] = [];
 let closeCallCount = 0;
 let behavior: FakeBehavior = {};
+let commandIssued: () => void = () => undefined;
 
 interface MongoClientOptionsShape {
   directConnection?: boolean;
@@ -44,6 +55,13 @@ interface MongoClientOptionsShape {
 }
 
 vi.mock("mongodb", () => {
+  class MongoNetworkError extends Error {
+    constructor(message: string) {
+      if (behavior.reasonConstructorThrows) throw new TypeError("driver constructor changed");
+      super(message);
+      this.name = "MongoNetworkError";
+    }
+  }
   class MongoClient {
     constructor(uri: string, options: MongoClientOptionsShape) {
       mongoClientCalls.push({ uri, options });
@@ -56,20 +74,46 @@ vi.mock("mongodb", () => {
       return behavior.closeError ? Promise.reject(behavior.closeError) : Promise.resolve(undefined);
     }
     db(name: string): {
-      command: (command: unknown, options?: { timeoutMS?: number }) => Promise<unknown>;
+      command: (command: unknown, options?: FakeCommandOptions) => Promise<unknown>;
     } {
       dbCalls.push(name);
       return {
-        command: (command: unknown, options?: { timeoutMS?: number }) => {
+        command: (command: unknown, options?: FakeCommandOptions) => {
           commandCalls.push({ command, options });
+          commandIssued();
+          if (behavior.commandHangs) {
+            return new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                "abort",
+                () => {
+                  reject(options.signal?.reason as Error);
+                },
+                { once: true },
+              );
+            });
+          }
+          if (behavior.commandSettlesWith) return behavior.commandSettlesWith;
           if (behavior.commandError) return Promise.reject(behavior.commandError);
           return Promise.resolve(behavior.commandResult ?? { ok: 1 });
         },
       };
     }
   }
-  return { MongoClient };
+  return { MongoClient, MongoNetworkError };
 });
+
+/** Runs every queued microtask: a real `setImmediate` (only the adapter's `setTimeout` is faked). */
+function flushed(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+function nextCommand(): Promise<void> {
+  return new Promise((resolve) => {
+    commandIssued = resolve;
+  });
+}
 
 function opts(overrides: Partial<DbConnectOptions> = {}): DbConnectOptions {
   return {
@@ -91,6 +135,11 @@ beforeEach(() => {
   commandCalls.length = 0;
   closeCallCount = 0;
   behavior = {};
+  commandIssued = () => undefined;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("MongoAdapter connection config (SSRF pinning, spec §10.7)", () => {
@@ -187,21 +236,9 @@ describe("MongoAdapter timeouts (Task 10 carry-forward: bound the command, not j
     expect(mongoClientCalls[0]?.options.socketTimeoutMS).toBe(4242);
   });
 
-  // The load-bearing bound: mongodb@7.5.0's Db.command() has no public
-  // `maxTimeMS` option — verified against the installed RunCommandOptions
-  // type — only `timeoutMS` (CSOT), which both auto-injects `maxTimeMS` into
-  // the outgoing command AND arms a client-side read deadline
-  // (`timeoutForSocketRead`) independent of socket idle time. A long-running
-  // command (an unindexed scan, a `$where` loop) must be bounded by this,
-  // not just the connect-phase timeouts above.
-  it("bounds the command phase by passing timeoutMS to db.command(), not just connect", async () => {
-    await new MongoAdapter().execute(opts({ timeoutMs: 777 }), { count: "c" });
-    expect(commandCalls[0]?.options?.timeoutMS).toBe(777);
-  });
-
   it("still closes the client when the command call rejects (command-phase timeout surfaces as a rejection)", async () => {
     const timeoutError = new Error("operation exceeded time limit");
-    timeoutError.name = "MongoOperationTimeoutError";
+    timeoutError.name = "MongoServerError";
     behavior.commandError = timeoutError;
     await expect(
       new MongoAdapter().execute(opts({ timeoutMs: 50 }), { count: "c" }),
@@ -210,11 +247,133 @@ describe("MongoAdapter timeouts (Task 10 carry-forward: bound the command, not j
   });
 });
 
+describe("MongoAdapter command-phase bound (mongodb 7.8+ ignores timeoutMS)", () => {
+  it("sends a copy of the command document carrying the budget as maxTimeMS, the caller's object untouched", async () => {
+    const document = { count: "c" };
+    await new MongoAdapter().execute(opts({ timeoutMs: 777 }), document);
+    const sent = commandCalls[0]?.command as Record<string, unknown>;
+    expect(sent).toEqual({ count: "c", maxTimeMS: 777 });
+    expect(Object.keys(sent)[0]).toBe("count");
+    expect(sent).not.toBe(document);
+    expect(document).toEqual({ count: "c" });
+  });
+
+  it("replaces a caller's maxTimeMS at or above the budget, zero, negative or not an integer with the budget", async () => {
+    for (const own of [777, 5000, 0, -1, 1.5, "100"]) {
+      commandCalls.length = 0;
+      await new MongoAdapter().execute(opts({ timeoutMs: 777 }), { count: "c", maxTimeMS: own });
+      expect(commandCalls[0]?.command).toEqual({ count: "c", maxTimeMS: 777 });
+    }
+  });
+
+  it("keeps a caller's own maxTimeMS below the budget, on a copy", async () => {
+    const document = { count: "c", maxTimeMS: 100 };
+    await new MongoAdapter().execute(opts({ timeoutMs: 777 }), document);
+    expect(commandCalls[0]?.command).toEqual({ count: "c", maxTimeMS: 100 });
+    expect(commandCalls[0]?.command).not.toBe(document);
+  });
+
+  it("no longer passes the deprecated timeoutMS to db.command()", async () => {
+    await new MongoAdapter().execute(opts({ timeoutMs: 777 }), { count: "c" });
+    expect(commandCalls[0]?.options).not.toHaveProperty("timeoutMS");
+  });
+
+  it("a command that never settles ends at the budget: aborted with a network-class reason, the client closed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.commandHangs = true;
+    const issued = nextCommand();
+    let outcome: unknown = "pending";
+    void new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { find: "c" }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(outcome).toBe("pending");
+    expect(closeCallCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(outcome).toBeInstanceOf(MongoNetworkError);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+    const signal = commandCalls[0]?.options?.signal;
+    expect(signal?.aborted).toBe(true);
+    expect(signal?.reason).toBe(outcome);
+    expect(closeCallCount).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a command that never settles even after the abort still ends at the budget, the client closed once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.commandSettlesWith = new Promise(() => undefined);
+    const issued = nextCommand();
+    let outcome: unknown = "pending";
+    void new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { find: "c" }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(outcome).toBeInstanceOf(MongoNetworkError);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+    expect(closeCallCount).toBe(1);
+  });
+
+  it("a throwing abort-reason constructor fails the one call before any deadline is armed, the client closed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.reasonConstructorThrows = true;
+    await expect(
+      new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { ping: 1 }),
+    ).rejects.toThrow("driver constructor changed");
+    expect(commandCalls).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(closeCallCount).toBe(1);
+  });
+
+  it("the abort reason is the driver's own network error class, not its timeout subclass (the real module)", async () => {
+    const real = await vi.importActual<typeof import("mongodb")>("mongodb");
+    const reason = new real.MongoNetworkError("command did not complete within 1500 ms");
+    expect(reason).toBeInstanceOf(real.MongoError);
+    expect(reason).toBeInstanceOf(real.MongoNetworkError);
+    expect(reason instanceof real.MongoNetworkTimeoutError).toBe(false);
+    expect(reason.name).toBe("MongoNetworkError");
+    expect(reason.message).toBe("command did not complete within 1500 ms");
+  });
+
+  it("arms one deadline while the command runs and leaves none behind when it settles in time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let settle: (value: unknown) => void = () => undefined;
+    behavior.commandSettlesWith = new Promise((resolve) => {
+      settle = resolve;
+    });
+    const issued = nextCommand();
+    const run = new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { ping: 1 });
+    await issued;
+    expect(vi.getTimerCount()).toBe(1);
+    settle({ ok: 1 });
+    await run;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(closeCallCount).toBe(1);
+  });
+});
+
 describe("MongoAdapter command execution + result normalization (spec §10.7)", () => {
   it("runs the command document via db.command() on the named database", async () => {
     await new MongoAdapter().execute(opts({ database: "app_db" }), { ping: 1 });
     expect(dbCalls).toEqual(["app_db"]);
-    expect(commandCalls[0]?.command).toEqual({ ping: 1 });
+    expect(commandCalls[0]?.command).toEqual({ ping: 1, maxTimeMS: 1000 });
   });
 
   it("normalizes a cursor-shaped response to its firstBatch", async () => {

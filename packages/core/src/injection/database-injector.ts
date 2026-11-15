@@ -93,6 +93,9 @@ export class DatabaseInjector {
 
     let target: { host: string; port: number };
     try {
+      if (action.engine === DatabaseEngine.MONGODB && !isDocument(action.command)) {
+        throw VaultError.invalidDatabaseConfig("command must be a document for mongodb");
+      }
       const hostField: unknown = action.host;
       if (typeof hostField !== "string") {
         throw VaultError.invalidDatabaseConfig("host must be a string");
@@ -313,6 +316,12 @@ const COMMAND_ENGINES: readonly DatabaseEngine[] = [DatabaseEngine.REDIS, Databa
 
 function isCommandEngine(engine: DatabaseEngine): engine is DbCommandEngine {
   return COMMAND_ENGINES.includes(engine);
+}
+
+function isDocument(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */

@@ -25,11 +25,11 @@
     "@modelcontextprotocol/client": "^2.3.0",
     "argon2": "^0.45.1",
     "better-sqlite3": "^13.0.3",
-    "mongodb": "^7.5.0",
+    "mongodb": "^7.9.0",
     "mysql2": "^3.23.1",
     "pg": "^8.22.0",
     "redis": "^6.2.1",
-    "undici": "^8.11.2"
+    "undici": "^8.12.4"
   },
   "devDependencies": {
     "@harpoc/test-utils": "workspace:*",
