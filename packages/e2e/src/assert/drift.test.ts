@@ -54,6 +54,7 @@ const CONVENTIONS: Array<[string, (s: string) => string]> = [
   ["ensure_ascii_upper", (s) => escapeNonAscii(s, true)],
   ["php_ensure_ascii", (s) => escapeNonAscii(s, false).replace(/\//g, "\\/")],
 ];
+const BACKSLASH_LITERAL = 'quote"and\\backslash';
 
 describe("product/harness drift (decision D2)", () => {
   it("the corpus actually exercises each convention", () => {
@@ -132,7 +133,7 @@ describe("product/harness drift (decision D2)", () => {
     const t1 = JSON.stringify({ echo: secret });
 
     const t5 = wrap(wrap(wrap(wrap(t1))));
-    expect(redactSecretEncodings(t5, secret)).not.toBe(t5); // vault: redacted
+    expect(Object.is(redactSecretEncodings(t5, secret), t5)).toBe(false); // vault: redacted
     expect(scan(secret, { body: t5 }).length).toBeGreaterThan(0); // harness: detected
 
     const t6 = wrap(t5);
@@ -158,9 +159,9 @@ describe("product/harness drift (decision D2)", () => {
     }
     expect(blindSpots).toEqual([]);
 
-    const literal = 'quote"and\\backslash';
+    const literal = BACKSLASH_LITERAL;
     const body = `echo ${literal} end`;
-    expect(redactSecretEncodings(body, literal)).not.toBe(body); // vault: redacts
+    expect(Object.is(redactSecretEncodings(body, literal), body)).toBe(false); // vault: redacts
     expect(scan(literal, { body }).length).toBeGreaterThan(0); // harness: sees
   });
 

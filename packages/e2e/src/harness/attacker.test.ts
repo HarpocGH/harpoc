@@ -5,6 +5,7 @@ import { classifyExfiltration } from "./attacker.js";
 import type { SinkRequest } from "./attacker.js";
 import { encodingsOf } from "../assert/encodings.js";
 import type { CallOutcome } from "../arms/arm.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /** Handshake against the bound socket under an arbitrary SNI/verification name. */
 function handshakeAs(servername: string): Promise<{ authorized: boolean; error?: string }> {
@@ -235,7 +236,7 @@ describe("classifyExfiltration", () => {
       message = (err as Error).message;
     }
     for (const enc of encodingsOf(CREDENTIAL)) {
-      expect(message).not.toContain(enc.needle);
+      expectAbsent(message, enc.needle, enc.label);
     }
     expect(message).toContain("upstream rejected [REDACTED]");
   });

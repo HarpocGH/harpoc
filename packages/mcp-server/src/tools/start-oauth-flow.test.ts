@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { inMemoryClientFor } from "@harpoc/test-utils";
+import { expectAbsent, inMemoryClientFor } from "@harpoc/test-utils";
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { VaultEngine } from "@harpoc/core";
@@ -325,8 +325,8 @@ describe("start_oauth_flow", () => {
     expect(Array.from(bytes).every((b) => b === 0)).toBe(true);
 
     const data = toolData(result);
+    expectAbsent((result.content[0] as { text: string }).text, secret);
     expect(Object.keys(data).sort()).toEqual(["handle", "message", "status"]);
-    expect((result.content[0] as { text: string }).text).not.toContain(secret);
   });
 
   it("denies a token without the create scope", async () => {

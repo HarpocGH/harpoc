@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, DatabaseAction } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { DatabaseInjector } from "./database-injector.js";
 import {
   MockAdapter,
@@ -61,6 +61,7 @@ beforeEach(() => {
 });
 
 const pgClientConfigsForLazyPin: unknown[] = [];
+const DB_PASSWORD = "s3cr3t";
 vi.mock("pg", () => ({
   default: {
     Client: class {
@@ -188,7 +189,7 @@ describe("DatabaseInjector redis dispatch", () => {
       () => injectorWithRedis(cmd).executeWithSecret(redisAction(), SECRET, policy(), undefined),
       ErrorCode.DB_QUERY_FAILED,
     );
-    expect(err.message).not.toContain("s3cr3t");
+    expectAbsent(err.message, DB_PASSWORD);
   });
 
   it("rejects an engine with no command adapter configured on this injector instance", async () => {

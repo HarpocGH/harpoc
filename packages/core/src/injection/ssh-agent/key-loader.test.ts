@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { loadPrivateKey } from "./key-loader.js";
 import { SshReader } from "./ssh-wire.js";
@@ -27,6 +27,7 @@ function ecInnerToP1363(inner: Buffer, size: number): Buffer {
 }
 
 const CHALLENGE = Buffer.from("harpoc agent challenge bytes");
+const STORED_PASSPHRASE = "some-passphrase";
 
 describe("loadPrivateKey — OpenSSH container format", () => {
   it("loads ed25519, derives the public blob, and signs verifiably", () => {
@@ -124,9 +125,9 @@ describe("loadPrivateKey — rejections (no secret material in messages)", () =>
       () => loadPrivateKey(privateKey as string),
       ErrorCode.SSH_AGENT_FAILED,
     );
+    expectAbsent(err.message, STORED_PASSPHRASE);
     expect(err.message).toContain("stored key is encrypted");
     expect(err.message).toContain("secret set --from-file");
-    expect(err.message).not.toContain("some-passphrase");
   });
 
   it("rejects garbage input", async () => {

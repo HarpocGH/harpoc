@@ -18,7 +18,7 @@ import type {
   WebsocketResult,
 } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { ImapRunner, SmtpRunner } from "./vault-engine.js";
 import type { AuditLogger } from "./audit/audit-logger.js";
@@ -346,6 +346,7 @@ const WS_ACTION: WebsocketAction = {
   injection: { type: "bearer" },
   message: "ping",
 };
+const ACCESS_TOKEN_PREFIX = "ya29.";
 
 // ---------------------------------------------------------------------------
 // SMTP
@@ -895,8 +896,8 @@ describe("useSecret (imap) — an OAuth-type secret is refused (no XOAUTH2 accou
     );
 
     expect(calls.imap).toHaveLength(0);
+    expectAbsent(err.message, ACCESS_TOKEN_PREFIX);
     expect(err.message).toContain("XOAUTH2");
-    expect(err.message).not.toContain("ya29.");
   });
 
   it("audits the refusal as a failed secret.use row", async () => {
@@ -2521,9 +2522,9 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
         ErrorCode.GIT_OPERATION_FAILED,
       );
 
+      expectAbsent(err.message, VALUE, "the error message");
+      expectAbsent(JSON.stringify(err.details ?? {}), VALUE, "the details");
       expect(err.message).toContain("[REDACTED]");
-      expect(err.message).not.toContain(VALUE);
-      expect(JSON.stringify(err.details ?? {})).not.toContain(VALUE);
       expect(useRows(false)).toHaveLength(failedRows);
     },
   );
@@ -2546,7 +2547,7 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
       ErrorCode.INTERNAL_ERROR,
     );
 
-    expect(err.message).not.toContain(VALUE);
+    expectAbsent(err.message, VALUE);
 
     const failed = useRows(false);
     expect(failed).toHaveLength(1);

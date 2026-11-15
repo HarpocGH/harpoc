@@ -9,6 +9,9 @@ import { VaultEngine } from "@harpoc/core";
 import { CertManager } from "../cert-manager.js";
 import { startAcmeDouble } from "../__fixtures__/acme-double.js";
 import type { AcmeDouble } from "../__fixtures__/acme-double.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const PEM_ARMOR = "PRIVATE KEY";
 
 vi.mock("argon2", () => ({
   hash: async (password: Buffer | string, opts: { salt: Buffer | Uint8Array }) => {
@@ -105,12 +108,12 @@ describe("CertManager against a local ACME CA double (M-P3-5)", () => {
     // request carries a PEM private key, and the one JWK sent (newAccount's
     // account key) carries no private `d` member.
     expect(spkiOf(leaf.toString())).toEqual(double.csrPublicKeys[0]);
-    expect(JSON.stringify(double.requests)).not.toContain("PRIVATE KEY");
+    expectAbsent(JSON.stringify(double.requests), PEM_ARMOR);
     const jwks = double.requests
       .map((r) => r.protectedHeader?.jwk)
       .filter((jwk) => jwk !== undefined);
+    expect("d" in (jwks[0] as object)).toBe(false);
     expect(jwks).toHaveLength(1);
-    expect(jwks[0]).not.toHaveProperty("d");
 
     const rows = engine.queryAudit({
       secretId: issued.secretId,

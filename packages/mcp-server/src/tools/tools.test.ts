@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import {
   connectInMemoryClient,
   connectModernInMemoryClient,
+  expectAbsent,
   inMemoryClientFor,
 } from "@harpoc/test-utils";
 import type { InMemoryToolDescriptor } from "@harpoc/test-utils";
@@ -143,6 +144,7 @@ function recordEngineArgs(engine: VaultEngine): string[] {
 }
 
 const servers: McpServer[] = [];
+const JWT_PREFIX = "eyJhbG";
 
 /** A per-test server, closed (with its in-memory client) after the test. */
 function track(server: McpServer): McpServer {
@@ -190,6 +192,7 @@ describe("MCP Tools", () => {
       const result = await callTool(server, "list_secrets", {});
       const text = getToolText(result);
       const data = JSON.parse(text) as Record<string, unknown>[];
+      expectAbsent(text, SENTINEL);
       expect(data).toHaveLength(2);
       for (const row of data) {
         expect(Object.keys(row).sort()).toEqual([
@@ -204,7 +207,6 @@ describe("MCP Tools", () => {
           "version",
         ]);
       }
-      expect(text).not.toContain(SENTINEL);
     });
 
     it("filters by project", async () => {
@@ -248,6 +250,7 @@ describe("MCP Tools", () => {
     it("never includes secret value — exactly the ten metadata keys", async () => {
       const result = await callTool(server, "get_secret_info", { handle: "secret://my-key" });
       const text = getToolText(result);
+      expectAbsent(text, SENTINEL);
       expect(Object.keys(JSON.parse(text) as Record<string, unknown>).sort()).toEqual([
         "created_at",
         "expires_at",
@@ -260,7 +263,6 @@ describe("MCP Tools", () => {
         "updated_at",
         "version",
       ]);
-      expect(text).not.toContain(SENTINEL);
     });
   });
 
@@ -317,8 +319,8 @@ describe("MCP Tools", () => {
         },
       });
       const data = JSON.parse(getToolText(result));
+      expectAbsent(data.body, JWT_PREFIX);
       expect(data.body).toContain("[REDACTED]");
-      expect(data.body).not.toContain("eyJhbG");
     });
 
     it("sanitizes credential patterns in process output", async () => {
@@ -334,8 +336,8 @@ describe("MCP Tools", () => {
         action: { type: "process", command: "gh", args: ["api"], env_var: "GH_TOKEN" },
       });
       const data = JSON.parse(getToolText(result));
+      expectAbsent(data.stdout, JWT_PREFIX);
       expect(data.stdout).toContain("[REDACTED]");
-      expect(data.stdout).not.toContain("eyJhbG");
     });
 
     it("passes the action to engine.useSecret", async () => {
@@ -478,10 +480,10 @@ describe("MCP Tools", () => {
         action: { type: "mcp", server: "github-mcp", tool: "leaky" },
       });
       const data = JSON.parse(getToolText(result));
+      expectAbsent(data.content[0].text, JWT_PREFIX, "the content text");
       expect(data.content[0].text).toContain("[REDACTED]");
-      expect(data.content[0].text).not.toContain("eyJhbG");
+      expectAbsent(data.structured_content.note, JWT_PREFIX, "the structured content note");
       expect(data.structured_content.note).toContain("[REDACTED]");
-      expect(data.structured_content.note).not.toContain("eyJhbG");
     });
 
     // v1.3: `action: useSecretActionSchema.describe(...)` IS the shared
@@ -701,8 +703,8 @@ describe("MCP Tools", () => {
         },
       });
       const data = JSON.parse(getToolText(result));
+      expectAbsent(data.messages[0], JWT_PREFIX);
       expect(data.messages[0]).toContain("[REDACTED]");
-      expect(data.messages[0]).not.toContain("eyJhbG");
     });
 
     // I13 (test-review-2026-10-09): a valid action per v1.3 context reaches the
@@ -727,9 +729,9 @@ describe("MCP Tools", () => {
         expect(sent).toStrictEqual(action);
         expect(caller).toMatchObject({ principal_id: "tokenless-stdio" });
         const text = getToolText(result);
-        expect(text).not.toContain("eyJhbG");
+        expectAbsent(text, JWT_PREFIX);
         const data = JSON.parse(text) as Record<string, unknown>;
-        expect(data).not.toHaveProperty("value");
+        expect("value" in (data as object)).toBe(false);
         return data;
       }
 
@@ -1062,7 +1064,7 @@ describe("MCP Tools", () => {
         value: SENTINEL,
       });
 
-      expect(sent.join("\n")).not.toContain(SENTINEL);
+      expectAbsent(sent.join("\n"), SENTINEL);
       expect(engine.createSecret).toHaveBeenCalledTimes(1);
     });
 
@@ -1331,7 +1333,7 @@ describe("MCP Tools", () => {
       const sent = recordEngineArgs(engine);
       await callTool(server, "rotate_secret", { handle: "secret://my-key", value: SENTINEL });
 
-      expect(sent.join("\n")).not.toContain(SENTINEL);
+      expectAbsent(sent.join("\n"), SENTINEL);
       expect(engine.assertRotateAllowed).toHaveBeenCalledTimes(1);
     });
   });

@@ -9,7 +9,7 @@ import { findPlaceholder } from "./placeholder.js";
 import type { Placement } from "./placeholder.js";
 import { swapCredential } from "./swap.js";
 import type { SwapResult } from "./swap.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const VALUE = "ghp_S3cr3tValue-xyz";
 const ENCODED_VALUE = "a b+/=~é";
@@ -33,6 +33,7 @@ const PLACEMENTS: [string, IncomingHttpHeaders, string][] = [
   ["header", { "x-api-key": "harpoc://api/gh-pat" }, ""],
   ["query", {}, "?page=2&api_key=harpoc%3Agh-pat"],
 ];
+const VALUE_BEFORE_LF = "ghp_left";
 
 describe("swapCredential — the value where the placeholder stood", () => {
   it("bearer: Authorization: Bearer <value>, every other header as sent", () => {
@@ -96,8 +97,8 @@ describe("swapCredential — the value where the placeholder stood", () => {
     (_label, headers, search) => {
       const result = swapped(headers, target(search), VALUE);
       const sent = JSON.stringify({ ...result.headers }) + result.url.href;
-      expect(sent).not.toMatch(/harpoc(:|%3A)/i);
-      expect(sent).not.toContain(b64("x-access-token:harpoc:gh-pat"));
+      expect(/harpoc(:|%3A)/i.test(sent)).toBe(false);
+      expect(sent.includes(b64("x-access-token:harpoc:gh-pat"))).toBe(false);
     },
   );
 
@@ -256,8 +257,8 @@ describe("swapCredential — refusals never carry the value", () => {
       () => swapped({ "x-api-key": "harpoc:k" }, target(), "ghp_left\nright"),
       ErrorCode.INVALID_INJECTION_CONFIG,
     );
+    expectAbsent(err.message, VALUE_BEFORE_LF);
     expect(err.message).toBe(MESSAGE);
-    expect(err.message).not.toContain("ghp_left");
   });
 
   it("basic_auth and query carry such a value encoded (control)", () => {
@@ -277,7 +278,7 @@ describe("swapCredential — refusals never carry the value", () => {
         ),
       ErrorCode.INVALID_INJECTION_CONFIG,
     );
+    expectAbsent(err.message, VALUE);
     expect(err.message).toBe("query parameter api_key carries no placeholder");
-    expect(err.message).not.toContain(VALUE);
   });
 });

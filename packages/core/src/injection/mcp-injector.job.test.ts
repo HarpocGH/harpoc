@@ -20,6 +20,7 @@ import { requireIsolation } from "./isolation.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
 import { wrapInJob } from "./win32-job-wrapper.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("./isolation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./isolation.js")>();
@@ -440,10 +441,10 @@ process.stderr.write("gpid=" + String(g.pid) + "\\n");
       expect(err?.message.startsWith(prefix + markerHead)).toBe(true);
       // Bounded at its one construction site: a line's worth, never 64 KiB.
       expect((err?.message.length ?? 0) - prefix.length).toBeLessThanOrEqual(512);
+      expectAbsent(err?.message, SECRET);
       expect(err?.message).not.toContain("PAST-THE-BOUND");
       // Exact-value redaction, then the guard's pattern pass — the crash row's
       // treatment, not a third variant of it.
-      expect(err?.message).not.toContain(SECRET);
       expect(err?.message).toContain("token:[REDACTED]");
     },
   );
@@ -502,14 +503,15 @@ rl.on("line", (line) => {
             (e: unknown) => e as { code: string; message: string },
           );
         expect(err?.code).toBe(ErrorCode.MCP_CONNECT_FAILED);
+        expectAbsent(err?.message, SECRET, "the error message");
         expect(err?.message).toContain("spawn failed: harpoc-job: assign to job failed: 5");
-        expect(err?.message).not.toContain(SECRET);
         expect(err?.message).toContain("token:[REDACTED]");
 
         const crash = log.mock.calls
           .map((c) => c[0] as LoggedRow)
           .find((r) => r.eventType === "mcp.crash");
         expect(crash?.success).toBe(false);
+        expectAbsent(JSON.stringify(crash?.detail), SECRET, "the crash row");
         expect(crash?.detail).toMatchObject({
           server: "test-mcp",
           transport: "stdio",
@@ -517,7 +519,6 @@ rl.on("line", (line) => {
           signal: null,
           spawn_failed: true,
         });
-        expect(JSON.stringify(crash?.detail)).not.toContain(SECRET);
         // No auto-respawn: the crashed entry is gone.
         expect(auditedRegistry.get("secret-1")).toBeUndefined();
       } finally {

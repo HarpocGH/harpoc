@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * T11 (second level): the core unit pin covers `SessionManager.eraseSession`
@@ -42,8 +43,8 @@ describe("session file secure erase (T11)", () => {
 
     const after = readFileSync(alias);
     expect(after.length).toBe(before.length);
-    expect(after.toString("utf8")).not.toContain(parsed.session_key);
-    expect(after.toString("utf8")).not.toContain(parsed.wrapped_kek);
+    expectAbsent(after.toString("utf8"), parsed.session_key);
+    expectAbsent(after.toString("utf8"), parsed.wrapped_kek);
     expect(after.equals(before)).toBe(false);
   });
 });

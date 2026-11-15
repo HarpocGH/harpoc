@@ -26,6 +26,7 @@ const endpoints = useLoopbackEndpoints(
 const makeClientCredentialsConfig = () => clientCredentialsConfig(endpoints.tokenUrl());
 const makeAuthCodeConfig = () => authCodeConfig(endpoints.tokenUrl());
 const makeDeviceCodeConfig = () => deviceCodeConfig(endpoints.tokenUrl(), endpoints.deviceUrl());
+const SUPERSEDED_TOKEN = "old-flow-token";
 
 beforeEach(() => {
   tokenHandler = defaultTokenHandler;
@@ -195,7 +196,7 @@ describe("OAuthManager.startAuthorizationCodeDeferred", () => {
 
       await expect(first).rejects.toMatchObject({ code: ErrorCode.OAUTH_FLOW_FAILED });
       expect(fake.completeOAuthFlow).toHaveBeenCalledTimes(1);
-      expect(fake.completeOAuthFlow.mock.calls[0]?.[1]).not.toBe("old-flow-token");
+      expect(Object.is(fake.completeOAuthFlow.mock.calls[0]?.[1], SUPERSEDED_TOKEN)).toBe(false);
     } finally {
       releaseExchange();
       held.closeAllConnections();

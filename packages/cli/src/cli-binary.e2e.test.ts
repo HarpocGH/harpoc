@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { auditChainAnchorSchema, VAULT_DB_NAME } from "@harpoc/shared";
 import { SqliteStore } from "@harpoc/core";
 import type { AuditChainAnchor } from "@harpoc/shared";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 const MASTER_PASSWORD = "smoke-master-pw-1";
@@ -29,6 +30,7 @@ interface CliResult {
 
 const CHILD_TIMEOUT_MS = 25_000;
 const KILL_GRACE_MS = 2_000;
+const TARGET_VALUE = "value-123";
 
 interface SpawnOptions {
   stdin?: string;
@@ -280,7 +282,7 @@ describe("compiled binary smoke: oauth connect (client_credentials)", () => {
 
   it("the client secret never appears in any stdout/stderr", () => {
     for (const output of capturedOutputs) {
-      expect(output).not.toContain(CLIENT_SECRET);
+      expectAbsent(output, CLIENT_SECRET);
     }
     expect(capturedOutputs.length).toBeGreaterThan(0);
   });
@@ -983,7 +985,7 @@ describe("compiled binary smoke: token-scoped credential commands", () => {
     ]);
     expect(denied.code).toBe(1);
     expect(denied.stderr).toContain("Token lacks permission");
-    expect(denied.stdout).not.toContain("value-123");
+    expectAbsent(denied.stdout, TARGET_VALUE);
   }, 60_000);
 });
 

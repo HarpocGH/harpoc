@@ -18,7 +18,7 @@ import { startFakeImap } from "./helpers/fake-imap-server.js";
 import type { FakeImap } from "./helpers/fake-imap-server.js";
 import { startFakeWsServer } from "./helpers/fake-ws-server.js";
 import type { FakeWsServer } from "./helpers/fake-ws-server.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -314,6 +314,7 @@ describe("use_secret through REST and MCP Streamable HTTP — the v1.3 contexts 
         const rendered = via === "rest" ? await viaRest(name, action) : await viaMcp(name, action);
 
         const outcome = cell.outcome;
+        expectAbsent(rendered.text, credential.split(":").at(-1) as string);
         if ("result" in outcome) {
           expect(rendered.refused, rendered.text).toBe(false);
           const payload = JSON.parse(rendered.text) as { data?: unknown };
@@ -329,7 +330,6 @@ describe("use_secret through REST and MCP Streamable HTTP — the v1.3 contexts 
           expect(rendered.refused).toBe(true);
           expect(rendered.text).toBe(outcome.message);
         }
-        expect(rendered.text).not.toContain(credential.split(":").at(-1) as string);
 
         const secretId = await vault.engine.resolveSecretId(`secret://${name}`);
         const rows = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });

@@ -9,11 +9,15 @@ import { AuditEventType, ErrorCode, PrincipalType } from "@harpoc/shared";
 import type { CallerContext, OAuthProviderConfig, Permission } from "@harpoc/shared";
 import {
   dropOAuthAuthMethodConstraint,
+  expectAbsent,
   expectVaultError,
   sqliteErrorCode,
 } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
+
+const BEARER_ACCESS_TOKEN = "bearer-token-value";
+const REFRESHED_ACCESS_TOKEN = "refreshed-access-token";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -1071,6 +1075,7 @@ describe("useSecret with OAuth", () => {
     expect(response.status).toBe(200);
     // Token is correctly redacted from response (server echoes Authorization header)
     const body = JSON.parse(response.body ?? "{}");
+    expectAbsent(body.authorization, BEARER_ACCESS_TOKEN);
     expect(body.authorization).toBe("Bearer [REDACTED]");
   });
 
@@ -1147,6 +1152,7 @@ describe("useSecret with OAuth", () => {
     expect(response.status).toBe(200);
     // Refreshed token is used and redacted from response
     const body = JSON.parse(response.body ?? "{}");
+    expectAbsent(body.authorization, REFRESHED_ACCESS_TOKEN);
     expect(body.authorization).toBe("Bearer [REDACTED]");
 
     // Verify the refresh actually happened by checking the stored token

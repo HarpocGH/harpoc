@@ -9,6 +9,7 @@ import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared
 import { ErrorCode } from "@harpoc/shared";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * T4: the MCP injector's three error-channel redaction sites had no test —
@@ -113,18 +114,18 @@ async function failure(config: McpServerConfig, tool: string): Promise<Error> {
 }
 
 function expectNoCredential(message: string): void {
-  expect(message).not.toContain(SECRET);
-  expect(message).not.toContain(B64);
-  expect(message).not.toContain(HEX);
-  expect(message).not.toContain(HEX.toUpperCase());
+  expectAbsent(message, SECRET);
+  expectAbsent(message, B64);
+  expectAbsent(message, HEX);
+  expectAbsent(message, HEX.toUpperCase());
 }
 
 describe("McpInjector — the error channel never carries the credential (T4)", () => {
   it("redacts a credential reflected into a tools/call JSON-RPC error", async () => {
     const err = await failure(stdioConfig("tools/call"), "anything");
 
-    expect(err).toMatchObject({ code: ErrorCode.MCP_PROTOCOL_ERROR });
     expectNoCredential(err.message);
+    expect(err).toMatchObject({ code: ErrorCode.MCP_PROTOCOL_ERROR });
     // The detail still reaches the caller — the guard redacts, it does not mute.
     expect(err.message).toContain("downstream rejected");
   });
@@ -132,8 +133,8 @@ describe("McpInjector — the error channel never carries the credential (T4)", 
   it("redacts a credential reflected into an initialize failure", async () => {
     const err = await failure(stdioConfig("initialize"), "anything");
 
-    expect(err).toMatchObject({ code: ErrorCode.MCP_CONNECT_FAILED });
     expectNoCredential(err.message);
+    expect(err).toMatchObject({ code: ErrorCode.MCP_CONNECT_FAILED });
     expect(err.message).toContain("downstream rejected");
   });
 
@@ -217,8 +218,8 @@ describe("McpInjector — HTTP transport error channel (T4)", () => {
       "echo",
     );
 
-    expect(err).toMatchObject({ code: ErrorCode.MCP_PROTOCOL_ERROR });
     expectNoCredential(err.message);
+    expect(err).toMatchObject({ code: ErrorCode.MCP_PROTOCOL_ERROR });
     expect(err.message).toContain("upstream rejected");
   });
 });

@@ -13,7 +13,7 @@ import type { TestServer } from "./helpers/rest-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -133,6 +133,7 @@ describe("REST background authorization-code flow", () => {
     const body = JSON.parse(raw) as {
       data: { handle: string; status: string; auth_url: string; message: string };
     };
+    expectAbsent(raw, CLIENT_SECRET);
     expect(body.data.handle).toBe(`secret://${OK_NAME}`);
     expect(body.data.status).toBe("pending_authorization");
     expect(body.data.message).toContain("auth_url");
@@ -141,7 +142,6 @@ describe("REST background authorization-code flow", () => {
     // The internal secretId and the background `completion` promise stay off the
     // wire (D2) — the response is exactly these four fields.
     expect(Object.keys(body.data).sort()).toEqual(["auth_url", "handle", "message", "status"]);
-    expect(raw).not.toContain(CLIENT_SECRET);
 
     // The start resolved before any redirect, so nothing has been exchanged yet.
     expect(mock.requests).toHaveLength(0);
@@ -189,8 +189,8 @@ describe("REST background authorization-code flow", () => {
     expect(status.data.has_refresh_token).toBe(true);
     expect(status.data.refresh_status).toBe("ok");
     expect(status.data.access_token_expires_at).toBeGreaterThan(Date.now());
-    expect(statusRaw).not.toContain(ACCESS_TOKEN);
-    expect(statusRaw).not.toContain(REFRESH_TOKEN);
+    expectAbsent(statusRaw, ACCESS_TOKEN, "the status response");
+    expectAbsent(statusRaw, REFRESH_TOKEN, "the status response");
 
     // Exactly one exchange reached the provider, carrying the redirect's code and
     // the verifier whose S256 hash is the challenge the auth URL advertised —
@@ -207,7 +207,7 @@ describe("REST background authorization-code flow", () => {
     const codeVerifier = exchange.code_verifier as string;
     expect(codeVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(createHash("sha256").update(codeVerifier).digest("base64url")).toBe(okCodeChallenge);
-    expect(okAuthUrl).not.toContain(codeVerifier);
+    expectAbsent(okAuthUrl, codeVerifier, "the auth URL");
   });
 
   it("4. an unfetched callback leaves the secret pending, and a re-POST resumes the same handle", async () => {

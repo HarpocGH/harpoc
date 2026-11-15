@@ -48,14 +48,14 @@ describe("harness machinery, proven against the process context", () => {
     const auditRows = vault.engine.queryAudit({ eventType: "secret.use" });
     const observation = { result, auditRows, parentEnv: process.env };
 
+    // Criteria 1 and 2 across every channel the caller can observe.
+    assertOpaque(SECRET, observation);
     // Without this the test would pass vacuously: had TOKEN never reached the
     // child, printenv would have printed nothing for it and the credential
     // would be "absent" rather than "redacted". The placeholder proves the
     // child genuinely received the credential and the vault replaced it.
     expect(JSON.stringify(result)).toContain("[REDACTED]");
 
-    // Criteria 1 and 2 across every channel the caller can observe.
-    assertOpaque(SECRET, observation);
     // Negative control: redaction must be targeted, not blanket. Scoped to the
     // result alone — the broad observation includes parentEnv, where this test
     // itself planted the marker, which would satisfy the check vacuously even

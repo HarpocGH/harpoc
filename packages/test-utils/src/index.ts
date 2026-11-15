@@ -1,4 +1,5 @@
 export { expectVaultError } from "./expect-vault-error.js";
+export { expectAbsent } from "./expect-absent.js";
 export {
   describeBuildOutput,
   describeCrossPackageImports,

@@ -20,7 +20,12 @@ import type { SessionKeyProtector } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { createApp } from "@harpoc/rest-api";
 import { InjectionType, PrincipalType, SecretType, VaultState } from "@harpoc/shared";
-import { protectorTimer, recordSeriesLine, silenceAuditLines } from "@harpoc/test-utils";
+import {
+  expectAbsent,
+  protectorTimer,
+  recordSeriesLine,
+  silenceAuditLines,
+} from "@harpoc/test-utils";
 import type { McpServer } from "@modelcontextprotocol/server";
 import {
   createTestVault,
@@ -154,6 +159,7 @@ describe("Session Sharing", () => {
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body ?? "{}") as { headers: Record<string, string> };
     // Exact-match redaction in VaultEngine.useSecret() scrubs the secret value
+    expectAbsent(body.headers.authorization, SECRET_VALUE);
     expect(body.headers.authorization).toBe("Bearer [REDACTED]");
   });
 

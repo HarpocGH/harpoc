@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { ProxyTarget } from "./vault-engine.js";
 import { registerAgents, registryOf, retainDecryptedValues } from "./__fixtures__/engine-seams.js";
@@ -155,7 +155,7 @@ describe("resolveForProxy — the lease", () => {
     expect(retained).toHaveLength(1);
     expect(retained[0]?.length).toBe(PLAINTEXT.length);
     expect(allZero(retained[0] as Uint8Array)).toBe(true);
-    expect(lease.value).not.toBe(retained[0]);
+    expect(Object.is(lease.value, retained[0])).toBe(false);
     expect(Buffer.from(lease.value).equals(Buffer.from(PLAINTEXT))).toBe(true);
 
     lease.complete({ status: 200, sanitized: false });
@@ -235,10 +235,10 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
       ErrorCode.PROXY_PLACEHOLDER_DENIED,
     );
+    expectAbsent(err.message, PLAINTEXT);
     expect(err.message).toBe(
       "Placeholder refused for https://api.github.com: the secret is not enabled for the egress proxy (harpoc secret allow --proxy)",
     );
-    expect(err.message).not.toContain(PLAINTEXT);
     expect(retained).toHaveLength(0);
     const rows = useRows(secretId);
     expect(rows).toHaveLength(1);
@@ -261,8 +261,8 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), target),
       ErrorCode.URL_NOT_ALLOWED,
     );
+    expectAbsent(err.message, PLAINTEXT);
     expect(err.message).toBe("URL not in secret allowlist: https://evil.example.com");
-    expect(err.message).not.toContain(PLAINTEXT);
     expect(retained).toHaveLength(0);
     expect(useRows(secretId)[0]?.detail).toEqual({
       context: "proxy",
@@ -300,7 +300,7 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       () => engine.resolveForProxy(HANDLE, proxyCaller("mallory"), TARGET),
       ErrorCode.SECRET_NOT_FOUND,
     );
-    expect(err.message).not.toContain(PLAINTEXT);
+    expectAbsent(err.message, PLAINTEXT);
     const rows = useRows(secretId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ success: false, secret_id: secretId, principal_id: "mallory" });

@@ -16,6 +16,7 @@ import type { InMemoryMcpClient, InMemoryToolResult } from "@harpoc/test-utils";
 import {
   connectInMemoryClient,
   connectModernInMemoryClient,
+  expectAbsent,
   expectVaultError,
   silenceAuditLines,
 } from "@harpoc/test-utils";
@@ -78,6 +79,8 @@ const AUDIT: DecryptedAuditEvent[] = [
     detail: { handle: "secret://my-key" },
   },
 ];
+const REFUSED_TOKEN = "forged.jwt";
+const NO_USE_TOKEN = "list-only.jwt";
 
 function token(sub: string, scope: VaultApiToken["scope"]): VaultApiToken {
   const now = Math.floor(Date.now() / 1000);
@@ -826,8 +829,8 @@ describe("the bridge against a REST app on a loopback port (B1 round trip)", () 
         action: ACTION,
       });
       expect(result.isError).toBe(true);
+      expectAbsent(text(result), REFUSED_TOKEN);
       expect(text(result)).toBe("Invalid token signature");
-      expect(text(result)).not.toContain("forged.jwt");
       expect(engine.useSecret).not.toHaveBeenCalled();
     } finally {
       await bridge.close();
@@ -842,8 +845,8 @@ describe("the bridge against a REST app on a loopback port (B1 round trip)", () 
         action: ACTION,
       });
       expect(result.isError).toBe(true);
+      expectAbsent(text(result), NO_USE_TOKEN);
       expect(text(result)).toBe("Access denied: Token lacks permission: use");
-      expect(text(result)).not.toContain("list-only.jwt");
       expect(engine.auditScopeRefusal).toHaveBeenCalledWith(
         CALLER,
         "POST /api/v1/secrets/test-key/use",

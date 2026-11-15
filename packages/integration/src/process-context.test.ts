@@ -7,7 +7,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Process-execution context (thesis §4.5.2, §6.2 sec:attack-output-channel).
@@ -111,7 +111,7 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
 
   it("I1: the credential never appears in the value returned to the caller", async () => {
     const res = await vault.engine.useSecret(handle, procAction(`process.stdout.write("done")`));
-    expect(JSON.stringify(res)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(res), SECRET);
   });
 
   // --- Output sanitization: what it blocks (raises L1 -> L3) ----------------
@@ -122,7 +122,7 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       procAction(`process.stdout.write(process.env.TOKEN)`),
     );
     if (res.type !== "process") throw new Error("expected process result");
-    expect(res.stdout).not.toContain(SECRET);
+    expectAbsent(res.stdout, SECRET);
     expect(res.stdout).toContain("[REDACTED]");
   });
 
@@ -132,7 +132,7 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       procAction(`process.stdout.write(Buffer.from(process.env.TOKEN).toString("base64"))`),
     );
     if (res.type !== "process") throw new Error("expected process result");
-    expect(res.stdout).not.toContain(Buffer.from(SECRET, "utf8").toString("base64"));
+    expectAbsent(res.stdout, Buffer.from(SECRET, "utf8").toString("base64"));
   });
 
   // --- Output sanitization: documented residual bypasses (>= L3) ------------
@@ -218,7 +218,7 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       });
       if (res.type !== "process") throw new Error("expected process result");
       expect(res.exit_code).toBe(0);
-      expect(res.stdout).not.toContain(SECRET);
+      expectAbsent(res.stdout, SECRET);
       expect(res.stdout.trim()).toBe("[REDACTED]");
       const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
       expect(row?.detail).toMatchObject({ context: "process", command: printenv, sanitized: true });
@@ -327,7 +327,7 @@ describe("Process execution context (I2b / output-channel leakage)", () => {
       });
       if (res.type !== "process") throw new Error("expected process result");
       expect(res.exit_code).toBe(0);
-      expect(res.stdout).not.toContain(SECRET);
+      expectAbsent(res.stdout, SECRET);
       expect(res.stdout.trim()).toBe("[REDACTED]");
       const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
       expect(row?.detail).toMatchObject({ context: "process", command: find, sanitized: true });

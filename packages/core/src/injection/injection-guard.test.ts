@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { InjectionGuard } from "./injection-guard.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const BEARER_JWT_PREFIX = "eyJhbG";
+const API_KEY_VALUE = "sk_1234567890abcdef";
 
 describe("InjectionGuard", () => {
   it("returns clean content unchanged", () => {
@@ -54,11 +58,11 @@ describe("InjectionGuard", () => {
 
   it("handles multiple patterns in one string", () => {
     const guard = new InjectionGuard();
-    const input = "Bearer eyJhbGciOiJIUzI1NiJ9.x.y and api_key=sk_1234567890abcdef";
+    const input = `Bearer ${BEARER_JWT_PREFIX}ciOiJIUzI1NiJ9.x.y and api_key=${API_KEY_VALUE}`;
     const result = guard.sanitize(input);
+    expectAbsent(result, BEARER_JWT_PREFIX);
+    expectAbsent(result, API_KEY_VALUE);
     expect(result).toContain("[REDACTED]");
-    expect(result).not.toContain("eyJhbG");
-    expect(result).not.toContain("sk_1234567890abcdef");
     expect(guard.totalRedactions).toBe(2);
   });
 
@@ -81,7 +85,9 @@ describe("InjectionGuard", () => {
     const guard = new InjectionGuard();
     // Bearer pattern requires 20+ chars
     const exactBearer = "Bearer " + "a".repeat(20);
-    expect(guard.sanitize(exactBearer)).toBe("[REDACTED]");
+    const result = guard.sanitize(exactBearer);
+    expectAbsent(result, exactBearer);
+    expect(result).toBe("[REDACTED]");
     expect(guard.totalRedactions).toBe(1);
   });
 

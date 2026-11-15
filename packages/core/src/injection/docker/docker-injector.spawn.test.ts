@@ -14,6 +14,7 @@ import { VaultError, ErrorCode } from "@harpoc/shared";
 import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedOptions, SpawnCapturedResult } from "../spawn-captured.js";
 import { executeDockerRegistryAction } from "./docker-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("../spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
 
@@ -55,6 +56,8 @@ const PULL_ACTION: DockerRegistryAction = {
 };
 
 const SECRET = new Uint8Array(Buffer.from("robot:s3cr3t-registry-pass-value"));
+const REGISTRY_PASSWORD = "s3cr3t-registry-pass-value";
+const REGISTRY_USER = "robot";
 
 let binDir: string;
 let dockerPath: string;
@@ -133,10 +136,10 @@ describe("executeDockerRegistryAction spawn shape", () => {
     expect(opts.env.DOCKER_CONFIG).toBeTruthy();
     expect(opts.env.HARPOC_DOCKER_REGISTRY).toBe("registry.example.com");
     expect(opts.env.HARPOC_DOCKER_USER).toBe("robot");
-    expect(opts.env.HARPOC_DOCKER_SECRET).toBe("s3cr3t-registry-pass-value");
+    expect(opts.env.HARPOC_DOCKER_SECRET).toBe(REGISTRY_PASSWORD);
     // The credential travels via env only — never on argv.
-    expect(args.join(" ")).not.toContain("s3cr3t-registry-pass-value");
-    expect(args.join(" ")).not.toContain("robot");
+    expectAbsent(args.join(" "), REGISTRY_PASSWORD);
+    expectAbsent(args.join(" "), REGISTRY_USER);
   });
 
   it("spawns docker with a built environment, not the vault's own", async () => {
@@ -408,6 +411,6 @@ it("surfaces a redacted VaultError, not a raw one, when the spawn rejects with t
     (e: unknown) => e,
   )) as VaultError;
 
+  expectAbsent(thrown.message, REGISTRY_PASSWORD);
   expect(thrown).toBeInstanceOf(VaultError);
-  expect(thrown.message).not.toContain("s3cr3t-registry-pass-value");
 });

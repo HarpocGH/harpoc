@@ -9,7 +9,7 @@ import { createEngine, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerCertImportCommand } from "./import.js";
 import { registerCertStatusCommand } from "./status.js";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * `cert import` / `cert status` against a real vault: the mocked-engine suite
@@ -21,6 +21,7 @@ const FIXTURES = fileURLToPath(new URL("../../__fixtures__/certs/", import.meta.
 const KEY_PATH = join(FIXTURES, "rsa-key.pem");
 const CERT_PATH = join(FIXTURES, "rsa-cert.pem");
 const TEST_PASSWORD = "test-password-123";
+const PEM_ARMOR = "PRIVATE KEY";
 
 let vaultDir: string;
 let spies: CliSpies;
@@ -86,7 +87,7 @@ describe("cert import / cert status — end to end", () => {
     await run(["status", "secret://web"]);
 
     const written = [...spies.logSpy.mock.calls, ...spies.errorSpy.mock.calls].flat().join("\n");
-    expect(written).not.toContain("PRIVATE KEY");
+    expectAbsent(written, PEM_ARMOR);
   });
 
   it("a mismatched key/certificate pair is refused and leaves no secret behind", async () => {

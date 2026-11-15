@@ -57,10 +57,10 @@ describe.each(DRIVERS)("%s surface", (name, start) => {
     });
 
     expect(outcome.ok).toBe(true);
+    assertOpaque(SECRET, { result: outcome.result });
     expect((outcome.result as { type?: string }).type).toBe("process");
     // The credential reached the child and came back redacted, over a socket.
     expect(JSON.stringify(outcome.result)).toContain("[REDACTED]");
-    assertOpaque(SECRET, { result: outcome.result });
 
     // Both drivers reach the engine over the REST wire, so both attribute as
     // `rest`; the per-surface principal is what tells their rows apart.

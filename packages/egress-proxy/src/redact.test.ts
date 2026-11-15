@@ -2,9 +2,11 @@ import { once } from "node:events";
 import { describe, expect, it } from "vitest";
 import { redactSecretEncodings } from "@harpoc/core";
 import { REDACTION_MARKER, createRedactingTransform, redactBytes } from "./redact.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const NEEDLE = "ghp_S3cr3tValue-xyz";
 const MARK = REDACTION_MARKER;
+const SECRET_TOKEN = "s3cr3t-token";
 
 async function redact(
   chunks: readonly (Buffer | string)[],
@@ -48,7 +50,9 @@ function xorshift(seed: number): () => number {
 
 describe("createRedactingTransform — exact-value redaction of a response stream (DB-8)", () => {
   it("replaces with the project's marker, the string core's redactSecretEncodings writes", () => {
-    expect(redactSecretEncodings("s3cr3t-token", "s3cr3t-token")).toBe(MARK);
+    const redacted = redactSecretEncodings(SECRET_TOKEN, SECRET_TOKEN);
+    expectAbsent(redacted, SECRET_TOKEN);
+    expect(redacted).toBe(MARK);
   });
 
   it("a needle wholly inside one chunk", async () => {
@@ -72,12 +76,16 @@ describe("createRedactingTransform — exact-value redaction of a response strea
   it("a needle split across three chunks, each shorter than the needle", async () => {
     const body = `<${NEEDLE}>`;
     const chunks = [body.slice(0, 7), body.slice(7, 14), body.slice(14)];
-    expect((await redact(chunks, [NEEDLE])).output.toString()).toBe(`<${MARK}>`);
+    const redacted = (await redact(chunks, [NEEDLE])).output.toString();
+    expectAbsent(redacted, NEEDLE);
+    expect(redacted).toBe(`<${MARK}>`);
   });
 
   it("a needle written one byte at a time", async () => {
     const body = `x${NEEDLE}y${NEEDLE}`;
-    expect((await redact([...body], [NEEDLE])).output.toString()).toBe(`x${MARK}y${MARK}`);
+    const redacted = (await redact([...body], [NEEDLE])).output.toString();
+    expectAbsent(redacted, NEEDLE);
+    expect(redacted).toBe(`x${MARK}y${MARK}`);
   });
 
   it("two occurrences in one chunk", async () => {
@@ -96,7 +104,9 @@ describe("createRedactingTransform — exact-value redaction of a response strea
   });
 
   it("a needle that is the whole body", async () => {
-    expect((await redact([NEEDLE], [NEEDLE])).output.toString()).toBe(MARK);
+    const redacted = (await redact([NEEDLE], [NEEDLE])).output.toString();
+    expectAbsent(redacted, NEEDLE);
+    expect(redacted).toBe(MARK);
   });
 
   it("a needle's prefix at the end of the body is flushed as sent", async () => {

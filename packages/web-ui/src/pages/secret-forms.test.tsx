@@ -4,6 +4,7 @@ import { injectionPolicyInputSchema } from "@harpoc/shared";
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
 import { CreateSecretForm, DeleteForm, PolicyEditor, RotateForm } from "./secret-forms";
+import { expectAbsent } from "@harpoc/test-utils";
 
 afterEach(cleanup);
 
@@ -18,8 +19,8 @@ function expectNotExposed(...texts: string[]): void {
     )
     .join("\n");
   for (const text of texts) {
-    expect(document.body.innerHTML).not.toContain(text);
-    expect(stored).not.toContain(text);
+    expectAbsent(document.body.innerHTML, text, "the DOM");
+    expectAbsent(stored, text, "storage");
   }
 }
 
@@ -106,13 +107,13 @@ describe("CreateSecretForm", () => {
       target: { files: [new File([pem], "key.pem", { type: "text/plain" })] },
     });
     await waitFor(() => expect(screen.getByText(/key\.pem/)).toBeTruthy());
+    expectNotExposed("BEGIN KEY");
     // A single-line input applies the HTML value-sanitization algorithm and
     // strips newlines, which would silently flatten a PEM into one unusable
     // line — so the file's text is held in state and the typed field steps
     // aside rather than displaying (and mangling) it.
     expect(valueInput().value).toBe("");
     expect(valueInput().disabled).toBe(true);
-    expectNotExposed("BEGIN KEY");
 
     fireEvent.input(screen.getByLabelText(/Name/), { target: { value: "n1" } });
     fireEvent.submit(screen.getByRole("button", { name: "Create secret" }));
@@ -154,9 +155,9 @@ describe("CreateSecretForm", () => {
     fireEvent.input(valueInput(), { target: { value: "s3cret-bytes" } });
     fireEvent.submit(screen.getByRole("button", { name: "Create secret" }));
     await waitFor(() => expect(screen.getByText("Invalid name")).toBeTruthy());
+    expectNotExposed("s3cret-bytes");
     expect(document.querySelector(".error-text")?.textContent).toBe("Invalid name");
     expect(onDone).not.toHaveBeenCalled();
-    expectNotExposed("s3cret-bytes");
   });
 });
 

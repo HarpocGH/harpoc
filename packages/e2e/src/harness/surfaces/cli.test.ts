@@ -55,14 +55,14 @@ describe("cli surface", () => {
     });
 
     expect(outcome.ok).toBe(true);
-    expect((outcome.result as { type?: string }).type).toBe("process");
-    expect(outcome.text).toContain("[REDACTED]");
     // A real child's own streams, not just the parsed result (C-6).
     assertOpaque(SECRET, {
       result: outcome.result,
       stdout: outcome.stdout,
       stderr: outcome.stderr,
     });
+    expect((outcome.result as { type?: string }).type).toBe("process");
+    expect(outcome.text).toContain("[REDACTED]");
 
     expectAttributedSuccess(harness, {
       context: "process",

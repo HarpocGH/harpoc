@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, MAX_PROCESS_OUTPUT_BYTES, VaultState } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
 import { registryOf } from "./__fixtures__/engine-seams.js";
+
+const PROC_SECRET = "procsecret";
+const MCP_USE_SECRET = "mcpusesecret";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -70,7 +73,7 @@ describe("useSecret (process injection)", () => {
       env_var: "TOKEN",
     });
     if (res.type !== "process") throw new Error("expected process result");
-    expect(res.stdout).not.toContain("procsecret");
+    expectAbsent(res.stdout, PROC_SECRET);
     expect(res.stdout).toContain("[REDACTED]");
   });
 
@@ -190,6 +193,7 @@ describe("useSecret (process injection)", () => {
     );
 
     expect(res.stdout).toBe("out");
+    expectAbsent(res.stderr, PROC_SECRET);
     expect(res.stderr).toBe("err:[REDACTED]");
     expect(processRow()).toMatchObject({
       success: true,
@@ -455,7 +459,7 @@ describe("useSecret (MCP proxy)", () => {
     if (res.type !== "mcp") throw new Error("expected mcp result");
     // The downstream server echoed its env credential; the vault redacted it.
     const text = JSON.stringify(res.content);
-    expect(text).not.toContain("mcpusesecret");
+    expectAbsent(text, MCP_USE_SECRET);
     expect(text).toContain("[REDACTED]");
   });
 

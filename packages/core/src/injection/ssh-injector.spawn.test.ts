@@ -21,6 +21,7 @@ import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { SshInjector } from "./ssh-injector.js";
 import { system32Path } from "../win32-paths.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
 
@@ -91,6 +92,7 @@ const ACTION: SshAction = {
 const SSH_CONFIG: ConnectionConfig = {
   ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
 };
+const PEM_ARMOR = "PRIVATE KEY";
 
 // Positive-path assertions on the spawned ssh command (code review 2026-07-07,
 // M13): the hardening args, the agent-socket env and the key-redaction contract
@@ -223,8 +225,8 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
 
     // At spawn time the file exists and holds exactly the public line —
     // never any private key material.
+    expectAbsent(identityContentAtSpawn, PEM_ARMOR);
     expect(identityContentAtSpawn).toMatch(/^ssh-rsa [A-Za-z0-9+/=]+ harpoc-ephemeral\n$/);
-    expect(identityContentAtSpawn).not.toContain("PRIVATE KEY");
     // The per-invocation temp file is gone once the call completes.
     expect(existsSync(identityPath)).toBe(false);
   });

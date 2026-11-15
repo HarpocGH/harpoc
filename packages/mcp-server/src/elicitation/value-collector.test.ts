@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { CLIENT_CAPABILITIES_META_KEY, InMemoryTransport } from "@modelcontextprotocol/server";
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
-import { connectModernInMemoryClient } from "@harpoc/test-utils";
+import { connectModernInMemoryClient, expectAbsent } from "@harpoc/test-utils";
 import type { InMemoryMcpClient } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
@@ -30,6 +30,11 @@ vi.mock("node:crypto", async (importOriginal) => {
 });
 
 const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" };
+const FORM_CREATE_VALUE = "browser-entered-value";
+const FORM_ROTATE_VALUE = "rotated-value";
+const PROMPT_CREATE_VALUE = "typed-at-the-terminal";
+const PROMPT_CLIENT_SECRET = "client-secret-at-the-terminal";
+const PROMPT_ROTATE_VALUE = "rotated-at-the-terminal";
 
 function postBody(value: string): string {
   return `value=${encodeURIComponent(value)}`;
@@ -533,6 +538,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         status: string;
         message: string;
       };
+      expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
       expect(payload.status).toBe("created");
       expect(engine.createSecret).toHaveBeenCalledTimes(1);
       expect(engine.createSecret).toHaveBeenCalledWith(
@@ -543,8 +549,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           admin_scope: true,
         }),
       );
-      expect(captured).toBe("browser-entered-value");
-      expect(result.content[0]?.text).not.toContain("browser-entered-value");
+      expect(captured).toBe(FORM_CREATE_VALUE);
     } finally {
       await close();
     }
@@ -578,9 +583,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       })) as { content: Array<{ text: string }> };
 
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+      expectAbsent(result.content[0]?.text, FORM_ROTATE_VALUE);
       expect(payload.status).toBe("rotated");
-      expect(captured).toBe("rotated-value");
-      expect(result.content[0]?.text).not.toContain("rotated-value");
+      expect(captured).toBe(FORM_ROTATE_VALUE);
     } finally {
       await close();
     }
@@ -602,7 +607,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       expect(createdPayload.status).toBe("pending");
       expect(createdPayload.message).toContain("harpoc secret set");
       expect(engine.createSecret).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(engine.createSecret).mock.calls[0]?.[0]).not.toHaveProperty("value");
+      expect("value" in (vi.mocked(engine.createSecret).mock.calls[0]?.[0] as object)).toBe(false);
 
       const rotated = (await client.callTool({
         name: "rotate_secret",
@@ -694,12 +699,12 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         status: string;
         message: string;
       };
+      expectAbsent(result.content[0]?.text, PROMPT_CREATE_VALUE);
       expect(payload.status).toBe("created");
       expect(payload.message).toContain("a terminal prompt");
       expect(tty).toHaveBeenCalledTimes(1);
       expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "create" });
-      expect(captured).toBe("typed-at-the-terminal");
-      expect(result.content[0]?.text).not.toContain("typed-at-the-terminal");
+      expect(captured).toBe(PROMPT_CREATE_VALUE);
     } finally {
       tty.mockRestore();
       await close();
@@ -762,6 +767,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         },
       })) as { content: Array<{ text: string }> };
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+      expectAbsent(result.content[0]?.text, PROMPT_CLIENT_SECRET);
       expect(payload).toEqual({ handle: "secret://m2m", status: "active", message: "authorized" });
       expect(tty).toHaveBeenCalledTimes(1);
       expect(tty).toHaveBeenCalledWith({
@@ -774,7 +780,6 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         undefined,
         expect.objectContaining({ principal_id: "tokenless-stdio" }),
       );
-      expect(result.content[0]?.text).not.toContain("client-secret-at-the-terminal");
     } finally {
       tty.mockRestore();
       await close();
@@ -880,14 +885,14 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           type: "api_key",
         });
         const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+        expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
         expect(payload.status).toBe("created");
         expect(engine.createSecret).toHaveBeenCalledTimes(1);
         expect(engine.createSecret).toHaveBeenCalledWith(
           expect.objectContaining({ name: "api-key", type: "api_key", value: expect.anything() }),
           expect.objectContaining({ principal_id: "tokenless-stdio" }),
         );
-        expect(captured).toBe("browser-entered-value");
-        expect(result.content[0]?.text).not.toContain("browser-entered-value");
+        expect(captured).toBe(FORM_CREATE_VALUE);
       } finally {
         await modern.close();
       }
@@ -912,7 +917,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         expect(payload.status).toBe("pending");
         expect(payload.message).toContain("harpoc secret set");
         expect(engine.createSecret).toHaveBeenCalledTimes(1);
-        expect(vi.mocked(engine.createSecret).mock.calls[0]?.[0]).not.toHaveProperty("value");
+        expect("value" in (vi.mocked(engine.createSecret).mock.calls[0]?.[0] as object)).toBe(
+          false,
+        );
       } finally {
         await modern.close();
       }
@@ -984,7 +991,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         const flipped =
           genuine.slice(0, middle) + (at === "a" ? "b" : "a") + genuine.slice(middle + 1);
         expect(flipped.length).toBe(genuine.length);
-        expect(flipped).not.toBe(genuine);
+        expect(Object.is(flipped, genuine)).toBe(false);
 
         let thrown: unknown;
         try {
@@ -1109,9 +1116,9 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       try {
         const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
         const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
+        expectAbsent(result.content[0]?.text, FORM_ROTATE_VALUE);
         expect(payload.status).toBe("rotated");
-        expect(captured).toBe("rotated-value");
-        expect(result.content[0]?.text).not.toContain("rotated-value");
+        expect(captured).toBe(FORM_ROTATE_VALUE);
       } finally {
         await modern.close();
       }
@@ -1263,6 +1270,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
       );
 
       const segments = (pending?.requestState ?? "").split(".");
+      expectAbsent(pending?.requestState, url.slice(url.lastIndexOf("/") + 1));
       expect(segments[0]).toBe("v1");
       const envelope = JSON.parse(Buffer.from(segments[1] ?? "", "base64url").toString("utf8")) as {
         p: Record<string, unknown>;
@@ -1278,7 +1286,6 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         operation: "create",
         target: "prod/api-key",
       });
-      expect(pending?.requestState).not.toContain(url.slice(url.lastIndexOf("/") + 1));
 
       await collectorTimedOut(pending?.requestState);
     });
@@ -1341,12 +1348,12 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           status: string;
           message: string;
         };
+        expectAbsent(result.content[0]?.text, PROMPT_ROTATE_VALUE);
         expect(payload.status).toBe("rotated");
         expect(payload.message).toContain("a terminal prompt");
         expect(tty).toHaveBeenCalledTimes(1);
         expect(tty).toHaveBeenCalledWith({ subject: "api-key", operation: "rotate" });
-        expect(captured).toBe("rotated-at-the-terminal");
-        expect(result.content[0]?.text).not.toContain("rotated-at-the-terminal");
+        expect(captured).toBe(PROMPT_ROTATE_VALUE);
       } finally {
         tty.mockRestore();
         await modern.close();

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeystoreHelperResult } from "./keystore-helper.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * T12: the property that makes the keystore bridges safe — "key material
@@ -63,9 +64,9 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
 
     expect(calls).toHaveLength(1);
     const call = calls[0] as (typeof calls)[number];
+    expectAbsent(commandLine(call), KEY_B64);
+    expectAbsent(commandLine(call), KEY_HEX);
     expect(call.stdin.trim()).toBe(KEY_B64);
-    expect(commandLine(call)).not.toContain(KEY_B64);
-    expect(commandLine(call)).not.toContain(KEY_HEX);
   });
 
   it("DPAPI unprotect: the wrapped blob crosses on stdin too", async () => {
@@ -77,7 +78,7 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
 
     const call = calls[0] as (typeof calls)[number];
     expect(call.stdin.trim()).toBe(Buffer.from(blob).toString("base64"));
-    expect(commandLine(call)).not.toContain(Buffer.from(blob).toString("base64"));
+    expectAbsent(commandLine(call), Buffer.from(blob).toString("base64"));
   });
 
   it("DPAPI binds the blob to the current user account with a fixed entropy", async () => {
@@ -100,9 +101,9 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
     await store.storeWrappingKey(KEY);
 
     const call = calls[0] as (typeof calls)[number];
+    expectAbsent(commandLine(call), KEY_HEX);
     expect(call.args).toEqual(["-i"]);
     expect(call.stdin).toContain(KEY_HEX);
-    expect(commandLine(call)).not.toContain(KEY_HEX);
   });
 
   it("Secret Service write: the hex key is the stdin payload", async () => {
@@ -112,7 +113,7 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
 
     const call = calls[0] as (typeof calls)[number];
     expect(call.stdin).toBe(KEY_HEX);
-    expect(commandLine(call)).not.toContain(KEY_HEX);
+    expectAbsent(commandLine(call), KEY_HEX);
   });
 
   it("kernel keyring write: the hex key is the stdin payload", async () => {
@@ -122,7 +123,7 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
 
     const call = calls[0] as (typeof calls)[number];
     expect(call.stdin).toBe(KEY_HEX);
-    expect(commandLine(call)).not.toContain(KEY_HEX);
+    expectAbsent(commandLine(call), KEY_HEX);
     // `keyctl add` would take the payload as an argument; `padd` reads stdin.
     expect(call.args[0]).toBe("padd");
   });
@@ -136,7 +137,7 @@ describe("keystore bridges keep key material off the command line (T12)", () => 
     }).loadWrappingKey();
 
     for (const call of calls) {
-      expect(commandLine(call)).not.toContain(KEY_HEX);
+      expectAbsent(commandLine(call), KEY_HEX);
     }
     expect(calls.length).toBe(2);
   });

@@ -20,6 +20,7 @@ import {
   trustFixtureCaByDefault,
 } from "./__fixtures__/upstream-server.js";
 import type { UpstreamFixture } from "./__fixtures__/upstream-server.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const MARKER = "[REDACTED]";
 const HOSTS = ["127.0.0.1", "localhost"];
@@ -187,7 +188,7 @@ describe("CONNECT — the tunnel", () => {
     expect(upstream.seen[0]?.headers["proxy-authorization"]).toBeUndefined();
     expect(upstream.seen[0]?.headers["accept-encoding"]).toBe("identity");
     expect(reply.headers["x-echo"]).toBe(`Bearer ${MARKER}`);
-    expect(reply.body).not.toContain(SECRET_VALUE);
+    expectAbsent(reply.body, SECRET_VALUE);
     expect(double.resolveForProxy).toHaveBeenCalledWith(
       "secret://gh-pat",
       {
@@ -388,8 +389,8 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
     });
 
     expect(answer.established.startsWith(`HTTP/1.1 ${status} `)).toBe(true);
+    expectAbsent(answer.established + (answer.body ?? ""), token);
     expect(JSON.parse(answer.body ?? "")).toMatchObject({ error: code });
-    expect(answer.established + (answer.body ?? "")).not.toContain(token);
   });
 
   it("a host outside the CA's hosts is 403 PROXY_CONNECT_DENIED naming host and port; no leaf, no engine call", async () => {

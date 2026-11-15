@@ -98,13 +98,13 @@ describe("backend fleet", () => {
 
   it("keeps the git-http credential distinct from the database password", () => {
     expect(GIT_HTTP.port).toBe(55080);
-    expect(GIT_HTTP.password).not.toBe(PG.password);
+    expect(Object.is(GIT_HTTP.password, PG.password)).toBe(false);
     // The TLS publication of the same fixture: its own 55xxx port and the
     // SAN-covered name the certificate presents. The credential is the same
     // baked htpasswd entry, so it is derived rather than restated.
     expect(GIT_HTTPS.port).toBe(55081);
     expect(GIT_HTTPS.host).toBe("localhost");
-    expect(GIT_HTTPS.password).not.toBe(PG.password);
+    expect(Object.is(GIT_HTTPS.password, PG.password)).toBe(false);
   });
 
   it("reaches the postgres container", async () => {

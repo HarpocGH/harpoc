@@ -198,6 +198,7 @@ import { listWindowsAclSync } from "@harpoc/core";
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 import { assertRuntimeDir, consumerDirs, consumerSocketPaths } from "../utils/runtime-dir.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
 
@@ -214,6 +215,7 @@ function stubPlatform(value: NodeJS.Platform): void {
 /** The memory session's line, printed once the engine opens (B5). */
 const MEMORY_SESSION =
   "[harpoc] memory session: the vault stays unlocked in this process alone (no session file, no idle seal) until POST /api/v1/vault/lock or SIGTERM";
+const CA_KEY_BODY = "fixturecaKEYbody";
 
 // ── Tests ──────────────────────────────────────────────────────────
 
@@ -1226,7 +1228,7 @@ describe("server start", () => {
       };
       expect(handed.ca.keyPem.length).toBe(Buffer.byteLength(KEY_PEM));
       expect(handed.ca.keyPem.every((byte) => byte === 0)).toBe(true);
-      expect(`${spies.stdout()}\n${spies.stderr()}`).not.toContain("fixturecaKEYbody");
+      expectAbsent(`${spies.stdout()}\n${spies.stderr()}`, CA_KEY_BODY);
     });
 
     it("zero-fills the key bytes when the proxy's creation throws", async () => {

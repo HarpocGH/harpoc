@@ -24,6 +24,7 @@ import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { sshHardeningArgs } from "./ssh-common.js";
 import { system32Path } from "../win32-paths.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
@@ -142,6 +143,9 @@ const FORCED = [
   "-c",
   "core.fsmonitor=false",
 ];
+const GIT_TOKEN = "s3cret-token-value";
+const PEM_ARMOR = "PRIVATE KEY";
+const SHORT_USERNAME = "ab";
 
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   return {
@@ -227,9 +231,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
 
     // The credential appears in no argv element of any step in any form.
     expect(
-      calls.every(([, a]) =>
-        a.every((x) => !x.includes("s3cret-token-value") && !x.includes("git-user")),
-      ),
+      calls.every(([, a]) => a.every((x) => !x.includes(GIT_TOKEN) && !x.includes("git-user"))),
     ).toBe(true);
   });
 
@@ -285,9 +287,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
         expect(localOpts.env.HARPOC_GIT_USERNAME).toBeUndefined();
       }
       expect(
-        calls.every(([, a]) =>
-          a.every((x) => !x.includes("s3cret-token-value") && !x.includes("git-user")),
-        ),
+        calls.every(([, a]) => a.every((x) => !x.includes(GIT_TOKEN) && !x.includes("git-user"))),
       ).toBe(true);
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -898,8 +898,8 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     );
 
     const [, , opts] = vi.mocked(spawnCaptured).mock.calls[1] as SpawnCall;
-    expect(opts.redact).toContain("s3cret-token-value");
-    expect(opts.redact).not.toContain("ab");
+    expectAbsent(opts.redact, SHORT_USERNAME);
+    expect(opts.redact).toContain(GIT_TOKEN);
   });
 
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
@@ -1010,7 +1010,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
 
   it("the clone's ls-remote parse list holds no user half under the shared floor beside the placeholder password (MIN_REDACTABLE_FRAGMENT)", async () => {
     const [, , listOpts] = (await cloneWith("ab:x-oauth-basic"))[0] as SpawnCall;
-    expect((listOpts.redact ?? []).includes("ab")).toBe(false);
+    expect((listOpts.redact ?? []).includes(SHORT_USERNAME)).toBe(false);
   });
 
   it("a successful but truncated ls-remote listing is parsed from the seam's copy: the relay's HEAD at the fetch names the default branch that carries the credential's user name (C-16)", async () => {
@@ -1422,7 +1422,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     expect(answered?.out.trim()).toBe("s3cret-token-value");
     expect(answered?.status).toBe(0);
     // A redirect or submodule target must get nothing, and the helper must fail.
-    expect(refused?.out).not.toContain("s3cret-token-value");
+    expectAbsent(refused?.out, GIT_TOKEN);
     expect(refused?.out.trim()).toBe("");
     expect(refused?.status).toBe(1);
     // Fail closed when the prompt names no recognizable URL.
@@ -1932,8 +1932,8 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       { ssh: { known_hosts: ["github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] } },
     );
 
+    expectAbsent(identityContentAtSpawn, PEM_ARMOR);
     expect(identityContentAtSpawn).toMatch(/^ssh-rsa [A-Za-z0-9+/=]+ harpoc-ephemeral\n$/);
-    expect(identityContentAtSpawn).not.toContain("PRIVATE KEY");
     expect(existsSync(identityPath)).toBe(false);
   });
 });

@@ -17,6 +17,7 @@ import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * S1 (C1.2 fix round 1, F-1): a clone's credential-bearing steps run against a
@@ -167,6 +168,7 @@ describeGit("Git clone through the relay — today's clone semantics on real git
     } finally {
       process.chdir(savedCwd);
     }
+    expectAbsent(JSON.stringify(result), TOKEN);
     expect(result.exit_code, result.stderr).toBe(0);
     expect(readdirSync(out)).toEqual(["repo"]);
     const dest = join(out, "repo");
@@ -187,7 +189,6 @@ describeGit("Git clone through the relay — today's clone semantics on real git
     ]);
     expect(git(dest, "rev-parse", "--is-shallow-repository").trim()).toBe("false");
     expect(readFileSync(join(dest, ".git", "config"), "utf8")).not.toContain("harpoc-git-relay");
-    expect(JSON.stringify(result)).not.toContain(TOKEN);
   });
 
   it("--branch checks out the named branch", async () => {

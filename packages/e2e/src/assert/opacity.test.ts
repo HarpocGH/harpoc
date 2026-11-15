@@ -9,6 +9,7 @@ import {
 } from "./opacity.js";
 import { serializeError } from "./serialize-error.js";
 import { MAX_PARSE_DEPTH, scan } from "./scan.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * A scenario has to CLASSIFY an outcome (LEAKED vs OPAQUE) rather than assert
@@ -40,6 +41,9 @@ describe("sightings (non-throwing opacity sweep)", () => {
 });
 
 const SECRET = "sk-live-abc123!";
+const ALPHA_SECRET = "alpha-one";
+const BETA_SECRET = "beta-two";
+const UNICODE_ESCAPE_CREDENTIAL = "\\u0041";
 
 describe("serializeError", () => {
   it("exposes the non-enumerable message and stack", () => {
@@ -132,8 +136,8 @@ describe("redactForRecord (the record-time marker behind EvidenceRecord.calls)",
     const b64 = Buffer.from(secret).toString("base64");
     const text = `plain ${secret}, base64 ${b64}, json ${JSON.stringify({ k: secret })}, kept [REDACTED]`;
     const out = redactForRecord(text, secret);
-    expect(out).not.toContain(secret);
-    expect(out).not.toContain(b64);
+    expectAbsent(out, secret);
+    expectAbsent(out, b64);
     expect(out).toContain(RECORD_REDACTION);
     expect(out).toContain("kept [REDACTED]");
     expect(RECORD_REDACTION).not.toBe("[REDACTED]");
@@ -141,9 +145,10 @@ describe("redactForRecord (the record-time marker behind EvidenceRecord.calls)",
   });
 
   it("takes several credentials and leaves a text without any of them untouched", () => {
-    expect(redactForRecord("alpha-one beta-two", "alpha-one", "beta-two")).toBe(
-      `${RECORD_REDACTION} ${RECORD_REDACTION}`,
-    );
+    const out = redactForRecord(`${ALPHA_SECRET} ${BETA_SECRET}`, ALPHA_SECRET, BETA_SECRET);
+    expectAbsent(out, ALPHA_SECRET);
+    expectAbsent(out, BETA_SECRET);
+    expect(out).toBe(`${RECORD_REDACTION} ${RECORD_REDACTION}`);
     expect(redactForRecord("clean", secret)).toBe("clean");
   });
 });
@@ -194,22 +199,27 @@ describe("redactForRecord on a credential whose own backslash reads as a JSON es
   const credential = "pw\\tail";
 
   it("marks it raw at level 0, for the record and for diagnostics", () => {
-    expect(redactForRecord(`x ${credential} y`, credential)).toBe(`x ${RECORD_REDACTION} y`);
-    expect(redactForDiagnostics(`x ${credential} y`, credential)).toBe("x [REDACTED] y");
+    const forRecord = redactForRecord(`x ${credential} y`, credential);
+    expectAbsent(forRecord, credential, "the record text");
+    expect(forRecord).toBe(`x ${RECORD_REDACTION} y`);
+    const forDiagnostics = redactForDiagnostics(`x ${credential} y`, credential);
+    expectAbsent(forDiagnostics, credential, "the diagnostics text");
+    expect(forDiagnostics).toBe("x [REDACTED] y");
   });
 
   it("marks the literal and the level-1 escaped form in one JSON text, each once", () => {
     const text = `{"raw":"${credential}","escaped":${JSON.stringify(credential)}}`;
-    expect(redactForRecord(text, credential)).toBe(
-      `{"raw":"${RECORD_REDACTION}","escaped":"${RECORD_REDACTION}"}`,
-    );
+    const out = redactForRecord(text, credential);
+    expectAbsent(out, credential);
+    expectAbsent(out, JSON.stringify(credential));
+    expect(out).toBe(`{"raw":"${RECORD_REDACTION}","escaped":"${RECORD_REDACTION}"}`);
   });
 
   it("marks a span both readings reach as one range", () => {
-    const needle = "\\u0041";
-    expect(redactForRecord(`${JSON.stringify(needle)} ${needle}`, needle)).toBe(
-      `"${RECORD_REDACTION}" ${RECORD_REDACTION}`,
-    );
+    const needle = UNICODE_ESCAPE_CREDENTIAL;
+    const out = redactForRecord(`${JSON.stringify(needle)} ${needle}`, needle);
+    expectAbsent(out, needle);
+    expect(out).toBe(`"${RECORD_REDACTION}" ${RECORD_REDACTION}`);
   });
 
   it("leaves no sighting at any escape layer the opacity scan reaches, the literal included", () => {

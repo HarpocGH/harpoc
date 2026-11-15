@@ -10,6 +10,7 @@ import { Outcome } from "./scenario.js";
 import type { ScenarioArm, ScenarioSetup } from "./scenario.js";
 import { RECORD_REDACTION } from "../assert/opacity.js";
 import { recordingArm } from "../evidence/calls.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The Harpoc verdicts of §6.2.6, §6.2.7 and the context-opacity Redis row,
@@ -124,7 +125,7 @@ describe("output-channel Harpoc verdicts", () => {
       (err: unknown) => (err as Error).message,
     );
     for (const enc of encodingsOf(CREDENTIAL)) {
-      expect(message).not.toContain(enc.needle);
+      expectAbsent(message, enc.needle, enc.label);
     }
     expect(message).toContain("spawn failed: [REDACTED]");
   });
@@ -270,8 +271,8 @@ describe("the recorded calls carry the verdict's proof", () => {
     const arm = recordingArm(leaking, CREDENTIAL);
     await expect(echo.observe(arm, ECHO_SETUP)).resolves.toBe(Outcome.LEAKED);
     const text = arm.calls()[0]?.text ?? "";
+    expectAbsent(text, CREDENTIAL);
+    expectAbsent(text, Buffer.from(CREDENTIAL).toString("base64"));
     expect(text).toContain(RECORD_REDACTION);
-    expect(text).not.toContain(CREDENTIAL);
-    expect(text).not.toContain(Buffer.from(CREDENTIAL).toString("base64"));
   });
 });

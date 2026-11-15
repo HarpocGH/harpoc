@@ -21,7 +21,7 @@ import type { EngineDouble } from "./__fixtures__/engine-double.js";
 import { PROXY_CLIENT_TIMEOUT_MS, proxyRequest } from "./__fixtures__/proxy-client.js";
 import { startUpstream } from "./__fixtures__/upstream-server.js";
 import type { UpstreamFixture } from "./__fixtures__/upstream-server.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 let double: EngineDouble;
 let proxy: EgressProxy;
@@ -171,8 +171,8 @@ describe.skipIf(process.platform === "win32")("listenSocket (POSIX)", () => {
       },
     });
     expect(reply.status).toBe(200);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.body).toBe("saw Bearer [REDACTED]");
-    expect(reply.raw).not.toContain(SECRET_VALUE);
     // The socket peer has no address: the caller carries none (a NULL ip_address).
     expect(double.resolveForProxy.mock.calls[0]?.[1]).not.toHaveProperty("remote_address");
   });

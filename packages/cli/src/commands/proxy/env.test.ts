@@ -11,6 +11,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerProxyEnvCommand } from "./env.js";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const run = buildCli(
   (program) => registerProxyEnvCommand(program.command("proxy")),
@@ -50,6 +51,7 @@ const WINDOWS_GIT =
 
 let spies: CliSpies;
 const platform = process.platform;
+const TOKEN_FILE_PREFIX = "eyJfixture";
 
 /** The platform the action reads for the socket line, stubbed so every row runs on every leg. */
 function stubPlatform(value: NodeJS.Platform): void {
@@ -236,7 +238,7 @@ describe("proxy env — the Harpoc CA lines (B8)", () => {
       await run(["agent", "secret://gh-pat", "--runtime-dir", runDir]);
       await run(["agent", "secret://gh-pat", "--runtime-dir", runDir, "--json"]);
 
-      expect(spies.stdout()).not.toContain("eyJfixture");
+      expectAbsent(spies.stdout(), TOKEN_FILE_PREFIX);
     } finally {
       rmSync(runDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }

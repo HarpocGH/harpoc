@@ -1,6 +1,10 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi, type Mock } from "vitest";
 import { promptConfirm, promptHidden } from "./prompt.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const HIDDEN_VALUE = "super-hidden";
+const TYPED_PASSWORD = "hunter2";
 
 function sink(): PassThrough {
   return new PassThrough();
@@ -120,10 +124,10 @@ describe("promptHidden", () => {
       seen += d.toString("utf8");
     });
     const p = promptHidden("Secret value: ", input, out);
-    input.write("super-hidden\n");
+    input.write(`${HIDDEN_VALUE}\n`);
     await p;
+    expectAbsent(seen, HIDDEN_VALUE);
     expect(seen).toContain("Secret value: ");
-    expect(seen).not.toContain("super-hidden");
   });
 
   it("never echoes typed characters when the output is a TTY", async () => {
@@ -144,9 +148,9 @@ describe("promptHidden", () => {
       input.write(ch);
     }
     input.write("\r");
-    await expect(p).resolves.toBe("hunter2");
+    await expect(p).resolves.toBe(TYPED_PASSWORD);
+    expectAbsent(seen, TYPED_PASSWORD);
     expect(seen).toContain("Password: ");
-    expect(seen).not.toContain("hunter2");
     expect(seen.replace("Password: ", "").replace(/\r?\n/g, "")).toBe("");
   });
 

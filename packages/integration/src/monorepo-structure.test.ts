@@ -153,6 +153,139 @@ const NODE_ONLY_GLOBALS = [
   "global",
 ] as const;
 
+const CREDENTIAL_NEEDLE_NAMES = [
+  "ACCESS_TOKEN",
+  "ACCESS_TOKEN_PREFIX",
+  "ACCESS_TOKEN_VALUE",
+  "AC_CLIENT_SECRET",
+  "ALPHA_SECRET",
+  "API_KEY_VALUE",
+  "ARMOR_MARKER",
+  "ARM_PASSWORD",
+  "AUTH_PASSWORD",
+  "B64",
+  "BACKSLASH_CREDENTIAL",
+  "BACKSLASH_CREDENTIAL_TAIL",
+  "BACKSLASH_LITERAL",
+  "BEARERISH",
+  "BEARER_ACCESS_TOKEN",
+  "BEARER_JWT_PREFIX",
+  "BEARER_TOKEN",
+  "BETA_SECRET",
+  "BRIDGE_AMBIENT_TOKEN",
+  "BRIDGE_FILE_TOKEN",
+  "CAP_CREDENTIAL_TAIL",
+  "CA_KEY_BODY",
+  "CC_ACCESS_TOKEN",
+  "CC_CLIENT_SECRET",
+  "CLIENT_SECRET",
+  "CREDENTIAL",
+  "CREDENTIAL_PATTERN_TOKEN",
+  "D2_BOUNDARY_CREDENTIAL",
+  "D2_BOUNDARY_CREDENTIAL_TAIL",
+  "DB_COUNTERPART_PASSWORD",
+  "DB_PASSWORD",
+  "DB_SECRET_FRAGMENT",
+  "DB_USERNAME",
+  "DESCENT_GATE_SECRET",
+  "DESCENT_GATE_SECRET_TAIL",
+  "DUPLICATE_SECRET_VALUE",
+  "ECHOED_CREDENTIAL",
+  "ESCAPE_LETTER_TOKEN",
+  "EXPIRED_SECRET_VALUE",
+  "FLAT_PASS_SECRET",
+  "FLOOR_USERNAME",
+  "FORM_CREATE_VALUE",
+  "FORM_POSTED_VALUE",
+  "FORM_ROTATE_VALUE",
+  "GIT_TOKEN",
+  "HEADER_ECHO_TOKEN",
+  "HEAD_REQUEST_TOKEN",
+  "HEX",
+  "HIDDEN_VALUE",
+  "IGNORED_PASSWORD",
+  "IGNORED_SECRET",
+  "JWT_PREFIX",
+  "KEY_AUTHORIZATION",
+  "KEY_B64",
+  "KEY_HEX",
+  "KEY_MARKER",
+  "KEY_POSITION_CREDENTIAL",
+  "KEY_POSITION_CREDENTIAL_TAIL",
+  "LITERAL_TOKEN",
+  "LOGIN_PASSWORD",
+  "LONGER_VALUE",
+  "MCP_CC_ACCESS_TOKEN",
+  "MCP_CC_CLIENT_SECRET",
+  "MCP_USE_SECRET",
+  "MINTED_TOKEN",
+  "MY_CLIENT_SECRET",
+  "NEEDLE",
+  "NON_ASCII_CREDENTIAL_PREFIX",
+  "NON_ASCII_ESCAPE_FRAGMENT",
+  "NO_USE_TOKEN",
+  "OAUTH_CLIENT_SECRET",
+  "OAUTH_TOKEN",
+  "PASSWORD_HALF",
+  "PASSWORD_WITH_AT",
+  "PEM_ARMOR",
+  "PEM_KEY_BODY",
+  "PHP_CREDENTIAL_PREFIX",
+  "PHP_ESCAPED_CREDENTIAL",
+  "PLAINTEXT",
+  "PLAIN_CRED",
+  "PLAIN_SECRET",
+  "PLAIN_VALUE",
+  "PRIVATE_KEY_ARMOR",
+  "PROC_SECRET",
+  "PROMPT_CLIENT_SECRET",
+  "PROMPT_CREATE_VALUE",
+  "PROMPT_ROTATE_VALUE",
+  "PROTO_SIBLING_CREDENTIAL_TAIL",
+  "QUERY_TOKEN",
+  "QUOTE_CREDENTIAL_TAIL",
+  "REFRESHED_ACCESS_TOKEN",
+  "REFRESH_TOKEN",
+  "REFRESH_TOKEN_VALUE",
+  "REFUSED_TOKEN",
+  "REGISTRY_PASSWORD",
+  "REGISTRY_USER",
+  "REMOVED_FLAG_TOKEN",
+  "REPEATED_TOKEN",
+  "REVOKED_SECRET_VALUE",
+  "ROTATED_SECRET",
+  "SANITIZATION_SECRET_PREFIX",
+  "SECOND_CREDENTIAL",
+  "SECRET",
+  "SECRET_TOKEN",
+  "SECRET_VALUE",
+  "SEEDED_ACCESS_TOKEN",
+  "SEEDED_REFRESH_TOKEN",
+  "SENTINEL",
+  "SHORT_USERNAME",
+  "STORED_PASSPHRASE",
+  "SUPERSEDED_TOKEN",
+  "TARGET_VALUE",
+  "TEMP_PATH_CREDENTIAL",
+  "TOKEN",
+  "TOKENLESS_AMBIENT_TOKEN",
+  "TOKEN_FILE_PREFIX",
+  "TYPED_PASSPHRASE",
+  "TYPED_PASSWORD",
+  "TYPED_PREFIX",
+  "TYPED_VALUE",
+  "UNICODE_ESCAPE_CREDENTIAL",
+  "URL_CREDENTIAL",
+  "URL_PASSWORD",
+  "USER",
+  "VALUE",
+  "VALUE_BEFORE_LF",
+  "WRONG_PASSPHRASE",
+  "WRONG_PASSWORD_PREFIX",
+] as const;
+const EXPECT_ABSENT_MESSAGE =
+  "use expectAbsent from @harpoc/test-utils: a failing not.toContain prints both operands";
+
 describe("shared", () => {
   describeBuildOutput(sharedDistDir);
 });
@@ -371,6 +504,48 @@ describe("the base lib is ES2022 without DOM (U-4, C-24)", () => {
         { object: "globalThis", property: "Buffer" },
       ],
     });
+  });
+
+  it("eslint.config.js refuses .not.toContain(<name>) in test files for every constant name the redaction sweep checks for absence (C-8)", async () => {
+    type FlatConfig = { files?: unknown; ignores?: unknown; rules?: Record<string, unknown> };
+    const { default: configs } = (await import(
+      pathToFileURL(resolve(monorepoRoot, "eslint.config.js")).href
+    )) as { default: FlatConfig[] };
+    const files = ["packages/*/src/**/*.test.ts", "packages/*/src/**/*.test.tsx"];
+    const blocks = configs.filter(
+      (config) => JSON.stringify(config.files) === JSON.stringify(files),
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      files,
+      rules: {
+        "no-restricted-syntax": [
+          "error",
+          {
+            selector: `CallExpression[callee.property.name="toContain"][callee.object.type="MemberExpression"][callee.object.property.name="not"][arguments.0.type="Identifier"][arguments.0.name=/^(?:${CREDENTIAL_NEEDLE_NAMES.join("|")})$/]`,
+            message: EXPECT_ABSENT_MESSAGE,
+          },
+        ],
+      },
+    });
+  });
+
+  it("the root config reports .not.toContain on a listed name in a test file and passes a literal needle and expectAbsent (C-8)", async () => {
+    const { ESLint } = await import("eslint");
+    const linter = new ESLint({
+      cwd: monorepoRoot,
+      overrideConfigFile: resolve(monorepoRoot, "eslint.config.js"),
+    });
+    const filePath = resolve(monorepoRoot, "packages", "core", "src", "example.test.ts");
+    const lint = async (code: string) =>
+      (await linter.lintText(code, { filePath }))
+        .flatMap((result) => result.messages)
+        .map(({ ruleId, severity, message }) => ({ ruleId, severity, message }));
+    expect(await lint("expect(text).not.toContain(SECRET);\n")).toEqual([
+      { ruleId: "no-restricted-syntax", severity: 2, message: EXPECT_ABSENT_MESSAGE },
+    ]);
+    expect(await lint('expect(text).not.toContain("x");\n')).toEqual([]);
+    expect(await lint("expectAbsent(text, SECRET);\n")).toEqual([]);
   });
 });
 

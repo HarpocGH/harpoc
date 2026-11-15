@@ -21,7 +21,12 @@ import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import { KEY_PEM, CERT_PEM, EXPIRED_KEY_PEM, EXPIRED_CERT_PEM } from "./helpers/cert-fixtures.js";
 import { canon, keyNeedles } from "./helpers/key-needles.js";
 import type { Needle } from "./helpers/key-needles.js";
-import { connectInMemoryClient, expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
+import {
+  connectInMemoryClient,
+  expectAbsent,
+  expectVaultError,
+  silenceAuditLines,
+} from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -559,7 +564,7 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       PRINCIPAL,
     ].join(" ");
     for (const needle of NEEDLES) {
-      expect(publicVocabulary, needle.label).not.toContain(needle.value);
+      expectAbsent(publicVocabulary, needle.value, needle.label);
     }
 
     // Positive controls: the credentials really are in play under exactly these
@@ -702,14 +707,14 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
 
     const handle = `secret://${MCP_CC_NAME}`;
     const text = result.content[0]?.text ?? "";
+    expectAbsent(text, MCP_CC_CLIENT_SECRET, "the tool result");
+    expectAbsent(text, MCP_CC_ACCESS_TOKEN, "the tool result");
     expect(result.isError ?? false, text).toBe(false);
     expect(JSON.parse(text)).toEqual({
       handle,
       status: "authorized",
       message: "Client credentials flow completed for custom",
     });
-    expect(text).not.toContain(MCP_CC_CLIENT_SECRET);
-    expect(text).not.toContain(MCP_CC_ACCESS_TOKEN);
 
     // The provider saw exactly one exchange, carrying the collected secret.
     expect(mock.requests.slice(providerCalls)).toHaveLength(1);
@@ -726,6 +731,8 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
     const rows = vault.engine
       .queryAudit({ secretId, eventType: AuditEventType.OAUTH_AUTHORIZE })
       .sort((a, b) => a.id - b.id);
+    expectAbsent(JSON.stringify(rows), MCP_CC_CLIENT_SECRET, "the audit rows");
+    expectAbsent(JSON.stringify(rows), MCP_CC_ACCESS_TOKEN, "the audit rows");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       success: true,
@@ -738,8 +745,6 @@ describe("OAuth and certificate security posture across the wired surfaces", () 
       grant_type: "client_credentials",
       interface: "mcp",
     });
-    expect(JSON.stringify(rows)).not.toContain(MCP_CC_CLIENT_SECRET);
-    expect(JSON.stringify(rows)).not.toContain(MCP_CC_ACCESS_TOKEN);
   });
 
   it("7. a declined MCP client_credentials collection creates nothing: no secret, no oauth.authorize row, no provider call (S2)", async () => {

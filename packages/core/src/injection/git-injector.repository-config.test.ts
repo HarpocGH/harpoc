@@ -18,6 +18,7 @@ import { startGitSmartHttp, startRecorder } from "./__fixtures__/git-smart-http.
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * S1 (code review 2026-10-15): the caller's repository config — and the host's
@@ -264,11 +265,11 @@ describeGit(
           args: ["--no-rebase"],
         });
 
+        expectAbsent(JSON.stringify(result), TOKEN);
         expect(result.exit_code, result.stderr).toBe(0);
         expect(readFileSync(join(wt, "b.evil"), "utf8")).toBe("checked out through the filter\n");
         expect(leaked()).toEqual([]);
         expect(ran()).toEqual(["mergedriver", "smudge"]);
-        expect(JSON.stringify(result)).not.toContain(TOKEN);
       });
 
       it("the tree's http.proxy and http.extraHeader never reach the authenticated fetch", async () => {

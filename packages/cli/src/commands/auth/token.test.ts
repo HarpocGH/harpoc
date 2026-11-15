@@ -28,11 +28,13 @@ import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAuthTokenCommand } from "./token.js";
 import { readLaunchTokenFile } from "@harpoc/mcp-server";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const run = buildCli(
   (program) => registerAuthTokenCommand(program.command("auth")),
   ["auth", "token"],
 );
+const MINTED_TOKEN = "jwt-token";
 
 describe("auth token --principal-type", () => {
   let spies: CliSpies;
@@ -219,10 +221,10 @@ describe("auth token --out", () => {
     const out = join(dir, "launch-token");
     await run(["--agent", "bot-1", "--out", out]);
 
-    expect(readFileSync(out, "utf8")).toBe("jwt-token\n");
-    expect(spies.stdout()).not.toContain("jwt-token");
+    expect(readFileSync(out, "utf8")).toBe(`${MINTED_TOKEN}\n`);
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
     expect(spies.stderr()).toContain(`Token written to ${out}`);
-    expect(spies.stderr()).not.toContain("jwt-token");
     expect(spies.stdout()).toContain("Subject");
   });
 
@@ -231,10 +233,10 @@ describe("auth token --out", () => {
     await run(["--agent", "bot-1", "--out", out, "--json"]);
 
     const payload = JSON.parse(spies.stdout()) as { token?: string; token_file?: string };
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
     expect(payload.token_file).toBe(out);
     expect(payload.token).toBeUndefined();
-    expect(spies.stdout()).not.toContain("jwt-token");
-    expect(spies.stderr()).not.toContain("jwt-token");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
   });
 
   it("refuses an existing --out path before the token is minted", async () => {
@@ -256,7 +258,7 @@ describe("auth token --out", () => {
     expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(spies.stderr()).toContain("ENOENT");
     expect(mockEngine.createToken).not.toHaveBeenCalled();
-    expect(spies.stdout()).not.toContain("jwt-token");
+    expectAbsent(spies.stdout(), MINTED_TOKEN);
   });
 
   it("removes the opened file when the mint itself is refused", async () => {
@@ -268,8 +270,8 @@ describe("auth token --out", () => {
     await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
     expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(existsSync(out)).toBe(false);
-    expect(spies.stdout()).not.toContain("jwt-token");
-    expect(spies.stderr()).not.toContain("jwt-token");
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
     // The happy unlink path is silent: the warning is for an unlink that failed.
     expect(spies.stderr()).not.toContain("could not remove the empty");
   });
@@ -292,7 +294,7 @@ describe("auth token --out", () => {
       expect(spies.stderr()).toContain("EEXIST");
       expect(existsSync(target)).toBe(false);
       expect(mockEngine.createToken).not.toHaveBeenCalled();
-      expect(spies.stdout()).not.toContain("jwt-token");
+      expectAbsent(spies.stdout(), MINTED_TOKEN);
     },
   );
 

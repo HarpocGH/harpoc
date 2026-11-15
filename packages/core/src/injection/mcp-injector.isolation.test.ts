@@ -21,6 +21,7 @@ import type { IsolationDimensions } from "./isolation.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("./isolation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./isolation.js")>();
@@ -344,6 +345,6 @@ describe("McpInjector — isolation: the stdio child spawns wrapped (D51)", () =
     const leak = await run(mcpAction("leak-env"), {
       policy: { ...POLICY, network_isolation: true },
     });
-    expect(JSON.stringify(leak)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(leak), SECRET);
   });
 });

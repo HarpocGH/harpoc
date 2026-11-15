@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { connect as tlsConnect } from "node:tls";
 import { ECHO_HTTPS, ATTACKER, assertFleetUp } from "./backends.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /** Handshake against the bound socket under an arbitrary SNI/verification name. */
 function handshakeAs(servername: string): Promise<{ authorized: boolean; error?: string }> {
@@ -104,6 +105,9 @@ describe("echo-https backend", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as Record<string, string>;
 
+      // A partial echo must not accidentally contain the whole credential, or
+      // the arm would measure the wrong class.
+      expectAbsent(JSON.stringify(body), credential);
       // Contiguous-pattern matching cannot catch these by construction — that
       // is the §6.2.7 class-2 residual, and it needs a real emitter to measure.
       expect(body["first8"]).toBe(credential.slice(0, 8));
@@ -114,9 +118,6 @@ describe("echo-https backend", () => {
           .filter((_, i) => i % 2 === 0)
           .join(""),
       );
-      // A partial echo must not accidentally contain the whole credential, or
-      // the arm would measure the wrong class.
-      expect(JSON.stringify(body)).not.toContain(credential);
     });
 
     it("puts the credential in the status reason phrase on /echo/reason", async () => {
@@ -151,11 +152,11 @@ describe("echo-https backend", () => {
         headers: { authorization: `Bearer ${credential}` },
       });
       const text = await res.text();
+      expectAbsent(text, JSON.stringify(credential).slice(1, -1));
       // The discriminating property: the solidus IS escaped and the non-ASCII
       // character IS \u-escaped, neither of which JSON.stringify produces.
       expect(text).toContain("\\/");
       expect(text).toContain("\\u00fc");
-      expect(text).not.toContain(JSON.stringify(credential).slice(1, -1));
       // And it is still valid JSON carrying the credential.
       expect((JSON.parse(text) as { echo: string }).echo).toBe(credential);
     });

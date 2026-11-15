@@ -26,7 +26,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
-import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -402,7 +402,7 @@ describe("Full Lifecycle", () => {
 
     // The echo server returned the Authorization header in the body.
     // InjectionGuard should have redacted the Bearer token in the body.
-    expect(response.body).not.toContain(SECRET_VALUE);
+    expectAbsent(response.body, SECRET_VALUE);
   });
 
   // ---- Test 5: REST GET /api/v1/secrets -----------------------------------

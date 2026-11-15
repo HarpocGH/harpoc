@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FORBIDDEN_MODULE_MARKER, resolveTripwireImportUrl } from "@harpoc/test-utils";
+import {
+  expectAbsent,
+  FORBIDDEN_MODULE_MARKER,
+  resolveTripwireImportUrl,
+} from "@harpoc/test-utils";
 
 /**
  * I35 (test-review-2026-10-09): `harpoc-mcp`'s own `--allow-tokenless` conflict
@@ -124,6 +128,10 @@ function expectRefusedBeforeAnyVault(result: McpResult, message: string): void {
 
 const CONFLICTS_WITH_A_TOKEN =
   "Error: --allow-tokenless conflicts with a launch token (--token-file / HARPOC_TOKEN). Provide one or the other.";
+const TOKENLESS_AMBIENT_TOKEN = "i35.ambient.launch-token";
+const URL_PASSWORD = "s3cret";
+const BRIDGE_AMBIENT_TOKEN = "b1.ambient.launch-token";
+const BRIDGE_FILE_TOKEN = "b1.bridge.token";
 
 describe("harpoc-mcp --allow-tokenless conflicts (spawned binary, I35)", () => {
   it("refuses --allow-tokenless with --http before any vault is opened", async () => {
@@ -137,10 +145,10 @@ describe("harpoc-mcp --allow-tokenless conflicts (spawned binary, I35)", () => {
   it("refuses --allow-tokenless with an ambient HARPOC_TOKEN before any vault is opened", async () => {
     const result = await runMcp(
       ["--allow-tokenless"],
-      childEnv({ HARPOC_TOKEN: "i35.ambient.launch-token" }),
+      childEnv({ HARPOC_TOKEN: TOKENLESS_AMBIENT_TOKEN }),
     );
+    expectAbsent(result.stderr, TOKENLESS_AMBIENT_TOKEN);
     expectRefusedBeforeAnyVault(result, CONFLICTS_WITH_A_TOKEN);
-    expect(result.stderr).not.toContain("i35.ambient.launch-token");
   }, 30_000);
 
   it("refuses --allow-tokenless with --token-file before the file is read or any vault is opened", async () => {
@@ -228,10 +236,10 @@ describe("harpoc-mcp --url refusals (spawned binary, B1)", () => {
         }),
         vaultDir,
       );
+      expectAbsent(result.stderr, URL_PASSWORD);
+      expectAbsent(result.stderr, BRIDGE_AMBIENT_TOKEN);
       expectRefusedBeforeAnyVault(result, message);
       expect(result.stderr).not.toContain("Cannot read --token-file");
-      expect(result.stderr).not.toContain("s3cret");
-      expect(result.stderr).not.toContain("b1.ambient.launch-token");
     },
     30_000,
   );
@@ -256,9 +264,9 @@ describe("harpoc-mcp --url holds no engine (spawned binary under the resolve-hoo
       vaultDir,
       ["--import", tripwire],
     );
+    expectAbsent(result.stderr, BRIDGE_FILE_TOKEN);
     expect(result.stderr).not.toContain(FORBIDDEN_MODULE_MARKER);
     expect(result.stderr).toContain("Harpoc MCP bridge → http://127.0.0.1:1 (stdio)");
-    expect(result.stderr).not.toContain("b1.bridge.token");
     expect(result.stdout).toBe("");
     expect(result.code).toBe(0);
     expect(readdirSync(vaultDir)).toEqual(["token.jwt"]);

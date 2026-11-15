@@ -4,7 +4,7 @@ import { ImapClient } from "./imap-client.js";
 import type { ImapConnectOptions, ImapEnvelope } from "./imap-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeImap } from "./__fixtures__/fake-imap-server.js";
 import type { FakeImap, ImapScript } from "./__fixtures__/fake-imap-server.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const servers: FakeImap[] = [];
 const clients: ImapClient[] = [];
@@ -62,6 +62,7 @@ const SUBJECT_AS_LITERAL = [
   literal("Café!"),
   ` ${FROM} ${SENDER} ${REPLY_TO} ${TO} ${CC} NIL NIL "<m1@x.test>")`,
 ];
+const LOGIN_PASSWORD = "S3CRET-TOKEN-xyz";
 
 describe("ImapClient — FETCH reads an envelope field sent as a literal in place", () => {
   it("'envelope': the subject sent as {6}\\r\\nCafé! is the subject, decoded as UTF-8, and every other field is its own", async () => {
@@ -260,7 +261,7 @@ describe("ImapClient — a NUL byte in a server text line is a protocol fault", 
       () => client.fetch([18], "full"),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
+    expectAbsent(err.message, LOGIN_PASSWORD);
     expect(err.message).toContain(FIXTURE_HOST);
-    expect(err.message).not.toContain("S3CRET-TOKEN-xyz");
   });
 });

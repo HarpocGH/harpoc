@@ -22,6 +22,7 @@ vi.mock("../../utils/vault-loader.js", () => ({
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerSecretUseCommand, summarizeResult } from "./use.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const HTTP_ARGS = ["--action", "http", "--url", "https://api.example.com/v1"];
 
@@ -1661,7 +1662,7 @@ describe("secret use — output shape and boundary sanitization", () => {
       }),
     );
     const out = await output(["secret://k", ...HTTP_ARGS, "--json"]);
-    expect(out).not.toContain(leaked);
+    expectAbsent(out, leaked);
     expect(out).toContain("[REDACTED]");
   });
 

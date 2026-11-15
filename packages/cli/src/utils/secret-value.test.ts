@@ -11,7 +11,7 @@ import {
   readSecretValueFromFile,
   resolveSecretValue,
 } from "./secret-value.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("@harpoc/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@harpoc/core")>();
@@ -19,6 +19,7 @@ vi.mock("@harpoc/core", async (importOriginal) => {
 });
 
 const PASSPHRASE = "correct horse battery";
+const TYPED_PASSPHRASE = "sentinel-passphrase-xyz";
 
 let tempDir: string;
 
@@ -287,7 +288,7 @@ describe("resolveSecretValue — decrypt at import", () => {
       },
       (e: unknown) => e as Error,
     );
-    expect(err.message).not.toContain("sentinel-passphrase-xyz");
+    expectAbsent(err.message, TYPED_PASSPHRASE);
   });
 });
 

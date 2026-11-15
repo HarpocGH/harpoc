@@ -1,7 +1,7 @@
 import { request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
-import { isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
+import { expectAbsent, isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { VaultEngine } from "@harpoc/core";
@@ -120,6 +120,8 @@ const MODERN_HEADERS = {
   "mcp-method": "tools/list",
   "mcp-protocol-version": "2026-07-28",
 };
+const JWT_PREFIX = "eyJhbG";
+const FORM_POSTED_VALUE = "posted-into-the-loopback-form";
 
 interface RawResponse {
   status: number;
@@ -1040,8 +1042,8 @@ describe("startMcpHttpServer — one rate limiter and one injection guard per li
         arguments: { handle: "secret://i10-key", action },
       })) as ToolResult;
       expect(result.isError ?? false).toBe(false);
+      expectAbsent(result.content[0]?.text, JWT_PREFIX);
       expect(result.content[0]?.text).toContain("[REDACTED]");
-      expect(result.content[0]?.text).not.toContain("eyJhbG");
     }
 
     expect(engine.useSecret).toHaveBeenCalledTimes(3);
@@ -1192,9 +1194,9 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
       })) as { content: Array<{ text: string }> };
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
 
+      expectAbsent(result.content[0]?.text, FORM_POSTED_VALUE);
       expect(payload.status).toBe("created");
-      expect(captured).toBe("posted-into-the-loopback-form");
-      expect(result.content[0]?.text).not.toContain("posted-into-the-loopback-form");
+      expect(captured).toBe(FORM_POSTED_VALUE);
       expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);
     } finally {
       await client.close();

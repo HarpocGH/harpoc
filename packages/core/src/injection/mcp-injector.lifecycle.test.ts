@@ -12,6 +12,7 @@ import {
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry, sanitizeDownstreamStderr } from "./mcp-registry.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const NODE = process.execPath;
 const SECRET = "sk-mcp-crash-supersecret-abcdef123456";
@@ -146,9 +147,9 @@ describe("McpInjector — crash audit detail redaction (M9)", () => {
 
     // The tail is recorded (the channel works) but carries no credential in
     // any of the encodings the sanitizer covers.
+    expectAbsent(tail, SECRET);
+    expectAbsent(tail, Buffer.from(SECRET).toString("base64"));
     expect(tail).toContain("FATAL config dump");
-    expect(tail).not.toContain(SECRET);
-    expect(tail).not.toContain(Buffer.from(SECRET).toString("base64"));
   }, 20_000);
 
   /**

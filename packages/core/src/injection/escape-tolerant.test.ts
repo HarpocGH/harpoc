@@ -1,12 +1,18 @@
 // packages/core/src/injection/escape-tolerant.test.ts
 import { describe, it, expect } from "vitest";
 import { redactEscapeTolerant } from "./escape-tolerant.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const R = "[REDACTED]";
+const LITERAL_TOKEN = "tok-en";
+const REPEATED_TOKEN = "ab";
+const ESCAPE_LETTER_TOKEN = "u";
 
 describe("redactEscapeTolerant", () => {
   it("redacts a literal occurrence", () => {
-    expect(redactEscapeTolerant("a tok-en b", "tok-en", R)).toBe(`a ${R} b`);
+    const out = redactEscapeTolerant(`a ${LITERAL_TOKEN} b`, LITERAL_TOKEN, R);
+    expectAbsent(out, LITERAL_TOKEN);
+    expect(out).toBe(`a ${R} b`);
   });
 
   it("redacts the PHP convention, which escapes the solidus", () => {
@@ -37,7 +43,9 @@ describe("redactEscapeTolerant", () => {
   });
 
   it("redacts every occurrence, not just the first", () => {
-    expect(redactEscapeTolerant("x ab y \\u0061b z", "ab", R)).toBe(`x ${R} y ${R} z`);
+    const out = redactEscapeTolerant(`x ${REPEATED_TOKEN} y \\u0061b z`, REPEATED_TOKEN, R);
+    expectAbsent(out, REPEATED_TOKEN);
+    expect(out).toBe(`x ${R} y ${R} z`);
   });
 
   it("leaves a non-match untouched", () => {
@@ -58,7 +66,9 @@ describe("redactEscapeTolerant", () => {
     // It is tolerated on purpose: the alternative (skipping whole escape units
     // on a failed attempt) would miss the case pinned below, and a missed
     // redaction is the one failure this layer must not have.
-    expect(redactEscapeTolerant("\\u0062", "u", R)).toBe(`\\${R}0062`);
+    const out = redactEscapeTolerant("\\u0062", ESCAPE_LETTER_TOKEN, R);
+    expectAbsent(out, ESCAPE_LETTER_TOKEN);
+    expect(out).toBe(`\\${R}0062`);
   });
 
   it("never misses a value that appears literally in non-JSON output", () => {

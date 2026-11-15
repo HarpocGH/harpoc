@@ -10,7 +10,7 @@ import { PROXY_CA_HANDLE, VaultEngine } from "./vault-engine.js";
 import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -81,7 +81,7 @@ describe("createProxyCa — secret://harpoc-ca", () => {
     const created = await engine.createProxyCa(CA);
 
     expect(JSON.stringify(created).includes('"type":"Buffer"')).toBe(false);
-    expect(JSON.stringify(created)).not.toContain(KEY_BODY.slice(0, 40));
+    expectAbsent(JSON.stringify(created), KEY_BODY.slice(0, 40));
     expect(created).toEqual({
       handle: PROXY_CA_HANDLE,
       hosts: HOSTS,
@@ -117,7 +117,7 @@ describe("createProxyCa — secret://harpoc-ca", () => {
     expect(issued).toHaveLength(1);
     expect(issued[0]).toMatchObject({ success: true, principal_type: null, principal_id: null });
     expect(everyRowText().includes('"type":"Buffer"')).toBe(false);
-    expect(everyRowText()).not.toContain(KEY_BODY.slice(0, 40));
+    expectAbsent(everyRowText(), KEY_BODY.slice(0, 40));
     expect(issued[0]?.detail).toEqual({
       handle: PROXY_CA_HANDLE,
       action: "proxy_ca_init",
@@ -290,7 +290,7 @@ describe("loadProxyCa — the daemon's one read", () => {
     expect(reads).toHaveLength(1);
     expect(reads[0]).toMatchObject({ success: true, principal_type: null });
     expect(everyRowText().includes('"type":"Buffer"')).toBe(false);
-    expect(everyRowText()).not.toContain(KEY_BODY.slice(0, 40));
+    expectAbsent(everyRowText(), KEY_BODY.slice(0, 40));
     expect(reads[0]?.detail).toEqual({ config: "certificate_private_key" });
   });
 

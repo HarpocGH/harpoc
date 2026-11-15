@@ -4,6 +4,7 @@ import { requireFsIsolation, requireNetworkIsolation } from "@harpoc/core";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { assertTierAvailable } from "./helpers/platform-tiers.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * Stdio MCP downstreams under an isolation policy (thesis §4.5.3 layer 4,
@@ -141,7 +142,7 @@ describe.skipIf(!posix)("stdio MCP downstream under network_isolation — real k
     expect("fs_isolation_mechanism" in (spawns[0]?.detail ?? {})).toBe(false);
 
     const leak = await vault.engine.useSecret(setup.handle, mcpAction("leak-env"));
-    expect(JSON.stringify(leak)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(leak), SECRET);
     expect(JSON.stringify(leak)).toContain("[REDACTED]");
   });
 

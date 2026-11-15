@@ -6,7 +6,7 @@ import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { HttpInjector, applyInjectionConfig } from "./http-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 let server: Server;
 let baseUrl: string;
@@ -18,6 +18,9 @@ const logger = {
     return 1;
   },
 } as unknown as AuditLogger;
+const HEADER_ECHO_TOKEN = "header-echo-token-value";
+const ECHOED_CREDENTIAL = "echo-me-token-value";
+const HEAD_REQUEST_TOKEN = "head-token";
 
 // The recording logger is module-scoped, so every case that reads `rows.at(-1)`
 // starts from an empty log — no row may be load-bearing across cases.
@@ -443,9 +446,9 @@ describe("HttpInjector", () => {
             "any",
           ),
         );
+        expectAbsent(err.message, CREDENTIAL);
+        expectAbsent(err.message, encodeURIComponent(CREDENTIAL));
         expect(err).toMatchObject({ code: ErrorCode.REDIRECT_POLICY_VIOLATION });
-        expect(err.message).not.toContain(CREDENTIAL);
-        expect(err.message).not.toContain(encodeURIComponent(CREDENTIAL));
       });
 
       it("header injection: SSRF-refused hop reflecting the header value", async () => {
@@ -457,7 +460,7 @@ describe("HttpInjector", () => {
             "any",
           ),
         );
-        expect(err.message).not.toContain(CREDENTIAL);
+        expectAbsent(err.message, CREDENTIAL);
       });
 
       it("allowlist-refused hop reflecting the token", async () => {
@@ -473,8 +476,8 @@ describe("HttpInjector", () => {
             "any",
           ),
         );
+        expectAbsent(err.message, CREDENTIAL);
         expect(err).toMatchObject({ code: ErrorCode.URL_NOT_ALLOWED });
-        expect(err.message).not.toContain(CREDENTIAL);
       });
 
       it("status_only does not help — the leak was on the throw path", async () => {
@@ -490,7 +493,7 @@ describe("HttpInjector", () => {
             "any",
           ),
         );
-        expect(err.message).not.toContain(CREDENTIAL);
+        expectAbsent(err.message, CREDENTIAL);
       });
 
       // Pins guard 1 (origin only, never the full URL) independently of the
@@ -520,7 +523,7 @@ describe("HttpInjector", () => {
             "any",
           ),
         );
-        expect(err.message).not.toContain(lower);
+        expectAbsent(err.message, lower);
       });
 
       it("still names the refused origin, so the refusal stays diagnosable", async () => {
@@ -636,8 +639,8 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(200);
+      expectAbsent(response.body, CREDENTIAL);
       expect(echoed(response).authorization).toBe("");
-      expect(response.body).not.toContain(CREDENTIAL);
       expect(response.redirect_warning).toContain("credentials stripped");
     });
 
@@ -655,8 +658,8 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(200);
+      expectAbsent(response.body, CREDENTIAL);
       expect(echoed(response).custom_header).toBe("");
-      expect(response.body).not.toContain(CREDENTIAL);
     });
 
     // basic_auth shares the Authorization header with bearer but encodes the
@@ -674,8 +677,8 @@ describe("HttpInjector", () => {
         "same-origin",
       );
 
+      expectAbsent(response.body, Buffer.from(`user:${CREDENTIAL}`).toString("base64"));
       expect(echoed(response).authorization).toBe("");
-      expect(response.body).not.toContain(Buffer.from(`user:${CREDENTIAL}`).toString("base64"));
     });
 
     it("the injected query parameter does not survive the cross-origin hop", async () => {
@@ -692,8 +695,8 @@ describe("HttpInjector", () => {
       );
 
       expect(response.status).toBe(200);
+      expectAbsent(response.body, CREDENTIAL);
       expect(echoed(response).query_key).toBe("");
-      expect(response.body).not.toContain(CREDENTIAL);
     });
 
     // Controls: stripping is scoped to cross-origin hops under same-origin
@@ -975,10 +978,10 @@ describe("HttpInjector", () => {
         { type: "bearer" },
       );
 
+      expectAbsent(JSON.stringify(response), HEAD_REQUEST_TOKEN);
       expect(response).toMatchObject({ type: "http", status: 200, body: "" });
       expect(response.headers?.["x-echo-method"]).toBe("HEAD");
       expect(response.headers?.["x-echo"]).toBe("[REDACTED]");
-      expect(JSON.stringify(response)).not.toContain("head-token");
     });
   });
 
@@ -1142,7 +1145,7 @@ describe("HttpInjector", () => {
         "any",
         "secret-1",
       );
-      expect(response.body).not.toContain("echo-me-token-value");
+      expectAbsent(response.body, ECHOED_CREDENTIAL);
       expect(response.body).toContain("[REDACTED]");
       const last = rows.at(-1) as { detail: Record<string, unknown> };
       expect(last.detail).toMatchObject({ context: "http", status: 200, sanitized: true });
@@ -1185,6 +1188,7 @@ describe("HttpInjector", () => {
         "secret-1",
       );
       expect(response.body).toBe('{"ok":true}');
+      expectAbsent(response.headers?.["x-echo"], HEADER_ECHO_TOKEN);
       expect(response.headers?.["x-echo"]).toBe("[REDACTED]");
       const last = rows.at(-1) as { detail: Record<string, unknown> };
       expect(last.detail).toMatchObject({ context: "http", status: 200, sanitized: true });

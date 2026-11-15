@@ -5,7 +5,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { canon, keyNeedles } from "./helpers/key-needles.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * SSH context (thesis §4.5.7, §6.2 host-redirection). Deterministic enforcement:
@@ -114,8 +114,7 @@ describe("SSH context (process-mediated, §4.5.7)", () => {
     ];
     for (const needle of needles) expect(canon(keyPem)).toContain(canon(needle.value));
     for (const surface of [err.message, String(err.stack), JSON.stringify(err)]) {
-      for (const needle of needles)
-        expect(canon(surface), needle.label).not.toContain(canon(needle.value));
+      for (const needle of needles) expectAbsent(canon(surface), canon(needle.value), needle.label);
     }
   });
 });

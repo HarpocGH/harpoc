@@ -9,7 +9,7 @@ import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { forceFsIsolationUnavailableForTests } from "./fs-isolation.js";
 import { forceNetworkIsolationUnavailableForTests } from "./network-isolation.js";
 import { ProcessInjector } from "./process-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const NODE = process.execPath;
 const SECRET = "sk-supersecret-abcdef123456";
@@ -64,7 +64,7 @@ describe("ProcessInjector — env injection & output", () => {
 describe("ProcessInjector — output sanitization", () => {
   it("redacts the raw credential echoed to stdout", async () => {
     const result = await run(nodeAction(`process.stdout.write(process.env.SECRET)`));
-    expect(result.stdout).not.toContain(SECRET);
+    expectAbsent(result.stdout, SECRET);
     expect(result.stdout).toContain("[REDACTED]");
   });
 
@@ -73,7 +73,7 @@ describe("ProcessInjector — output sanitization", () => {
       nodeAction(`process.stdout.write(Buffer.from(process.env.SECRET).toString("base64"))`),
     );
     const b64 = Buffer.from(SECRET, "utf8").toString("base64");
-    expect(result.stdout).not.toContain(b64);
+    expectAbsent(result.stdout, b64);
     expect(result.stdout).toContain("[REDACTED]");
   });
 });

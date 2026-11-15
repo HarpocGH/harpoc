@@ -4,6 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OAuthProviderConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { ClientCredentialsFlow } from "./client-credentials.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const OAUTH_CLIENT_SECRET = "service-secret";
 
 let tokenServer: Server;
 let tokenServerUrl: string;
@@ -135,11 +138,11 @@ describe("ClientCredentialsFlow token endpoint auth methods (code review Low O5)
 
     await flow.authenticate(makeConfig({ token_endpoint_auth_method: "client_secret_basic" }));
 
-    const expected = `Basic ${Buffer.from("service-client:service-secret", "utf8").toString("base64")}`;
+    const expected = `Basic ${Buffer.from(`service-client:${OAUTH_CLIENT_SECRET}`, "utf8").toString("base64")}`;
     expect(auth).toBe(expected);
+    expectAbsent(body, OAUTH_CLIENT_SECRET);
     expect(body).toContain("grant_type=client_credentials");
     expect(body).not.toContain("client_secret");
-    expect(body).not.toContain("service-secret");
   });
 
   it("client_secret_post (the default) keeps credentials in the body with no auth header", async () => {

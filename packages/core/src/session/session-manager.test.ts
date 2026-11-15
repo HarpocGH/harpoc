@@ -15,7 +15,7 @@ import type { SessionFile } from "@harpoc/shared";
 import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS } from "@harpoc/shared";
 import { SessionManager } from "./session-manager.js";
 import type { SessionKeyProtector } from "./session-key-protector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 let sessionDir: string;
 let sessionPath: string;
@@ -258,7 +258,7 @@ describe("secure erase", () => {
     expect(existsSync(sessionPath)).toBe(false);
     const after = readFileSync(inodeAlias);
     expect(after.length).toBe(before.length);
-    expect(after.toString("utf8")).not.toContain(marker);
+    expectAbsent(after.toString("utf8"), marker);
     expect(after.toString("binary")).not.toContain("session_key");
     expect(after.equals(before)).toBe(false);
   });
@@ -328,7 +328,7 @@ describe("session-key protection", () => {
 
     const raw = readRawFile();
     expect(raw.key_protection).toBe("dpapi");
-    expect(raw.session_key).not.toBe(session.session_key);
+    expect(Object.is(raw.session_key, session.session_key)).toBe(false);
     expect(Buffer.from(raw.session_key, "base64").subarray(0, 5).toString()).toBe("WRAP:");
 
     const read = await mgr.readSession();
@@ -346,7 +346,7 @@ describe("session-key protection", () => {
 
     const stored = await mgr.readStoredSession();
     expect(stored?.key_protection).toBe("dpapi");
-    expect(stored?.session_key).not.toBe(session.session_key);
+    expect(Object.is(stored?.session_key, session.session_key)).toBe(false);
     expect(protector.unprotectCalls).toBe(0);
   });
 

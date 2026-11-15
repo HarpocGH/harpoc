@@ -6,7 +6,7 @@ import { createPublicKey, createVerify, generateKeyPairSync } from "node:crypto"
 import { ErrorCode } from "@harpoc/shared";
 import { buildCsr } from "./csr-generator.js";
 import { generateCertKeyPair } from "./key-pair.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /*
  * The golden fixtures were produced once with OpenSSL 3.5.3 and are committed:
@@ -156,9 +156,9 @@ describe("buildCsr", () => {
       () => buildCsr({ privateKeyPem, commonName: "x.example.com" }),
       ErrorCode.CERT_CSR_FAILED,
     );
+    expectAbsent(err.message, marker, "the message");
+    expectAbsent(String(err), marker, "String(err)");
+    expectAbsent(JSON.stringify(err.details ?? {}), marker, "the details");
     expect(err.message).toContain("private key PEM is not parseable");
-    expect(err.message).not.toContain(marker);
-    expect(String(err)).not.toContain(marker);
-    expect(JSON.stringify(err.details ?? {})).not.toContain(marker);
   });
 });

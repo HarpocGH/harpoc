@@ -1,38 +1,61 @@
 import { describe, expect, it } from "vitest";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES, VaultError } from "@harpoc/shared";
 import { mapStringLeaves, redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const SECRET = "sk-topsecretvalue-123456";
+const PLAIN_SECRET = "abc123";
+const PHP_ESCAPED_CREDENTIAL = "sk-live/abc";
+const PHP_CREDENTIAL_PREFIX = "sk-live";
+const FLAT_PASS_SECRET = "wiring-pin-token";
+const DESCENT_GATE_SECRET = 'wiring"pin-2';
+const DESCENT_GATE_SECRET_TAIL = "pin-2";
+const QUOTE_CREDENTIAL_TAIL = "en-x";
+const BACKSLASH_CREDENTIAL = "dom\\user-pw";
+const BACKSLASH_CREDENTIAL_TAIL = "user-pw";
+const NON_ASCII_CREDENTIAL_PREFIX = "passw";
+const D2_BOUNDARY_CREDENTIAL = 'tok"en-y';
+const D2_BOUNDARY_CREDENTIAL_TAIL = "en-y";
+const KEY_POSITION_CREDENTIAL = 'tok"en-k';
+const KEY_POSITION_CREDENTIAL_TAIL = "en-k";
+const PROTO_SIBLING_CREDENTIAL_TAIL = "en-p";
+const CAP_CREDENTIAL_TAIL = "en-cap";
+const NON_ASCII_ESCAPE_FRAGMENT = "\\u00fc";
 
 describe("redactSecretEncodings", () => {
   it("redacts the raw value", () => {
     const out = redactSecretEncodings(`token is ${SECRET} ok`, SECRET);
+    expectAbsent(out, SECRET);
     expect(out).toBe("token is [REDACTED] ok");
-    expect(out).not.toContain(SECRET);
   });
 
   it("redacts multiple occurrences", () => {
     const out = redactSecretEncodings(`${SECRET} and ${SECRET}`, SECRET);
+    expectAbsent(out, SECRET);
     expect(out).toBe("[REDACTED] and [REDACTED]");
   });
 
   it("redacts the base64 form", () => {
     const b64 = Buffer.from(SECRET, "utf8").toString("base64");
     const out = redactSecretEncodings(`encoded: ${b64}`, SECRET);
-    expect(out).not.toContain(b64);
+    expectAbsent(out, b64);
     expect(out).toContain("[REDACTED]");
   });
 
   it("redacts the base64url form", () => {
     const b64url = Buffer.from(SECRET, "utf8").toString("base64url");
     const out = redactSecretEncodings(`encoded: ${b64url}`, SECRET);
-    expect(out).not.toContain(b64url);
+    expectAbsent(out, b64url);
   });
 
   it("redacts the lowercase and uppercase hex form", () => {
     const hex = Buffer.from(SECRET, "utf8").toString("hex");
-    expect(redactSecretEncodings(hex, SECRET)).toBe("[REDACTED]");
-    expect(redactSecretEncodings(hex.toUpperCase(), SECRET)).toBe("[REDACTED]");
+    const out = redactSecretEncodings(hex, SECRET);
+    expectAbsent(out, hex, "the lowercase hex result");
+    expect(out).toBe("[REDACTED]");
+    const outUpper = redactSecretEncodings(hex.toUpperCase(), SECRET);
+    expectAbsent(outUpper, hex.toUpperCase(), "the uppercase hex result");
+    expect(outUpper).toBe("[REDACTED]");
   });
 
   it("redacts the percent-encoded form", () => {
@@ -40,7 +63,7 @@ describe("redactSecretEncodings", () => {
     const s = "a b/c?d";
     const encoded = encodeURIComponent(s);
     const out = redactSecretEncodings(`q=${encoded}`, s);
-    expect(out).not.toContain(encoded);
+    expectAbsent(out, encoded);
   });
 
   /**
@@ -56,11 +79,11 @@ describe("redactSecretEncodings", () => {
   it("redacts the JSON-escaped form", () => {
     const s = `tok${String.fromCharCode(34)}en${String.fromCharCode(92)}x`;
     const escaped = JSON.stringify(s).slice(1, -1);
-    expect(escaped).not.toBe(s);
+    expect(Object.is(escaped, s)).toBe(false);
 
     const body = `{"credential":"${escaped}"}`;
     const out = redactSecretEncodings(body, s);
-    expect(out).not.toContain(escaped);
+    expectAbsent(out, escaped);
     expect(out).toContain("[REDACTED]");
   });
 
@@ -101,20 +124,20 @@ describe("mapStringLeaves — key positions", () => {
 
   it("redacts the credential in an object key", () => {
     const out = mapStringLeaves({ [SECRET]: 1 }, redact);
-    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(out), SECRET);
     expect(Object.keys(out as object)).toEqual(["[REDACTED]"]);
   });
 
   it("redacts key and value positions alike", () => {
     const out = mapStringLeaves({ [SECRET]: SECRET }, redact) as Record<string, unknown>;
-    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(out), SECRET);
     expect(out["[REDACTED]"]).toBe("[REDACTED]");
   });
 
   it("redacts an encoded credential in a key", () => {
     const b64 = Buffer.from(SECRET, "utf8").toString("base64");
     const out = mapStringLeaves({ [b64]: "x" }, redact);
-    expect(JSON.stringify(out)).not.toContain(b64);
+    expectAbsent(JSON.stringify(out), b64);
   });
 
   it("reaches keys nested in objects and arrays", () => {
@@ -122,7 +145,7 @@ describe("mapStringLeaves — key positions", () => {
       { outer: [{ inner: { [SECRET]: "v" } }], [`pre-${SECRET}-post`]: 2 },
       redact,
     );
-    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(out), SECRET);
   });
 
   it("keeps both entries when redaction collapses two keys onto one name", () => {
@@ -131,9 +154,9 @@ describe("mapStringLeaves — key positions", () => {
       string,
       unknown
     >;
+    expectAbsent(JSON.stringify(out), SECRET);
     expect(Object.keys(out)).toHaveLength(2);
     expect(Object.values(out)).toEqual(expect.arrayContaining(["first", "second"]));
-    expect(JSON.stringify(out)).not.toContain(SECRET);
   });
 
   it("keeps both entries when an unchanged key collides with a renamed one, in either order", () => {
@@ -141,17 +164,17 @@ describe("mapStringLeaves — key positions", () => {
       string,
       unknown
     >;
+    expectAbsent(JSON.stringify(out1), SECRET, "the first order");
     expect(Object.keys(out1)).toHaveLength(2);
     expect(Object.values(out1)).toEqual(expect.arrayContaining(["first", "second"]));
-    expect(JSON.stringify(out1)).not.toContain(SECRET);
 
     const out2 = mapStringLeaves({ "[REDACTED]": "second", [SECRET]: "first" }, redact) as Record<
       string,
       unknown
     >;
+    expectAbsent(JSON.stringify(out2), SECRET, "the second order");
     expect(Object.keys(out2)).toHaveLength(2);
     expect(Object.values(out2)).toEqual(expect.arrayContaining(["first", "second"]));
-    expect(JSON.stringify(out2)).not.toContain(SECRET);
   });
 
   it("leaves unrelated keys and the structure untouched", () => {
@@ -186,16 +209,16 @@ describe("mapStringLeaves — key positions", () => {
 
 describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14, F1)", () => {
   it("redacts a credential the PHP convention escaped", () => {
-    const secret = "sk-live/abc";
-    const body = `{"echo":"sk-live\\/abc"}`;
-    expect(redactSecretEncodings(body, secret)).not.toContain("sk-live");
+    const secret = PHP_ESCAPED_CREDENTIAL;
+    const body = `{"echo":"${PHP_CREDENTIAL_PREFIX}\\/abc"}`;
+    expectAbsent(redactSecretEncodings(body, secret), PHP_CREDENTIAL_PREFIX);
   });
 
   it("redacts a credential Python's ensure_ascii escaped", () => {
     const secret = "sk-tür-1";
-    const body = `{"echo":"sk-t\\u00fcr-1"}`;
+    const body = `{"echo":"sk-t${NON_ASCII_ESCAPE_FRAGMENT}r-1"}`;
     const out = redactSecretEncodings(body, secret);
-    expect(out).not.toContain("\\u00fc");
+    expectAbsent(out, NON_ASCII_ESCAPE_FRAGMENT);
     expect(out).toContain("[REDACTED]");
   });
 
@@ -209,11 +232,13 @@ describe("redactSecretEncodings — JSON escaping conventions (review 2026-08-14
     const b64 = Buffer.from(secret, "utf8").toString("base64");
     expect(b64).toContain("/"); // guard: this fixture must actually exercise the case
     const body = `{"echo":"${b64.replace(/\//g, "\\/")}"}`;
-    expect(redactSecretEncodings(body, secret)).not.toContain(b64.split("/")[0]);
+    expectAbsent(redactSecretEncodings(body, secret), b64.split("/")[0] as string);
   });
 
   it("still redacts the plain raw form (negative control: no regression)", () => {
-    expect(redactSecretEncodings("token=abc123", "abc123")).toBe("token=[REDACTED]");
+    const out = redactSecretEncodings(`token=${PLAIN_SECRET}`, PLAIN_SECRET);
+    expectAbsent(out, PLAIN_SECRET);
+    expect(out).toBe("token=[REDACTED]");
   });
 
   it("leaves a benign marker untouched (negative control: not blanket redaction)", () => {
@@ -230,24 +255,24 @@ describe("redactSecretEncodings — backslash-probe wiring pins (review 2026-08-
   // that mutation only incidentally; these two exist to catch it by name.
 
   it("the flat pass probes the text: an escaped occurrence of a backslash-free secret is redacted", () => {
-    const secret = "wiring-pin-token";
-    expect(secret).not.toContain("\\");
+    const secret = FLAT_PASS_SECRET;
+    expect(secret.includes("\\")).toBe(false);
     // Deliberately NOT a JSON document: on a parseable body the structural
     // descent would decode the escape via JSON.parse and rescue a mis-wired
     // flat pass, so only a non-JSON fixture makes this pin discriminate.
     const body = "token=wiring-pin-tok\\u0065n";
-    expect(body).not.toContain(secret);
+    expectAbsent(body, secret);
     expect(redactSecretEncodings(body, secret)).toBe("token=[REDACTED]");
   });
 
   it("the descent gate probes the text: a nested occurrence of a backslash-free secret is redacted", () => {
-    const secret = 'wiring"pin-2';
-    expect(secret).not.toContain("\\");
+    const secret = DESCENT_GATE_SECRET;
+    expect(secret.includes("\\")).toBe(false);
     // Two escape layers deep: the flat tolerant pass decodes only one, so the
     // structural descent is the only path to this occurrence — a gate probing
     // the (backslash-free) secret would never open it.
     const body = JSON.stringify({ data: JSON.stringify({ echo: secret }) });
-    expect(redactSecretEncodings(body, secret)).not.toContain("pin-2");
+    expectAbsent(redactSecretEncodings(body, secret), DESCENT_GATE_SECRET_TAIL);
   });
 });
 
@@ -353,36 +378,36 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const secret = 'tok"en-x';
     const body = wrap(t1(secret));
     const out = redactSecretEncodings(body, secret);
-    expect(out).not.toContain("en-x");
+    expectAbsent(out, QUOTE_CREDENTIAL_TAIL);
     expect(JSON.parse(out)).toBeTypeOf("object");
   });
 
   it("redacts a backslash-bearing credential behind a webhook envelope", () => {
-    const secret = "dom\\user-pw";
+    const secret = BACKSLASH_CREDENTIAL;
     const out = redactSecretEncodings(wrap(t1(secret)), secret);
-    expect(out).not.toContain("user-pw");
+    expectAbsent(out, BACKSLASH_CREDENTIAL_TAIL);
   });
 
   it("redacts a non-ASCII credential escaped by an ensure_ascii encoder", () => {
     const secret = "passwörd-1";
     // What Python's json.dumps emits, then wrapped by the outer document.
-    const inner = '{"echo":"passw\\u00f6rd-1"}';
+    const inner = `{"echo":"${NON_ASCII_CREDENTIAL_PREFIX}\\u00f6rd-1"}`;
     const out = redactSecretEncodings(wrap(inner), secret);
-    expect(out).not.toContain("passw");
+    expectAbsent(out, NON_ASCII_CREDENTIAL_PREFIX);
   });
 
   it("redacts through four parses and is blind at five (the D2 boundary)", () => {
-    const secret = 'tok"en-y';
+    const secret = D2_BOUNDARY_CREDENTIAL;
     const t5 = wrap(wrap(wrap(wrap(t1(secret)))));
-    expect(redactSecretEncodings(t5, secret)).not.toContain("en-y");
+    expectAbsent(redactSecretEncodings(t5, secret), D2_BOUNDARY_CREDENTIAL_TAIL);
     const t6 = wrap(t5);
     expect(redactSecretEncodings(t6, secret)).toBe(t6);
   });
 
   it("redacts a credential in KEY position at depth", () => {
-    const secret = 'tok"en-k';
+    const secret = KEY_POSITION_CREDENTIAL;
     const body = wrap(JSON.stringify({ [secret]: 1 }));
-    expect(redactSecretEncodings(body, secret)).not.toContain("en-k");
+    expectAbsent(redactSecretEncodings(body, secret), KEY_POSITION_CREDENTIAL_TAIL);
   });
 
   it("preserves a __proto__ key while redacting a sibling credential", () => {
@@ -399,7 +424,7 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const body = JSON.stringify(bodyObj);
 
     const out = redactSecretEncodings(body, secret);
-    expect(out).not.toContain("en-p");
+    expectAbsent(out, PROTO_SIBLING_CREDENTIAL_TAIL);
 
     const parsedOut = JSON.parse(out) as Record<string, unknown>;
     expect(Object.prototype.hasOwnProperty.call(parsedOut, "__proto__")).toBe(true);
@@ -438,9 +463,9 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const secret = 'tok"en-m';
     const truncated = `{"raw":${JSON.stringify(secret)},` + wrap(t1(secret)).slice(1, -3);
     // No throw, and never weaker than the flat pass alone.
-    expect(redactSecretEncodings(truncated, secret)).toBe(
-      '{"raw":"[REDACTED]","data":"{\\"echo\\":\\"tok\\\\\\"en-m\\"',
-    );
+    const out = redactSecretEncodings(truncated, secret);
+    expectAbsent(out, JSON.stringify(secret));
+    expect(out).toBe('{"raw":"[REDACTED]","data":"{\\"echo\\":\\"tok\\\\\\"en-m\\"');
   });
 
   it("does not let re-serialization introduce the credential where it wasn't (monotonicity)", () => {
@@ -466,7 +491,7 @@ describe("redactSecretEncodings — nested JSON documents", () => {
 
     const out = redactSecretEncodings(body, secret);
 
-    expect(out).not.toContain(secret);
+    expectAbsent(out, secret);
     const parsedOut = JSON.parse(out) as { data: string };
     expect(parsedOut.data).toContain("[REDACTED]");
     expect(JSON.parse(parsedOut.data)).toEqual({ echo: "[REDACTED]" });
@@ -492,8 +517,8 @@ describe("redactSecretEncodings — nested JSON documents", () => {
     const pastCap = bodyOf(MAX_HTTP_RESPONSE_BYTES + 1);
     expect(atCap.length).toBe(MAX_HTTP_RESPONSE_BYTES);
     expect(pastCap.length).toBe(MAX_HTTP_RESPONSE_BYTES + 1);
-    expect(redactSecretEncodings(atCap, secret)).not.toContain("en-cap");
-    expect(redactSecretEncodings(pastCap, secret)).toContain("en-cap");
+    expectAbsent(redactSecretEncodings(atCap, secret), CAP_CREDENTIAL_TAIL);
+    expect(redactSecretEncodings(pastCap, secret)).toContain(CAP_CREDENTIAL_TAIL);
   });
 });
 
@@ -507,15 +532,17 @@ describe("redactErrorMessage", () => {
     const out = redactErrorMessage(err, SECRET) as VaultError;
 
     expect(out.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
-    expect(out.message).not.toContain(SECRET);
-    expect(out.details?.location).not.toContain(SECRET);
+    expectAbsent(out.message, SECRET, "the message");
+    expectAbsent(out.details?.location, SECRET, "the details' location");
     expect(out.details?.exit_code).toBe(128);
   });
 
   it("redacts details even when the message is clean", () => {
     const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, "x", { location: SECRET });
 
-    expect((redactErrorMessage(err, SECRET) as VaultError).details?.location).toBe("[REDACTED]");
+    const out = (redactErrorMessage(err, SECRET) as VaultError).details?.location;
+    expectAbsent(out, SECRET);
+    expect(out).toBe("[REDACTED]");
   });
 
   it("returns the same error object when nothing carries the credential", () => {

@@ -2,6 +2,10 @@ import { EventEmitter } from "node:events";
 import { describe, it, expect, vi } from "vitest";
 import { collectValueFromTty, promptForValueMasked } from "./tty-prompt.js";
 import type { ControllingTerminal } from "./tty-prompt.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const TYPED_PREFIX = "s3c";
+const TYPED_VALUE = "s3cret";
 
 interface FakeTerminal {
   terminal: ControllingTerminal;
@@ -50,9 +54,9 @@ describe("promptForValueMasked", () => {
     fake.emit("\r");
 
     const value = await promise;
-    expect(Buffer.from(value as Uint8Array).toString("utf8")).toBe("s3cret");
+    expect(Buffer.from(value as Uint8Array).toString("utf8")).toBe(TYPED_VALUE);
+    expectAbsent(fake.written(), TYPED_PREFIX);
     expect(fake.written()).toContain("Enter value: ");
-    expect(fake.written()).not.toContain("s3c");
     expect(fake.setRawMode).toHaveBeenNthCalledWith(1, true);
     expect(fake.setRawMode).toHaveBeenLastCalledWith(false);
   });

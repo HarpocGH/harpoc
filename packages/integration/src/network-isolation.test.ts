@@ -17,6 +17,7 @@ import {
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { assertTierAvailable, tierRequired } from "./helpers/platform-tiers.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * Network isolation e2e (thesis §4.5.3 layer 4).
@@ -312,8 +313,8 @@ describe.skipIf(!posixWithIsolation)(
           const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir));
           expect(connections).toBeGreaterThan(0);
           expect(outcome.error).toBe(cell.error);
+          expectAbsent(outcome.stderr, keyLine);
           if (cell.refused !== null) expect(outcome.stderr).not.toMatch(cell.refused);
-          expect(outcome.stderr).not.toContain(keyLine);
           const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
           expect(row?.detail).toMatchObject({ context: cell.context, network_isolation: false });
           if (cell.context === "sftp")
@@ -335,8 +336,8 @@ describe.skipIf(!posixWithIsolation)(
           const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir));
           expect(connections).toBe(0);
           expect(outcome.error).toBe(cell.error);
+          expectAbsent(outcome.stderr, keyLine);
           if (cell.refused !== null) expect(outcome.stderr).toMatch(cell.refused);
-          expect(outcome.stderr).not.toContain(keyLine);
           const [row] = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE, limit: 1 });
           expect(row?.detail).toMatchObject({ context: cell.context, network_isolation: true });
           if (cell.context === "sftp") {

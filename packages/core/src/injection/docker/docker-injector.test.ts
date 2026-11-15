@@ -12,7 +12,7 @@ import {
   executeDockerRegistryAction,
   parseImageReference,
 } from "./docker-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("../spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
 
@@ -86,6 +86,8 @@ function allowed(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
 }
 
 const SECRET = new Uint8Array(Buffer.from("robot:s3cr3t-registry-pass-value"));
+const REGISTRY_PASSWORD = "s3cr3t-registry-pass-value";
+const SHORT_USERNAME = "ab";
 
 describe("executeDockerRegistryAction enforcement", () => {
   it("denies by default when the host allowlist is empty (fail-safe deny)", async () => {
@@ -267,8 +269,8 @@ describe("executeDockerRegistryAction result mapping", () => {
     );
 
     const opts = vi.mocked(spawnCaptured).mock.calls[0]?.[2];
-    expect(opts?.redact).toContain("s3cr3t-registry-pass-value");
-    expect(opts?.redact).not.toContain("ab");
+    expectAbsent(opts?.redact, SHORT_USERNAME);
+    expect(opts?.redact).toContain(REGISTRY_PASSWORD);
   });
 });
 

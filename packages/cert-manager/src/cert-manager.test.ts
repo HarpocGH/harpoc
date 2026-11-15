@@ -15,7 +15,7 @@ import type { CertificateEngine } from "./cert-manager.js";
 import { generateCertKeyPair } from "./key-pair.js";
 import type { KeyPairOptions } from "./key-pair.js";
 import { RenewalScheduler } from "./renewal-scheduler.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 interface ScriptedChallenge {
   type: string;
@@ -171,9 +171,9 @@ const MARKED_KEY_PEM = `-----BEGIN PRIVATE KEY-----\n${KEY_MARKER}\n-----END PRI
 function expectNoKeyMarker(err: unknown): void {
   expect(err).toBeInstanceOf(VaultError);
   const error = err as VaultError;
-  expect(error.message).not.toContain(KEY_MARKER);
-  expect(String(error)).not.toContain(KEY_MARKER);
-  expect(JSON.stringify(error.details ?? {})).not.toContain(KEY_MARKER);
+  expectAbsent(error.message, KEY_MARKER, "the message");
+  expectAbsent(String(error), KEY_MARKER, "String(error)");
+  expectAbsent(JSON.stringify(error.details ?? {}), KEY_MARKER, "the details");
 }
 
 function httpAuthorization(domain: string, status = "pending"): ScriptedAuthorization {
@@ -801,7 +801,7 @@ describe("CertManager", () => {
       await manager.issueWithAcme("web-2", { ...issueOptions, algorithm: "ec" });
       const second = storedAccount(engine).privateKeyPem;
 
-      expect(second).not.toBe(first);
+      expect(Object.is(second, first)).toBe(false);
       expect(second).toBe(issued().accountKeyPem);
     });
 
@@ -1004,8 +1004,8 @@ describe("CertManager", () => {
         () => manager.renewCertificate(SECRET_ID),
         ErrorCode.CERT_ACME_FAILED,
       );
-      expect(err.message).toContain(`the stored ACME account is ${reason}`);
       expectNoKeyMarker(err);
+      expect(err.message).toContain(`the stored ACME account is ${reason}`);
       expect(scenario.instances).toHaveLength(0);
     });
 
@@ -1244,10 +1244,10 @@ describe("CertManager", () => {
       expect(engine.getAcmeAccount).toHaveBeenCalledTimes(3);
       expect(schedulerEngine.auditCertRenewFailure).toHaveBeenCalledTimes(1);
       const audited = schedulerEngine.auditCertRenewFailure.mock.calls[0]?.[1];
+      expectNoKeyMarker(audited);
       expect(audited).toMatchObject({ code: ErrorCode.CERT_ACME_FAILED });
       expect(reported).toHaveLength(1);
       expect(reported[0]).toBe(audited);
-      expectNoKeyMarker(audited);
     });
   });
 });

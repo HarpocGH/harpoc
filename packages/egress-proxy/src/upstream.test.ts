@@ -16,8 +16,11 @@ import {
 import type { ParsedTarget } from "./upstream.js";
 import { SECRET_VALUE } from "./__fixtures__/engine-double.js";
 import { HOSTNAME_CERT_PEM, HOSTNAME_KEY_PEM, deadPort } from "./__fixtures__/upstream-server.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const needle = (text: string): Uint8Array => new Uint8Array(Buffer.from(text));
+const PLAIN_VALUE = "VALUE";
+const LONGER_VALUE = "VALUEX";
 
 function target(requestUrl: string): ParsedTarget {
   const parsed = parseTarget(requestUrl);
@@ -90,7 +93,14 @@ describe("upstreamRequestHeaders", () => {
 
 describe("redactText", () => {
   it("replaces every occurrence, the leftmost longest needle first", () => {
-    expect(redactText("a-VALUE-b-VALUEX", [needle("VALUE"), needle("VALUEX")], "utf8")).toEqual({
+    const redacted = redactText(
+      "a-VALUE-b-VALUEX",
+      [needle(PLAIN_VALUE), needle(LONGER_VALUE)],
+      "utf8",
+    );
+    expectAbsent(JSON.stringify(redacted), PLAIN_VALUE);
+    expectAbsent(JSON.stringify(redacted), LONGER_VALUE);
+    expect(redacted).toEqual({
       text: "a-[REDACTED]-b-[REDACTED]",
       changed: true,
     });
@@ -152,7 +162,9 @@ describe("relayResponseHeaders", () => {
   };
 
   it("brokered: drops the hop-by-hop fields and Content-Length, redacts every value, maps Location", () => {
-    expect(relayResponseHeaders(upstreamHeaders, path, [needle("VALUE")])).toEqual({
+    const relayed = relayResponseHeaders(upstreamHeaders, path, [needle(PLAIN_VALUE)]);
+    expectAbsent(JSON.stringify(relayed), PLAIN_VALUE);
+    expect(relayed).toEqual({
       headers: {
         "content-type": "text/plain",
         "set-cookie": ["a=[REDACTED]", "b=2"],
@@ -164,11 +176,16 @@ describe("relayResponseHeaders", () => {
 
   it("brokered on an absolute-form request: Location as sent, its value redacted", () => {
     const absolute = target("http://api.github.com/user");
-    expect(
-      relayResponseHeaders({ location: "https://other.example/cb?code=VALUE" }, absolute, [
-        needle("VALUE"),
-      ]),
-    ).toEqual({ headers: { location: "https://other.example/cb?code=[REDACTED]" }, changed: true });
+    const relayed = relayResponseHeaders(
+      { location: "https://other.example/cb?code=VALUE" },
+      absolute,
+      [needle(PLAIN_VALUE)],
+    );
+    expectAbsent(JSON.stringify(relayed), PLAIN_VALUE);
+    expect(relayed).toEqual({
+      headers: { location: "https://other.example/cb?code=[REDACTED]" },
+      changed: true,
+    });
   });
 
   it("brokered: a Location the target's own query fills in is redacted after the mapping", () => {
@@ -176,7 +193,9 @@ describe("relayResponseHeaders", () => {
       ...target("/127.0.0.1:4443/q?token=harpoc:gh-pat&x=1"),
       url: new URL(`https://127.0.0.1:4443/q?token=${SECRET_VALUE}&x=1`),
     };
-    expect(relayResponseHeaders({ location: "" }, swapped, [needle(SECRET_VALUE)])).toEqual({
+    const relayed = relayResponseHeaders({ location: "" }, swapped, [needle(SECRET_VALUE)]);
+    expectAbsent(JSON.stringify(relayed), SECRET_VALUE);
+    expect(relayed).toEqual({
       headers: { location: "/127.0.0.1:4443/q?token=[REDACTED]&x=1" },
       changed: true,
     });

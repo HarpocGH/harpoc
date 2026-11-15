@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode } from "@harpoc/shared";
 import { assertKeyMatchesCert, parseCertificate, splitChain } from "./pem-parser.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "certs");
 const fx = (n: string): string => readFileSync(join(FIXTURES, n), "utf8");
@@ -65,9 +65,9 @@ describe("assertKeyMatchesCert", () => {
       () => assertKeyMatchesCert(privateKeyPem, fx("rsa-cert.pem")),
       ErrorCode.CERT_INVALID,
     );
+    expectAbsent(err.message, marker, "the message");
+    expectAbsent(String(err), marker, "String(err)");
+    expectAbsent(JSON.stringify(err.details ?? {}), marker, "the details");
     expect(err.message).toContain("private key PEM is not parseable");
-    expect(err.message).not.toContain(marker);
-    expect(String(err)).not.toContain(marker);
-    expect(JSON.stringify(err.details ?? {})).not.toContain(marker);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawnCaptured } from "./spawn-captured.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const ENV: Record<string, string> = {
   PATH: process.env.PATH ?? process.env.Path ?? "",
@@ -7,6 +8,7 @@ const ENV: Record<string, string> = {
     ? { SystemRoot: process.env.SystemRoot }
     : {}),
 };
+const SECRET = "s3cret-value";
 
 function nodeWriting(text: string): string[] {
   return ["-e", `process.stdout.write(${JSON.stringify(text)})`];
@@ -17,8 +19,9 @@ describe("spawnCaptured — the redacted flag (E70)", () => {
     const echo = await spawnCaptured(process.execPath, nodeWriting("token=s3cret-value"), {
       env: ENV,
       timeoutMs: 10_000,
-      redact: ["s3cret-value"],
+      redact: [SECRET],
     });
+    expectAbsent(echo.stdout, SECRET);
     expect(echo.stdout).toBe("token=[REDACTED]");
     expect(echo.redacted).toBe(true);
 
@@ -35,9 +38,10 @@ describe("spawnCaptured — the redacted flag (E70)", () => {
     const r = await spawnCaptured(
       process.execPath,
       ["-e", `process.stderr.write(${JSON.stringify("token=s3cret-value")})`],
-      { env: ENV, timeoutMs: 10_000, redact: ["s3cret-value"] },
+      { env: ENV, timeoutMs: 10_000, redact: [SECRET] },
     );
     expect(r.stdout).toBe("");
+    expectAbsent(r.stderr, SECRET);
     expect(r.stderr).toBe("token=[REDACTED]");
     expect(r.redacted).toBe(true);
   });
@@ -47,8 +51,9 @@ describe("spawnCaptured — the redacted flag (E70)", () => {
     const r = await spawnCaptured(process.execPath, nodeWriting(`token=${b64}`), {
       env: ENV,
       timeoutMs: 10_000,
-      redact: ["s3cret-value"],
+      redact: [SECRET],
     });
+    expectAbsent(r.stdout, b64);
     expect(r.stdout).toBe("token=[REDACTED]");
     expect(r.redacted).toBe(true);
   });

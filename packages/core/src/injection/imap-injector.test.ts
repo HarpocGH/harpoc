@@ -9,7 +9,7 @@ import type {
   ImapOperationFields,
 } from "./imap-injector.js";
 import { ImapInjector, buildImapAuditDetails, executeImapAction } from "./imap-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "imapuser:imappass";
 
@@ -19,6 +19,12 @@ const NON_STRING_HOSTS: ReadonlyArray<readonly [string, unknown]> = [
   ["an object", {}],
   ["an array", ["db.example:5432"]],
 ];
+const PASSWORD_HALF = "s3cr3tpass";
+const FLOOR_USERNAME = "abc";
+const IGNORED_PASSWORD = "ignored-pass";
+const IGNORED_SECRET = "ignored-user:ignored-pass";
+const OAUTH_TOKEN = "tok-abc123";
+const ARM_PASSWORD = "s3cr3t";
 
 /** Build a full ImapAction from a partial (bypasses the schema — the injector
  * receives an already-validated action; tests exercise its own guards). */
@@ -312,9 +318,9 @@ describe("ImapInjector — fetched content sanitization", () => {
 
     expect("messages" in result).toBe(true);
     const out = (result as { messages: ImapMessage[] }).messages;
+    expectAbsent(out[0]?.text, PASSWORD_HALF, "the message text");
+    expectAbsent(JSON.stringify(out), PASSWORD_HALF, "the messages");
     expect(out[0]?.text).toContain("[REDACTED]");
-    expect(out[0]?.text).not.toContain("s3cr3tpass");
-    expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
   });
 
   it("redacts a credential planted in the envelope subject and from/to addresses", async () => {
@@ -343,11 +349,11 @@ describe("ImapInjector — fetched content sanitization", () => {
     );
 
     const out = (execution.result as { messages: ImapMessage[] }).messages;
+    expectAbsent(JSON.stringify(out), PASSWORD_HALF);
     expect(out[0]?.envelope?.subject).toBe("your password is [REDACTED]");
     expect(out[0]?.envelope?.from).toEqual(["[REDACTED] <attacker@example.com>"]);
     expect(out[0]?.envelope?.to).toEqual(["ops+[REDACTED]@example.com"]);
     expect(out[0]?.envelope?.date).toBeNull();
-    expect(JSON.stringify(out)).not.toContain("s3cr3tpass");
     expect(execution.sanitized).toBe(true);
   });
 
@@ -422,7 +428,7 @@ describe("ImapInjector — fetched content sanitization", () => {
     );
 
     const out = (result as { messages: ImapMessage[] }).messages;
-    expect(out[0]?.text).not.toContain("abc");
+    expectAbsent(out[0]?.text, FLOOR_USERNAME);
     expect(out[0]?.text).toContain("[REDACTED]");
   });
 
@@ -547,14 +553,14 @@ describe("ImapInjector — auth arms", () => {
     const injector = new ImapInjector({ connectImap: fn });
 
     const oauth: ImapOAuth = { accessToken: "tok-abc123", username: "oauth-user@example.com" };
-    await injector.run(baseAction(), "ignored-user:ignored-pass", basePolicy({}), undefined, oauth);
+    await injector.run(baseAction(), IGNORED_SECRET, basePolicy({}), undefined, oauth);
 
+    expectAbsent(JSON.stringify(opts[0]?.auth), IGNORED_PASSWORD);
     expect(opts[0]?.auth).toEqual({
       kind: "xoauth2",
       username: "oauth-user@example.com",
-      accessToken: "tok-abc123",
+      accessToken: OAUTH_TOKEN,
     });
-    expect(JSON.stringify(opts[0]?.auth)).not.toContain("ignored-pass");
   });
 
   it("uses the password arm from the secret value when no oauth token is provided", async () => {
@@ -564,8 +570,12 @@ describe("ImapInjector — auth arms", () => {
 
     await injector.run(baseAction(), "imapuser:s3cr3t", basePolicy({}), undefined, undefined);
 
-    expect(opts[0]?.auth).toEqual({ kind: "password", username: "imapuser", password: "s3cr3t" });
-    expect(JSON.stringify(opts[0]?.auth)).not.toContain("accessToken");
+    expect(opts[0]?.auth).toEqual({
+      kind: "password",
+      username: "imapuser",
+      password: ARM_PASSWORD,
+    });
+    expect(JSON.stringify(opts[0]?.auth).includes("accessToken")).toBe(false);
   });
 
   it("never leaks the oauth token in a thrown error", async () => {
@@ -583,7 +593,7 @@ describe("ImapInjector — auth arms", () => {
       () => injector.run(baseAction(), "ignored:ignored", basePolicy({}), undefined, oauth),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
-    expect(err.message).not.toContain("tok-abc123");
+    expectAbsent(err.message, OAUTH_TOKEN);
   });
 
   it("refuses a secret value without a colon separator", async () => {

@@ -15,7 +15,7 @@ describe("generateCodeVerifier", () => {
   it("generates unique verifiers", () => {
     const v1 = generateCodeVerifier();
     const v2 = generateCodeVerifier();
-    expect(v1).not.toBe(v2);
+    expect(Object.is(v1, v2)).toBe(false);
   });
 });
 

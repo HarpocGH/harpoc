@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { McpServer } from "@modelcontextprotocol/server";
 import {
   connectModernInMemoryClient,
+  expectAbsent,
   expectVaultError,
   inMemoryClientFor,
   invokeHandler,
@@ -147,6 +148,7 @@ describe("MCP Resources", () => {
     it("the list answers exactly six metadata keys per row, never the row", async () => {
       const text = getResourceText(await readResource(server, "secret://vault/secrets"));
       const data = JSON.parse(text) as Record<string, unknown>[];
+      expectAbsent(text, SENTINEL);
       expect(data).toHaveLength(2);
       for (const row of data) {
         expect(Object.keys(row).sort()).toEqual([
@@ -158,11 +160,11 @@ describe("MCP Resources", () => {
           "version",
         ]);
       }
-      expect(text).not.toContain(SENTINEL);
     });
 
     it("the by-name read answers exactly the ten metadata keys, never the row", async () => {
       const text = getResourceText(await readResource(server, "secret://vault/secrets/my-key"));
+      expectAbsent(text, SENTINEL);
       expect(Object.keys(JSON.parse(text) as Record<string, unknown>).sort()).toEqual([
         "created_at",
         "expires_at",
@@ -175,7 +177,6 @@ describe("MCP Resources", () => {
         "updated_at",
         "version",
       ]);
-      expect(text).not.toContain(SENTINEL);
     });
 
     it("answers the engine's SECRET_NOT_FOUND for a nonexistent secret", async () => {
@@ -339,6 +340,7 @@ describe("MCP Resources", () => {
       ]);
       const text = getResourceText(await readResource(server, "secret://vault/health"));
       const data = JSON.parse(text) as Record<string, unknown>;
+      expectAbsent(text, SENTINEL);
       expect(Object.keys(data).sort()).toEqual([
         "by_status",
         "expiring_soon",
@@ -347,7 +349,6 @@ describe("MCP Resources", () => {
       ]);
       expect(data.by_status).toEqual({ active: 3 });
       expect(data.expiring_soon).toEqual([{ handle: "secret://expiring", expires_at: soon }]);
-      expect(text).not.toContain(SENTINEL);
     });
   });
 
@@ -418,11 +419,11 @@ describe("MCP Resources", () => {
 
     it("answers exactly project and secret_count per entry, never the row", async () => {
       const text = getResourceText(await readResource(server, "secret://vault/projects"));
+      expectAbsent(text, SENTINEL);
       expect(JSON.parse(text)).toEqual([
         { project: "(none)", secret_count: 1 },
         { project: "prod", secret_count: 1 },
       ]);
-      expect(text).not.toContain(SENTINEL);
     });
   });
 

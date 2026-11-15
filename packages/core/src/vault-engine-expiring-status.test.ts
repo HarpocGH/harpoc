@@ -18,6 +18,7 @@ import type { DecryptedAuditEvent } from "./audit/audit-query.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
 import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * D5 — the expiring-status projections hand out metadata only: no encrypted
@@ -35,6 +36,10 @@ const fx = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 86_400_000;
+const ACCESS_TOKEN_VALUE = "at-1";
+const REFRESH_TOKEN_VALUE = "rt-1";
+const MY_CLIENT_SECRET = "my-client-secret";
+const PEM_ARMOR = "PRIVATE KEY";
 
 let tempDir: string;
 let dbPath: string;
@@ -172,11 +177,11 @@ describe("getExpiringOAuthTokenStatuses", () => {
     await engine.completeOAuthFlow(secretId, "at-1", "rt-1", Date.now() + 30 * MINUTE_MS);
 
     const serialized = JSON.stringify(engine.getExpiringOAuthTokenStatuses(HOUR_MS));
+    expectAbsent(serialized, ACCESS_TOKEN_VALUE);
+    expectAbsent(serialized, REFRESH_TOKEN_VALUE);
+    expectAbsent(serialized, MY_CLIENT_SECRET);
     expect(serialized).not.toContain("encrypted");
-    expect(serialized).not.toContain("at-1");
-    expect(serialized).not.toContain("rt-1");
     expect(serialized).not.toContain("my-client-id");
-    expect(serialized).not.toContain("my-client-secret");
     expect(serialized).not.toContain("secret_id");
   });
 
@@ -337,8 +342,8 @@ describe("getExpiringCertificateStatuses", () => {
     });
 
     const serialized = JSON.stringify(engine.getExpiringCertificateStatuses());
+    expectAbsent(serialized, PEM_ARMOR);
     expect(serialized).not.toContain("encrypted");
-    expect(serialized).not.toContain("PRIVATE KEY");
     expect(serialized).not.toContain("BEGIN CERTIFICATE");
     expect(serialized).not.toContain("secret_id");
     expect(serialized).not.toContain("acme");

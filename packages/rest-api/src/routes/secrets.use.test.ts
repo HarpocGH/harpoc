@@ -8,6 +8,9 @@ import {
   buildSecretsApp,
   createMockEngine,
 } from "./__fixtures__/secrets-app.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const CREDENTIAL_PATTERN_TOKEN = "sk_live_abcdefghij1234567890";
 
 let app: Hono<HarpocEnv>;
 let engine: ReturnType<typeof createMockEngine>;
@@ -205,7 +208,7 @@ describe("secret routes", () => {
       });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { data: { body: string } };
-      expect(body.data.body).not.toContain("sk_live_abcdefghij1234567890");
+      expectAbsent(body.data.body, CREDENTIAL_PATTERN_TOKEN);
       expect(body.data.body).toContain("[REDACTED]");
     });
 
@@ -224,7 +227,7 @@ describe("secret routes", () => {
         }),
       });
       const body = (await res.json()) as { data: { stdout: string } };
-      expect(body.data.stdout).not.toContain("sk_live_abcdefghij1234567890");
+      expectAbsent(body.data.stdout, CREDENTIAL_PATTERN_TOKEN);
       expect(body.data.stdout).toContain("[REDACTED]");
     });
 
@@ -271,7 +274,7 @@ describe("secret routes", () => {
       const body = (await res.json()) as {
         data: { content: [{ text: string }]; structured_content: { note: string } };
       };
-      expect(JSON.stringify(body)).not.toContain("sk_live_abcdefghij1234567890");
+      expectAbsent(JSON.stringify(body), CREDENTIAL_PATTERN_TOKEN);
       expect(body.data.content[0].text).toContain("[REDACTED]");
       expect(body.data.structured_content.note).toContain("[REDACTED]");
     });

@@ -224,7 +224,7 @@ describe("KeystoreWrappedSessionKeyProtector through SessionManager", () => {
 
     const onDisk = JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
     expect(onDisk.key_protection).toBe("keychain");
-    expect(onDisk.session_key).not.toBe(session.session_key);
+    expect(Object.is(onDisk.session_key, session.session_key)).toBe(false);
 
     const read = await manager.readSession();
     expect(read?.session_key).toBe(session.session_key);

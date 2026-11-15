@@ -4,7 +4,7 @@ import { sendSmtp } from "./smtp-client.js";
 import type { SmtpSendOptions } from "./smtp-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeSmtp } from "./__fixtures__/fake-smtp-server.js";
 import type { FakeSmtp, SmtpScript } from "./__fixtures__/fake-smtp-server.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const MESSAGE =
   [
@@ -41,6 +41,9 @@ function optsFor(srv: FakeSmtp, overrides: Partial<SmtpSendOptions> = {}): SmtpS
 }
 
 const PLAIN_CRED = Buffer.from("\0u\0hunter2secret").toString("base64");
+const AUTH_PASSWORD = "hunter2secret";
+const ACCESS_TOKEN = "tok-abc-123";
+const AUTH_OR_PASSWORD_PATTERN = /AUTH|hunter2/i;
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
@@ -56,8 +59,8 @@ describe("sendSmtp — credential never crosses the plaintext leg", () => {
       }),
     );
     const plain = srv.wire().plaintext.toString("latin1");
+    expectAbsent(plain, PLAIN_CRED);
     expect(plain).not.toMatch(/AUTH/i);
-    expect(plain).not.toContain(PLAIN_CRED);
     expect(srv.wire().postTls.toString("latin1")).toContain("AUTH PLAIN");
     expect(srv.wire().postTls.toString("latin1")).toContain(`AUTH PLAIN ${PLAIN_CRED}`);
   });
@@ -68,7 +71,7 @@ describe("sendSmtp — credential never crosses the plaintext leg", () => {
       code: "SMTP_STARTTLS_UNAVAILABLE",
     });
     const plain = srv.wire().plaintext.toString("latin1");
-    expect(plain).not.toMatch(/AUTH|hunter2/i);
+    expect(AUTH_OR_PASSWORD_PATTERN.test(plain)).toBe(false);
     expect(srv.wire().postTls.length).toBe(0);
   });
 
@@ -88,9 +91,9 @@ describe("sendSmtp — credential never crosses the plaintext leg", () => {
       code: "SMTP_DELIVERY_FAILED",
     });
     const plain = srv.wire().plaintext.toString("latin1");
+    expectAbsent(plain, PLAIN_CRED);
     expect(plain).toContain("STARTTLS");
     expect(plain).not.toMatch(/AUTH/i);
-    expect(plain).not.toContain(PLAIN_CRED);
   });
 });
 
@@ -140,10 +143,10 @@ describe("sendSmtp — delivery over TLS", () => {
     const srv = await fake({ starttls: false, authMechanisms: ["LOGIN"], implicitTls: true });
     await sendSmtp(optsFor(srv, { security: "tls" }));
     const post = srv.wire().postTls.toString("latin1");
+    expectAbsent(post, AUTH_PASSWORD);
     expect(post).toContain("AUTH LOGIN");
     expect(post).toContain(Buffer.from("u").toString("base64"));
-    expect(post).toContain(Buffer.from("hunter2secret").toString("base64"));
-    expect(post).not.toContain("hunter2secret");
+    expect(post).toContain(Buffer.from(AUTH_PASSWORD).toString("base64"));
   });
 
   it("XOAUTH2 sends the SASL bearer blob and no other credential form", async () => {
@@ -158,8 +161,8 @@ describe("sendSmtp — delivery over TLS", () => {
       "base64",
     );
     const post = srv.wire().postTls.toString("latin1");
+    expectAbsent(post, ACCESS_TOKEN);
     expect(post).toContain(`AUTH XOAUTH2 ${blob}`);
-    expect(post).not.toContain("tok-abc-123");
   });
 });
 
@@ -175,8 +178,8 @@ describe("sendSmtp — failures fold to SMTP_DELIVERY_FAILED", () => {
       () => sendSmtp(optsFor(srv, { security: "tls" })),
       ErrorCode.SMTP_DELIVERY_FAILED,
     );
+    expectAbsent(err.message, AUTH_PASSWORD);
     expect(err.message).toContain(FIXTURE_HOST);
-    expect(err.message).not.toContain("hunter2secret");
   });
 
   it("5xx on AUTH also folds to SMTP_DELIVERY_FAILED", async () => {

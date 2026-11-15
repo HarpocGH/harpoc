@@ -152,7 +152,7 @@ describe("secret rotate --from-file — end to end (review T5)", () => {
     const stored = Buffer.from(await engine.getSecretValue(created.handle)).toString("utf8");
     expect(stored.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
     expect(() => createPrivateKey(stored)).not.toThrow();
-    expect(stored).not.toBe(privateKey);
+    expect(Object.is(stored, privateKey)).toBe(false);
   });
 
   it("the real Commander rotate action replaces the stored value with the file bytes", async () => {

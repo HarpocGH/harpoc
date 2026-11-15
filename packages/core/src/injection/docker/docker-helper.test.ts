@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DOCKER_CREDENTIAL_HELPER_SRC } from "./docker-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 // The credential helper is the security crux: docker invokes it as a real
 // subprocess (`docker-credential-harpoc get`) with the requested server URL on
@@ -122,14 +123,14 @@ describe("docker credential helper (real subprocess)", () => {
     const { stdout, stderr, code } = await runHelper("get", { stdin: "evil.example.com" });
 
     expect(code).toBe(1);
+    // The crux assertion: the bound secret never reaches ANY output channel for
+    // a host the vault did not bind the credential to.
+    expectAbsent(stdout, SECRET, "stdout");
+    expectAbsent(stderr, SECRET, "stderr");
+    expectAbsent(stdout, USER, "stdout");
     // docker's recognized "no credentials" signal — treated as anonymous, not
     // a hard error, so a foreign registry simply gets no credential.
     expect(stdout.trimEnd()).toBe("credentials not found in native keychain");
-    // The crux assertion: the bound secret never reaches ANY output channel for
-    // a host the vault did not bind the credential to.
-    expect(stdout).not.toContain(SECRET);
-    expect(stderr).not.toContain(SECRET);
-    expect(stdout).not.toContain(USER);
   });
 
   it("get fails closed (miss) when no registry is bound", async () => {
@@ -139,8 +140,8 @@ describe("docker credential helper (real subprocess)", () => {
     });
 
     expect(code).toBe(1);
+    expectAbsent(stdout, SECRET);
     expect(stdout.trimEnd()).toBe("credentials not found in native keychain");
-    expect(stdout).not.toContain(SECRET);
   });
 
   it("store exits 1 immediately WITHOUT reading stdin", async () => {
@@ -150,20 +151,20 @@ describe("docker credential helper (real subprocess)", () => {
     const { stdout, code } = await runHelper("store", { endStdin: false });
 
     expect(code).toBe(1);
-    expect(stdout).not.toContain(SECRET);
+    expectAbsent(stdout, SECRET);
   });
 
   it("erase exits 1 immediately WITHOUT reading stdin", async () => {
     const { stdout, code } = await runHelper("erase", { endStdin: false });
 
     expect(code).toBe(1);
-    expect(stdout).not.toContain(SECRET);
+    expectAbsent(stdout, SECRET);
   });
 
   it("list exits 1 immediately WITHOUT reading stdin", async () => {
     const { stdout, code } = await runHelper("list", { endStdin: false });
 
     expect(code).toBe(1);
-    expect(stdout).not.toContain(SECRET);
+    expectAbsent(stdout, SECRET);
   });
 });

@@ -18,7 +18,7 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   LOCKOUT_DURATIONS_MS,
 } from "@harpoc/shared";
-import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer, type TestServer } from "./helpers/rest-helpers.js";
@@ -29,6 +29,11 @@ const __dirname = join(__filename, "..");
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 
 const PASSWORD = "security-hardening-pw";
+const SANITIZATION_SECRET_PREFIX = "sk-super-secret";
+const REVOKED_SECRET_VALUE = "sk-revoke-value";
+const EXPIRED_SECRET_VALUE = "sk-expire-value";
+const WRONG_PASSWORD_PREFIX = "wrong-password";
+const DUPLICATE_SECRET_VALUE = "another-value";
 
 /** Structural view of the store's raw SQLite handle — only what this file calls. */
 interface RawStatement {
@@ -159,7 +164,7 @@ describe("Error Message Sanitization", () => {
       () => vault.engine.getSecretInfo("secret://nonexistent"),
       ErrorCode.SECRET_NOT_FOUND,
     );
-    expect(err.message).not.toContain("sk-super-secret");
+    expectAbsent(err.message, SANITIZATION_SECRET_PREFIX);
   });
 
   it("SECRET_REVOKED contains handle, not value", async () => {
@@ -175,7 +180,7 @@ describe("Error Message Sanitization", () => {
       () => vault.engine.rotateSecret(revokeResult.handle, new Uint8Array(Buffer.from("new"))),
       ErrorCode.SECRET_REVOKED,
     );
-    expect(err.message).not.toContain("sk-revoke-value");
+    expectAbsent(err.message, REVOKED_SECRET_VALUE);
   });
 
   it("SECRET_EXPIRED contains handle, not value", async () => {
@@ -191,7 +196,7 @@ describe("Error Message Sanitization", () => {
       () => vault.engine.rotateSecret(expireResult.handle, new Uint8Array(Buffer.from("new"))),
       ErrorCode.SECRET_EXPIRED,
     );
-    expect(err.message).not.toContain("sk-expire-value");
+    expectAbsent(err.message, EXPIRED_SECRET_VALUE);
   });
 
   it("INVALID_PASSWORD is generic, no key material", async () => {
@@ -201,8 +206,8 @@ describe("Error Message Sanitization", () => {
         () => engine2.unlock("wrong-password-here"),
         ErrorCode.INVALID_PASSWORD,
       );
+      expectAbsent(err.message, WRONG_PASSWORD_PREFIX);
       expect(err.message).toBe("Invalid password");
-      expect(err.message).not.toContain("wrong-password");
     } finally {
       await engine2.destroy();
     }
@@ -218,7 +223,7 @@ describe("Error Message Sanitization", () => {
         }),
       ErrorCode.DUPLICATE_SECRET,
     );
-    expect(err.message).not.toContain("another-value");
+    expectAbsent(err.message, DUPLICATE_SECRET_VALUE);
   });
 
   it("all VaultError factory methods produce messages free of binary/base64 patterns", () => {

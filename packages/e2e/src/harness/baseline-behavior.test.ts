@@ -6,6 +6,7 @@ import type { BaselineServer } from "../arms/baseline.js";
 import { sinkSawCredential } from "./attacker.js";
 import type { SinkRequest } from "./attacker.js";
 import { textOf } from "./surfaces/mcp-http.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The behavioural counterpart to `fixtures.test.ts`'s source-text pin (F2).
@@ -129,7 +130,7 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
     // No silent second copy: D7 forbids the fixture falling back to bearer.
     expect(record.authorization).toBeNull();
     expect(record.query).toEqual({});
-    expect(record.path).not.toContain(CREDENTIAL);
+    expectAbsent(record.path, CREDENTIAL);
     expect(record.body).toBe("");
     // The harness's own detector agrees the credential arrived — the property
     // every paired "baseline: EXFILTRATED" cell rests on.
@@ -150,7 +151,7 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
     // header AND left a copy on another channel would still pass the three
     // assertions above.
     expect(record.query).toEqual({});
-    expect(record.path).not.toContain(CREDENTIAL);
+    expectAbsent(record.path, CREDENTIAL);
     expect(record.body).toBe("");
     expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
   });
@@ -159,7 +160,7 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
     const record = await invokeBaseline({ type: "query", query_param: "api_key" });
 
     expect(record.query["api_key"]).toBe(CREDENTIAL);
-    expect(Object.values(record.headers)).not.toContain(CREDENTIAL);
+    expectAbsent(Object.values(record.headers), CREDENTIAL);
     expect(record.authorization).toBeNull();
     expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
   });
@@ -171,7 +172,7 @@ describe("baseline-mcp injects the credential where the action names (F2, behavi
 
     expect(record.query["renamed_key"]).toBe(CREDENTIAL);
     expect(record.query["api_key"]).toBeUndefined();
-    expect(Object.values(record.headers)).not.toContain(CREDENTIAL);
+    expectAbsent(Object.values(record.headers), CREDENTIAL);
     expect(record.authorization).toBeNull();
     expect(sinkSawCredential(CREDENTIAL, [record])).toBe(true);
   });

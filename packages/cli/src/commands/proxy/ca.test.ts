@@ -29,6 +29,7 @@ vi.mock("@harpoc/cert-manager", () => ({
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerProxyCaCommands } from "./ca.js";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const run = buildCli(
   (program) => registerProxyCaCommands(program.command("proxy")),
@@ -51,6 +52,7 @@ const ROOT_NOT_AFTER_ISO = "2036-11-06T10:33:15.000Z";
 
 /** The issuer's refusal text, as `normalizeHost` throws it (lane X's grammar is its own suite's). */
 const HOST_REFUSAL = "host must be an ASCII DNS name or an IP literal";
+const CA_KEY_BODY = "fixturecaKEYbody";
 
 let spies: CliSpies;
 let writeSpy: MockInstance;
@@ -125,6 +127,7 @@ describe("proxy ca init — a name-constrained CA", () => {
         },
       ],
     ]);
+    expectAbsent(everything(), CA_KEY_BODY);
     expect(spies.stdout()).toBe(
       [
         "Handle            secret://harpoc-ca",
@@ -139,7 +142,6 @@ describe("proxy ca init — a name-constrained CA", () => {
     expect(spies.stderr()).toBe(
       "OK: Harpoc CA created. Restart server start --proxy to serve CONNECT with it: it writes the root as <consumer>/ca.pem into every consumer directory, and harpoc proxy ca export prints it for any other consumer.",
     );
-    expect(everything()).not.toContain("fixturecaKEYbody");
     expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
     expect(spies.exitSpy).not.toHaveBeenCalled();
   });
@@ -147,8 +149,8 @@ describe("proxy ca init — a name-constrained CA", () => {
   it("--json prints the record as one object", async () => {
     await run(["init", "--name-constraints", "api.github.com", "--json"]);
 
+    expectAbsent(everything(), CA_KEY_BODY);
     expect(JSON.parse(spies.stdout())).toEqual(created(["api.github.com"], false));
-    expect(everything()).not.toContain("fixturecaKEYbody");
   });
 
   it("--json prints nothing beside the object: no OK line, and no warning for the fallback", async () => {

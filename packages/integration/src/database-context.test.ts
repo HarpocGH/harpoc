@@ -3,7 +3,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Database context (thesis §4.5.5, §6.2 URL-manipulation analogue). Deterministic
@@ -15,6 +15,7 @@ import { expectVaultError } from "@harpoc/test-utils";
 
 const PASSWORD = "integration-test-pw";
 const DB_SECRET = "app_user:sk-db-secret-1234";
+const DB_SECRET_FRAGMENT = "sk-db-secret";
 
 function dbAction(host: string) {
   return {
@@ -77,9 +78,9 @@ describe("Database context (request-mediated, §4.5.5)", () => {
       () => client.useSecret(handle, dbAction("attacker.example.com:5432")),
       ErrorCode.HOST_NOT_ALLOWED,
     );
-    expect(err.message).not.toContain("sk-db-secret");
-    expect(String(err.stack)).not.toContain("sk-db-secret");
-    expect(JSON.stringify(err)).not.toContain("sk-db-secret");
+    expectAbsent(err.message, DB_SECRET_FRAGMENT, "the error message");
+    expectAbsent(String(err.stack), DB_SECRET_FRAGMENT, "the error stack");
+    expectAbsent(JSON.stringify(err), DB_SECRET_FRAGMENT, "the serialized error");
   });
 
   it("records the denied use in the audit trail with context=database", async () => {

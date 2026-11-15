@@ -9,6 +9,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { requireNetworkIsolation } from "@harpoc/core";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * MCP proxy context (thesis §4.5.4).
@@ -67,6 +68,7 @@ rl.on("line", (line) => {
   }
 });
 `;
+const ROTATED_SECRET = "sk-rotated-000111";
 
 function mcpAction(tool: string, args?: Record<string, unknown>) {
   return { type: "mcp" as const, server: "integ-mcp", tool, arguments: args };
@@ -115,7 +117,7 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
 
   it("I1: the credential never appears in the value returned to the caller", async () => {
     const res = await vault.engine.useSecret(handle, mcpAction("echo", { ok: true }));
-    expect(JSON.stringify(res)).not.toContain(SECRET);
+    expectAbsent(JSON.stringify(res), SECRET);
   });
 
   // --- Lifecycle: spawn on first use, reuse, crash, no auto-respawn ----------
@@ -163,6 +165,7 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
 
     // Credential re-injected into the fresh environment (redacted on echo).
     const leak = await vault.engine.useSecret(handle, mcpAction("leak-env"));
+    expectAbsent(JSON.stringify(leak), SECRET);
     expect(JSON.stringify(leak)).toContain("[REDACTED]");
   });
 
@@ -280,8 +283,8 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
     const res = await vault.engine.useSecret(handle, mcpAction("leak-env"));
     const text = JSON.stringify(res);
     // The fresh child carries the NEW value (redacted); the old one never echoes.
+    expectAbsent(text, ROTATED_SECRET);
     expect(text).toContain("[REDACTED]");
-    expect(text).not.toContain("sk-rotated-000111");
 
     expect(vault.engine.queryAudit({ eventType: AuditEventType.MCP_SPAWN })).toHaveLength(2);
     const terminates = vault.engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
@@ -293,13 +296,14 @@ describe("MCP proxy context — stdio transport (thesis §4.5.4)", () => {
   it("blocked: a naive credential echo through the downstream tool is redacted", async () => {
     const res = await vault.engine.useSecret(handle, mcpAction("leak-env"));
     const text = JSON.stringify(res);
-    expect(text).not.toContain(SECRET);
+    expectAbsent(text, SECRET);
     expect(text).toContain("[REDACTED]");
   });
 
   it("blocked: a credential inside structured_content is redacted", async () => {
     const res = await vault.engine.useSecret(handle, mcpAction("leak-structured"));
     if (res.type !== "mcp") throw new Error("expected mcp result");
+    expectAbsent(JSON.stringify(res.structured_content), SECRET);
     expect(res.structured_content).toEqual({ secret: "[REDACTED]" });
   });
 
@@ -412,7 +416,7 @@ describe("MCP proxy context — Streamable HTTP transport (request-mediated)", (
 
     // ...but the caller-visible result (which echoes the auth header) is redacted.
     const text = JSON.stringify(res);
-    expect(text).not.toContain(SECRET);
+    expectAbsent(text, SECRET);
     expect(text).toContain("[REDACTED]");
   });
 

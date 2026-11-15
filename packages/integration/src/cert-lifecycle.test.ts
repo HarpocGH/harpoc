@@ -17,7 +17,7 @@ import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool } from "./helpers/mcp-helpers.js";
 import { KEY_PEM, CERT_PEM, OTHER_KEY_PEM, RENEWED_CERT_PEM } from "./helpers/cert-fixtures.js";
-import { expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -54,6 +54,7 @@ const RENEWED_NOT_AFTER = new Date("2046-08-11T21:30:27Z").getTime();
 const PLACEHOLDER_CSR =
   "-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----\n";
 const PEM_ARMOR = "-----BEGIN";
+const PRIVATE_KEY_ARMOR = "PRIVATE KEY";
 
 let vault: TestVault;
 let rest: TestServer;
@@ -123,7 +124,7 @@ async function getStatus(name: string): Promise<CertificateStatus> {
   });
   expect(res.status).toBe(200);
   const raw = await res.text();
-  expect(raw).not.toContain(PEM_ARMOR);
+  expectAbsent(raw, PEM_ARMOR);
   return (JSON.parse(raw) as { data: CertificateStatus }).data;
 }
 
@@ -180,10 +181,9 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
 
     const restClient = new RestClient({ baseUrl: rest.baseUrl, token });
     const restClientStatus = await restClient.getCertificateStatus(`secret://${IMPORTED_NAME}`);
+    expectAbsent(JSON.stringify(directStatus), PEM_ARMOR, "the DirectClient status");
+    expectAbsent(JSON.stringify(restClientStatus), PEM_ARMOR, "the RestClient status");
     expect(restClientStatus).toEqual(importedStatus);
-
-    expect(JSON.stringify(directStatus)).not.toContain(PEM_ARMOR);
-    expect(JSON.stringify(restClientStatus)).not.toContain(PEM_ARMOR);
   });
 
   it("3. REST CSR generation returns the request and leaves the secret PENDING", async () => {
@@ -199,8 +199,8 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     // The CSR is public material and is the one payload that legitimately
     // carries PEM armor — it exists to be handed to a CA.
     expect(created.data.csr_pem.startsWith("-----BEGIN CERTIFICATE REQUEST-----")).toBe(true);
+    expectAbsent(created.data.csr_pem, PRIVATE_KEY_ARMOR);
     expect(created.data.csr_pem).toContain("-----END CERTIFICATE REQUEST-----");
-    expect(created.data.csr_pem).not.toContain("PRIVATE KEY");
 
     // CSR-only: the subject comes from the request, and there is no validity
     // window until an issued certificate arrives.
@@ -323,10 +323,10 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
     });
 
     expect(status.secret_id).toBe(await vault.engine.resolveSecretId(handle));
+    expectAbsent(JSON.stringify(status), PEM_ARMOR);
     expect(status.subject).toBe(FIXTURE_SUBJECT);
     expect(status.not_after).toBe(RENEWED_NOT_AFTER);
     expect(status.renewal_status).toBe("ok");
-    expect(JSON.stringify(status)).not.toContain(PEM_ARMOR);
     const info = await vault.engine.getSecretInfo(handle);
     expect(info.status).toBe(SecretStatus.ACTIVE);
     expect(info.expiresAt).toBe(RENEWED_NOT_AFTER);
@@ -346,10 +346,10 @@ describe("certificate lifecycle across REST, SDK and MCP", () => {
       { certificate_pem: CERT_PEM },
     );
 
+    expectAbsent(JSON.stringify(status), PEM_ARMOR);
     expect(status.subject).toBe(FIXTURE_SUBJECT);
     expect(status.not_after).toBe(FIXTURE_NOT_AFTER);
     expect(status.renewal_status).toBe("ok");
-    expect(JSON.stringify(status)).not.toContain(PEM_ARMOR);
     expect((await vault.engine.getSecretInfo(handle)).status).toBe(SecretStatus.ACTIVE);
     expect(await getStatus(ATTACH_REST_NAME)).toEqual(status);
 

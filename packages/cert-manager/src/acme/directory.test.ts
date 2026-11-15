@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { LETS_ENCRYPT_PRODUCTION, LETS_ENCRYPT_STAGING, validateAcmeUrl } from "./directory.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const acmeFailed = expect.objectContaining({ code: ErrorCode.CERT_ACME_FAILED });
 
@@ -12,6 +13,8 @@ const messageOf = (url: string): string => {
   }
   return "";
 };
+const QUERY_TOKEN = "SECRET";
+const PASSWORD_WITH_AT = "pw@";
 
 describe("directory constants", () => {
   it("pins the Let's Encrypt production and staging directory URLs", () => {
@@ -70,14 +73,16 @@ describe("validateAcmeUrl", () => {
   });
 
   it("names the origin only — never the path, query, fragment or userinfo", () => {
-    const message = messageOf("http://user:pw@acme.example.com/dir/secret?token=SECRET#frag");
+    const message = messageOf(
+      `http://user:${PASSWORD_WITH_AT}acme.example.com/dir/secret?token=${QUERY_TOKEN}#frag`,
+    );
+    expectAbsent(message, QUERY_TOKEN);
+    expectAbsent(message, PASSWORD_WITH_AT);
     expect(message).toContain("http://acme.example.com");
-    expect(message).not.toContain("SECRET");
     expect(message).not.toContain("secret");
     expect(message).not.toContain("token");
     expect(message).not.toContain("frag");
     expect(message).not.toContain("user");
-    expect(message).not.toContain("pw@");
   });
 
   it("keeps the path out of a non-HTTP-scheme rejection", () => {

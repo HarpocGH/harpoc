@@ -12,9 +12,14 @@ import {
 import type { SmtpSendOptions } from "./mail/smtp-client.js";
 import type { MailTlsConfig, SmtpInjectorDeps, SmtpOAuth } from "./smtp-injector.js";
 import { SmtpInjector, buildSmtpAuditDetails, executeSmtpAction } from "./smtp-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "smtpuser:smtppass";
+const IGNORED_PASSWORD = "ignored-pass";
+const OAUTH_TOKEN = "tok-abc123";
+const PASSWORD_HALF = "s3cr3tpass";
+const FLOOR_USERNAME = "abc";
+const ARM_PASSWORD = "s3cr3t";
 
 /** Build a full SmtpAction from a partial (bypasses the schema — the injector
  * receives an already-validated action; tests exercise its own guards). */
@@ -300,12 +305,12 @@ describe("SmtpInjector — auth arms", () => {
     });
 
     const auth = firstCall(calls).auth;
+    expectAbsent(JSON.stringify(auth), IGNORED_PASSWORD);
     expect(auth).toEqual({
       kind: "xoauth2",
       username: "oauth-user@example.com",
-      accessToken: "tok-abc123",
+      accessToken: OAUTH_TOKEN,
     });
-    expect(JSON.stringify(auth)).not.toContain("ignored-pass");
   });
 
   it("uses the password arm from the secret value when no oauth token; the token slot stays empty", async () => {
@@ -315,8 +320,8 @@ describe("SmtpInjector — auth arms", () => {
     await injector.run(baseAction(), "smtpuser:s3cr3t", basePolicy({}), undefined, undefined);
 
     const auth = firstCall(calls).auth;
-    expect(auth).toEqual({ kind: "password", username: "smtpuser", password: "s3cr3t" });
-    expect(JSON.stringify(auth)).not.toContain("accessToken");
+    expect(auth).toEqual({ kind: "password", username: "smtpuser", password: ARM_PASSWORD });
+    expect(JSON.stringify(auth).includes("accessToken")).toBe(false);
   });
 
   it("refuses a secret value without a colon separator", async () => {
@@ -398,7 +403,7 @@ describe("SmtpInjector — error redaction and translation", () => {
       () => injector.run(baseAction(), "smtpuser:s3cr3tpass", basePolicy({}), undefined, undefined),
       ErrorCode.SMTP_DELIVERY_FAILED,
     );
-    expect(err.message).not.toContain("s3cr3tpass");
+    expectAbsent(err.message, PASSWORD_HALF);
   });
 
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
@@ -412,7 +417,7 @@ describe("SmtpInjector — error redaction and translation", () => {
       ErrorCode.SMTP_DELIVERY_FAILED,
     );
 
-    expect(err.message).not.toContain("abc");
+    expectAbsent(err.message, FLOOR_USERNAME);
     expect(err.message).toContain("[REDACTED]");
   });
 

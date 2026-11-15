@@ -7,6 +7,7 @@ import { startFakeSmtp, FIXTURE_CA_PEM } from "./helpers/fake-smtp-server.js";
 import { startFakeImap } from "./helpers/fake-imap-server.js";
 import { startFakeWsServer } from "./helpers/fake-ws-server.js";
 import { LOOPBACK_HOST } from "./helpers/loopback-cert.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * v1.3 Extended Injection Contexts — the opacity sweep (Task 17), the thesis's
@@ -55,7 +56,7 @@ const DOCKER_PASS = "Dk7rP@ss.u7i8o9p0q1/leak+d";
 const DOCKER_VALUE = `${DOCKER_USER}:${DOCKER_PASS}`;
 
 /** The secret strings that must never appear in an observable channel. */
-const SECRET_STRINGS = [
+const SECRET_STRINGS = {
   SMTP_VALUE,
   SMTP_PASS,
   IMAP_VALUE,
@@ -64,7 +65,7 @@ const SECRET_STRINGS = [
   SFTP_VALUE,
   DOCKER_VALUE,
   DOCKER_PASS,
-];
+};
 
 interface Needle {
   label: string;
@@ -74,18 +75,20 @@ interface Needle {
 /** A credential leaks verbatim or re-encoded — the value and its base64,
  * base64url, hex and percent forms are all needles (mirrors core's
  * `redactSecretEncodings` matched set). */
-function encodingsOf(value: string): Needle[] {
+function encodingsOf(name: string, value: string): Needle[] {
   const buf = Buffer.from(value, "utf8");
   return [
-    { label: `${value} (raw)`, needle: value },
-    { label: `${value} (base64)`, needle: buf.toString("base64") },
-    { label: `${value} (base64url)`, needle: buf.toString("base64url") },
-    { label: `${value} (hex)`, needle: buf.toString("hex") },
-    { label: `${value} (percent)`, needle: encodeURIComponent(value) },
+    { label: `${name} (raw)`, needle: value },
+    { label: `${name} (base64)`, needle: buf.toString("base64") },
+    { label: `${name} (base64url)`, needle: buf.toString("base64url") },
+    { label: `${name} (hex)`, needle: buf.toString("hex") },
+    { label: `${name} (percent)`, needle: encodeURIComponent(value) },
   ];
 }
 
-const NEEDLES: Needle[] = SECRET_STRINGS.flatMap(encodingsOf);
+const NEEDLES: Needle[] = Object.entries(SECRET_STRINGS).flatMap(([name, value]) =>
+  encodingsOf(name, value),
+);
 
 interface Observation {
   surface: string;
@@ -312,7 +315,7 @@ describe("v1.3 contexts — credential opacity across every observable channel",
       "ops@example.com",
     ].join(" ");
     for (const n of NEEDLES) {
-      expect(publicVocabulary, n.label).not.toContain(n.needle);
+      expectAbsent(publicVocabulary, n.needle, n.label);
     }
 
     expect(findLeaks(observed, NEEDLES)).toEqual([]);
@@ -350,6 +353,6 @@ describe("v1.3 contexts — credential opacity across every observable channel",
       ...observed,
       { surface: "planted result", text: `{"leaked":"${WS_VALUE}"}` },
     ];
-    expect(findLeaks(withPlant, NEEDLES)).toContain(`planted result carries ${WS_VALUE} (raw)`);
+    expect(findLeaks(withPlant, NEEDLES)).toContain("planted result carries WS_VALUE (raw)");
   });
 });

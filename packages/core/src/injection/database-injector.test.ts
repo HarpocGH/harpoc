@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import type { ConnectionConfig } from "@harpoc/shared";
 import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
 import {
@@ -31,6 +31,9 @@ vi.mock("./url-validator.js", async (importOriginal) => {
 });
 
 const driverQueries = vi.hoisted(() => [] as { engine: string; args: unknown[] }[]);
+const DB_PASSWORD = "s3cr3t";
+const DB_USERNAME = "admin";
+const FLOOR_USERNAME = "abc";
 vi.mock("pg", () => ({
   default: {
     Client: class {
@@ -221,9 +224,9 @@ describe("DatabaseInjector", () => {
   });
 
   it("redacts the credential from the result rows", async () => {
-    const mock = new MockAdapter({ rows: [{ note: "value is s3cr3t here" }] });
+    const mock = new MockAdapter({ rows: [{ note: `value is ${DB_PASSWORD} here` }] });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-    expect(JSON.stringify(res.rows)).not.toContain("s3cr3t");
+    expectAbsent(JSON.stringify(res.rows), DB_PASSWORD);
     expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
   });
 
@@ -231,9 +234,9 @@ describe("DatabaseInjector", () => {
   // (`SELECT 1 AS "<credential>"`) put the value where no redactor looked while
   // the same string in a row value was redacted.
   it("redacts the credential from a column name", async () => {
-    const mock = new MockAdapter({ rows: [{ x: 1 }], fields: [{ name: "s3cr3t" }] });
+    const mock = new MockAdapter({ rows: [{ x: 1 }], fields: [{ name: DB_PASSWORD }] });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-    expect(JSON.stringify(res.fields)).not.toContain("s3cr3t");
+    expectAbsent(JSON.stringify(res.fields), DB_PASSWORD);
     expect(JSON.stringify(res.fields)).toContain("[REDACTED]");
   });
 
@@ -241,13 +244,13 @@ describe("DatabaseInjector", () => {
     const encoded = Buffer.from("s3cr3t", "utf8").toString("base64");
     const mock = new MockAdapter({ rows: [], fields: [{ name: `alias_${encoded}` }] });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-    expect(JSON.stringify(res.fields)).not.toContain(encoded);
+    expectAbsent(JSON.stringify(res.fields), encoded);
   });
 
   it("redacts the credential from the command tag", async () => {
-    const mock = new MockAdapter({ rows: [], command: "SELECT s3cr3t" });
+    const mock = new MockAdapter({ rows: [], command: `SELECT ${DB_PASSWORD}` });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-    expect(res.command).not.toContain("s3cr3t");
+    expectAbsent(res.command, DB_PASSWORD);
     expect(res.command).toContain("[REDACTED]");
   });
 
@@ -268,7 +271,7 @@ describe("DatabaseInjector", () => {
       () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
       ErrorCode.DB_QUERY_FAILED,
     );
-    expect(err.message).not.toContain("s3cr3t");
+    expectAbsent(err.message, DB_PASSWORD);
   });
 
   it("maps a connection failure to DB_CONNECTION_FAILED", async () => {
@@ -279,9 +282,9 @@ describe("DatabaseInjector", () => {
   });
 
   it("redacts the username half from the result rows", async () => {
-    const mock = new MockAdapter({ rows: [{ note: "logged in as admin just now" }] });
+    const mock = new MockAdapter({ rows: [{ note: `logged in as ${DB_USERNAME} just now` }] });
     const res = await injector(mock).executeWithSecret(action(), SECRET, policy(), undefined);
-    expect(JSON.stringify(res.rows)).not.toContain("admin");
+    expectAbsent(JSON.stringify(res.rows), DB_USERNAME);
     expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
   });
 
@@ -291,7 +294,7 @@ describe("DatabaseInjector", () => {
       () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
       ErrorCode.DB_QUERY_FAILED,
     );
-    expect(err.message).not.toContain("admin");
+    expectAbsent(err.message, DB_USERNAME);
   });
 
   it("redacts the username half from a connection error", async () => {
@@ -302,7 +305,7 @@ describe("DatabaseInjector", () => {
       () => injector(mock).executeWithSecret(action(), SECRET, policy(), undefined),
       ErrorCode.DB_CONNECTION_FAILED,
     );
-    expect(err.message).not.toContain("admin");
+    expectAbsent(err.message, DB_USERNAME);
   });
 
   it("redacts a username at the shared floor (MIN_REDACTABLE_FRAGMENT)", async () => {
@@ -313,7 +316,7 @@ describe("DatabaseInjector", () => {
       policy(),
       undefined,
     );
-    expect(JSON.stringify(res.rows)).not.toContain("abc");
+    expectAbsent(JSON.stringify(res.rows), FLOOR_USERNAME);
     expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
   });
 

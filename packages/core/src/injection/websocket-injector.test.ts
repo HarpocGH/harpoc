@@ -6,7 +6,7 @@ import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/share
 import type { FakeWsServer, FakeWsScript } from "./__fixtures__/fake-ws-server.js";
 import { startFakeWsServer } from "./__fixtures__/fake-ws-server.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./websocket-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const SECRET = "ws-secret-value";
 
@@ -132,9 +132,9 @@ describe("executeWebsocketAction — handshake credential injection", () => {
 
     await executeWebsocketAction(action, secretBytes(), basePolicy());
 
+    expectAbsent(fake.clientFrames()[0]?.payload.toString("utf8"), SECRET);
     expect(fake.clientFrames()).toHaveLength(1);
     expect(fake.clientFrames()[0]?.payload.toString("utf8")).toBe("hello from the vault");
-    expect(fake.clientFrames()[0]?.payload.toString("utf8")).not.toContain(SECRET);
   });
 });
 
@@ -188,6 +188,7 @@ describe("executeWebsocketAction — binary frames", () => {
     const fake = await start({ messages: [`echo: ${SECRET}`], binary: true });
     const action = baseAction({ url: `ws://127.0.0.1:${fake.port}/` });
     const execution = await executeWebsocketAction(action, secretBytes(), basePolicy());
+    expectAbsent(JSON.stringify(execution.result.messages), SECRET);
     expect(execution.result.messages).toEqual(["echo: [REDACTED]"]);
     expect(execution.sanitized).toBe(true);
   });
@@ -228,7 +229,7 @@ describe("executeWebsocketAction — response_mode shaping", () => {
 
     const { result } = await executeWebsocketAction(action, secretBytes(), basePolicy());
 
-    expect(result.messages[0]).not.toContain(SECRET);
+    expectAbsent(result.messages[0], SECRET);
     expect(result.messages[0]).toContain("[REDACTED]");
   });
 
@@ -412,7 +413,7 @@ describe("executeWebsocketAction — non-101 / connection failure", () => {
       () => executeWebsocketAction(action, secretBytes(), basePolicy()),
       ErrorCode.WEBSOCKET_CONNECT_FAILED,
     );
-    expect(err.message).not.toContain(SECRET);
+    expectAbsent(err.message, SECRET);
   });
 });
 

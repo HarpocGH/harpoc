@@ -8,7 +8,7 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, PrincipalType, SecretType, VaultError } from "@harpoc/shared";
 import type { Permission } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
@@ -38,6 +38,7 @@ vi.mock("./crypto/argon2.js", async (importOriginal) =>
  */
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "certs");
 const fx = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
+const PEM_ARMOR = "PRIVATE KEY";
 
 interface StoredCertRow {
   secret_id: string;
@@ -260,7 +261,7 @@ describe("importCertificate", () => {
     expect(row.auto_renew).toBe(0);
     expect(row.renew_before_days).toBe(30);
     expect(row.acme_account_encrypted).toBeNull();
-    expect(row.private_key_encrypted.toString("utf8")).not.toContain("PRIVATE KEY");
+    expectAbsent(row.private_key_encrypted.toString("utf8"), PEM_ARMOR);
   });
 
   it("rejects a renewBeforeDays above 365 before any write", async () => {
@@ -350,12 +351,12 @@ describe("importCertificate", () => {
       .filter((e) => !e.success);
     expect(denials.length).toBe(1);
     expect(denials[0]?.secret_id).toBeNull();
+    expectAbsent(JSON.stringify(denials[0]?.detail), PEM_ARMOR);
     expect(denials[0]?.detail).toMatchObject({
       name: "bad-audited",
       action: "import_certificate",
       error: ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
     });
-    expect(JSON.stringify(denials[0]?.detail)).not.toContain("PRIVATE KEY");
     // Nothing was created: the name is still free.
     expect(engine.listSecrets().length).toBe(0);
   });
@@ -501,7 +502,7 @@ describe("importCertificate", () => {
       .queryAudit({ limit: 50 })
       .find((e) => e.event_type === "cert.issue" && e.secret_id === secretId);
     expect(issue).toBeDefined();
-    expect(JSON.stringify(issue?.detail)).not.toContain("PRIVATE KEY");
+    expectAbsent(JSON.stringify(issue?.detail), PEM_ARMOR);
   });
 
   it("refuses to import while the vault is locked", async () => {
@@ -714,7 +715,7 @@ describe("certificate secrets are refused on the generic value paths", () => {
 
   it("never leaks key material in the refusal message", async () => {
     const err = await engine.getSecretValue("secret://tls-cert").catch((e: unknown) => e);
-    expect((err as Error).message).not.toContain("PRIVATE KEY");
+    expectAbsent((err as Error).message, PEM_ARMOR);
     expect((err as Error).message).toBe(
       "Certificate secrets cannot be used as a raw value: secret://tls-cert",
     );
@@ -965,8 +966,8 @@ describe("certificate accessors", () => {
       );
     expect(reads.length).toBe(1);
     expect(reads[0]?.success).toBe(true);
+    expectAbsent(JSON.stringify(reads[0]?.detail), PEM_ARMOR);
     expect(reads[0]?.detail).toMatchObject({ config: "certificate_private_key" });
-    expect(JSON.stringify(reads[0]?.detail)).not.toContain("PRIVATE KEY");
   });
 
   it("getCertificatePrivateKey round-trips an EC key too", async () => {
@@ -1576,7 +1577,7 @@ describe("updateCertificate", () => {
 
     const renew = engine.queryAudit({ secretId, eventType: AuditEventType.CERT_RENEW })[0];
     const detail = JSON.stringify(renew?.detail);
-    expect(detail).not.toContain("PRIVATE KEY");
+    expectAbsent(detail, PEM_ARMOR);
     expect(detail).not.toContain("BEGIN CERTIFICATE");
   });
 
@@ -1822,8 +1823,8 @@ describe("certificate accessors — caller policy enforcement", () => {
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
       .filter((e) => !e.success);
     expect(denials.length).toBe(1);
+    expectAbsent(JSON.stringify(denials[0]?.detail), PEM_ARMOR);
     expect(denials[0]?.detail).toMatchObject({ config: "certificate_private_key" });
-    expect(JSON.stringify(denials[0]?.detail)).not.toContain("PRIVATE KEY");
   });
 
   it("getCertificatePrivateKey attributes the granted read to its caller", async () => {

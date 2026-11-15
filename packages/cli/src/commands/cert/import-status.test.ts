@@ -44,7 +44,7 @@ import { resolveSecretValue } from "../../utils/secret-value.js";
 import { readPemFile, registerCertImportCommand } from "./import.js";
 import { registerCertStatusCommand } from "./status.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../../__fixtures__/cli-harness.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const FIXTURES = fileURLToPath(new URL("../../__fixtures__/certs/", import.meta.url));
 const KEY_PATH = join(FIXTURES, "rsa-key.pem");
@@ -77,6 +77,7 @@ const run = buildCli(
   },
   ["cert"],
 );
+const PEM_ARMOR = "PRIVATE KEY";
 
 /** The buffer resolveSecretValue handed the command, for wipe assertions. */
 async function resolvedKeyBuffer(): Promise<Buffer> {
@@ -217,8 +218,8 @@ describe("cert import", () => {
     expect(mockPromptHidden).toHaveBeenCalledTimes(1);
     expect(mockPromptHidden).toHaveBeenCalledWith("Key passphrase: ", undefined, undefined);
     const storedKey = mockEngine.importCertificate.mock.calls[0]?.[1] as string;
+    expect(storedKey.includes("ENCRYPTED")).toBe(false);
     expect(storedKey).toContain("BEGIN PRIVATE KEY");
-    expect(storedKey).not.toContain("ENCRYPTED");
     // Same key material, just unwrapped: it still matches the certificate.
     expect(createPrivateKey(storedKey).export({ type: "pkcs8", format: "pem" })).toBe(
       createPrivateKey(KEY_PEM).export({ type: "pkcs8", format: "pem" }),
@@ -278,8 +279,8 @@ describe("cert import", () => {
     await run(["import", "web", "--key", KEY_PATH, "--cert", CERT_PATH]);
 
     const written = [...spies.logSpy.mock.calls, ...spies.errorSpy.mock.calls].flat().join("\n");
-    expect(written).not.toContain(keyBody);
-    expect(written).not.toContain("PRIVATE KEY");
+    expectAbsent(written, keyBody);
+    expectAbsent(written, PEM_ARMOR);
   });
 
   it("a missing --cert is refused by commander", async () => {

@@ -1,6 +1,6 @@
 import { ErrorCode } from "@harpoc/shared";
 import type { UseSecretResponse } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { InjectionGuard } from "./injection-guard.js";
 import { sanitizeUseSecretResult } from "./sanitize-result.js";
@@ -29,7 +29,7 @@ describe("sanitizeUseSecretResult", () => {
       structured_content: { [bearerish]: 1 },
     };
     sanitizeUseSecretResult(result, guard);
-    expect(JSON.stringify(result)).not.toContain(bearerish);
+    expectAbsent(JSON.stringify(result), bearerish);
   });
 
   it("sanitizes a credential-shaped key inside an MCP content block", () => {
@@ -39,7 +39,7 @@ describe("sanitizeUseSecretResult", () => {
       content: [{ type: "text", text: "ok", meta: { [bearerish]: true } }],
     };
     sanitizeUseSecretResult(result, guard);
-    expect(JSON.stringify(result)).not.toContain(bearerish);
+    expectAbsent(JSON.stringify(result), bearerish);
   });
 
   it("sanitizes a credential-shaped database column name in a row object", () => {
@@ -52,7 +52,7 @@ describe("sanitizeUseSecretResult", () => {
       truncated: false,
     };
     sanitizeUseSecretResult(result, guard);
-    expect(JSON.stringify(result.rows)).not.toContain(bearerish);
+    expectAbsent(JSON.stringify(result.rows), bearerish);
   });
 
   /**
@@ -75,8 +75,8 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(JSON.stringify(result.rows)).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(JSON.stringify(result.rows), BEARERISH, "the rows");
+      expectAbsent(result.error, BEARERISH, "the error");
       expect(result.error).toContain("[REDACTED]");
     });
 
@@ -91,9 +91,9 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.stdout).not.toContain(BEARERISH);
-      expect(result.stderr).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(result.stdout, BEARERISH, "stdout");
+      expectAbsent(result.stderr, BEARERISH, "stderr");
+      expectAbsent(result.error, BEARERISH, "the error");
       expect(result.stdout).toContain("[REDACTED]");
     });
 
@@ -107,9 +107,9 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.stdout).not.toContain(BEARERISH);
-      expect(result.stderr).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(result.stdout, BEARERISH, "stdout");
+      expectAbsent(result.stderr, BEARERISH, "stderr");
+      expectAbsent(result.error, BEARERISH, "the error");
       expect(result.stderr).toContain("[REDACTED]");
     });
 
@@ -123,9 +123,9 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.stdout).not.toContain(BEARERISH);
-      expect(result.stderr).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(result.stdout, BEARERISH, "stdout");
+      expectAbsent(result.stderr, BEARERISH, "stderr");
+      expectAbsent(result.error, BEARERISH, "the error");
       expect(result.stdout).toContain("[REDACTED]");
     });
 
@@ -139,9 +139,9 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.stdout).not.toContain(BEARERISH);
-      expect(result.stderr).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(result.stdout, BEARERISH, "stdout");
+      expectAbsent(result.stderr, BEARERISH, "stderr");
+      expectAbsent(result.error, BEARERISH, "the error");
     });
 
     it("http: body, headers and error", () => {
@@ -154,9 +154,9 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.body).not.toContain(BEARERISH);
-      expect(result.headers?.["x-echo"]).not.toContain(BEARERISH);
-      expect(result.error).not.toContain(BEARERISH);
+      expectAbsent(result.body, BEARERISH, "the body");
+      expectAbsent(result.headers?.["x-echo"], BEARERISH, "the x-echo header");
+      expectAbsent(result.error, BEARERISH, "the error");
     });
 
     it("imap: fetched message content, at any depth", () => {
@@ -169,7 +169,7 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(JSON.stringify(result.messages)).not.toContain(BEARERISH);
+      expectAbsent(JSON.stringify(result.messages), BEARERISH);
     });
 
     it("websocket: every collected frame", () => {
@@ -180,7 +180,7 @@ describe("sanitizeUseSecretResult", () => {
       };
       sanitizeUseSecretResult(result, guard);
 
-      expect(result.messages[1]).not.toContain(BEARERISH);
+      expectAbsent(result.messages[1], BEARERISH);
       expect(result.messages[0]).toBe("hello");
     });
 

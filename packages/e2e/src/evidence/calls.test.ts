@@ -6,6 +6,7 @@ import type { Arm, CallOutcome } from "../arms/arm.js";
 import { RECORD_REDACTION, redactForRecord } from "../assert/opacity.js";
 import { MAX_PARSE_DEPTH, scan } from "../assert/scan.js";
 import { EVIDENCE_TEXT_CAP, callEvidence, recordingArm } from "./calls.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 // The redaction is spied so the fail-closed elision can be driven: a
 // pass-through keeps every other case on the real redaction.
@@ -29,6 +30,9 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const CREDENTIAL = "p4-calls-marker:not/a-credential";
 const B64 = Buffer.from(CREDENTIAL, "utf8").toString("base64");
+const SECOND_CREDENTIAL = "second-credential-value";
+const BACKSLASH_CREDENTIAL = "pw\\tail";
+const TEMP_PATH_CREDENTIAL = "/tmp/vault.key";
 
 function completed(text: string, extra: Partial<CallOutcome> = {}): CallOutcome {
   return { ok: true, result: { content: [{ type: "text", text }] }, text, ...extra };
@@ -50,25 +54,28 @@ describe("callEvidence", () => {
       }),
       CREDENTIAL,
     );
+    expectAbsent(JSON.stringify(ev), CREDENTIAL);
+    expectAbsent(JSON.stringify(ev), B64);
     expect(ev).toEqual({
       ok: true,
       error: `refused for ${RECORD_REDACTION}`,
       text: `{"stdout":"${RECORD_REDACTION} and ${RECORD_REDACTION}"}`,
       stderr: `child saw ${RECORD_REDACTION}`,
     });
-    expect(JSON.stringify(ev)).not.toContain(CREDENTIAL);
-    expect(JSON.stringify(ev)).not.toContain(B64);
   });
 
   it("uses a marker distinct from the sanitizer's, so the two redactions stay tellable apart", () => {
     const ev = callEvidence(completed(`[REDACTED] then ${CREDENTIAL}`), CREDENTIAL);
     expect(RECORD_REDACTION).not.toBe("[REDACTED]");
+    expectAbsent(ev.text, CREDENTIAL);
     expect(ev.text).toBe(`[REDACTED] then ${RECORD_REDACTION}`);
   });
 
   it("marks every credential it is given", () => {
-    const second = "second-credential-value";
+    const second = SECOND_CREDENTIAL;
     const ev = callEvidence(completed(`${CREDENTIAL}|${second}`), CREDENTIAL, second);
+    expectAbsent(ev.text, CREDENTIAL);
+    expectAbsent(ev.text, second);
     expect(ev.text).toBe(`${RECORD_REDACTION}|${RECORD_REDACTION}`);
   });
 
@@ -115,10 +122,10 @@ describe("callEvidence", () => {
     // committed with the credential in it.
     redactForRecordMock.mockImplementationOnce((text) => text);
     const ev = callEvidence(completed(`x ${CREDENTIAL}`, { errorText: "plain" }), CREDENTIAL);
+    expect(scan(CREDENTIAL, ev)).toEqual([]);
     expect(ev.text).toBe(RECORD_REDACTION);
     expect(ev.elided).toBe(true);
     expect(ev.error).toBe("plain");
-    expect(scan(CREDENTIAL, ev)).toEqual([]);
   });
 
   it("does not elide a credential at the opacity scan's deepest parse — the redaction reaches it", () => {
@@ -127,13 +134,14 @@ describe("callEvidence", () => {
     expect(scan(quoted, atReach).length).toBeGreaterThan(0);
     const ev = callEvidence(completed(atReach), quoted);
     expect("elided" in ev).toBe(false);
-    expect(ev.text).toContain(RECORD_REDACTION);
     expect(scan(quoted, ev.text)).toEqual([]);
+    expect(ev.text).toContain(RECORD_REDACTION);
   });
 
   it("marks a credential whose own backslash reads as a JSON escape, raw — not committed, not elided (C6-ae)", () => {
-    const backslashed = "pw\\tail";
+    const backslashed = BACKSLASH_CREDENTIAL;
     const ev = callEvidence(completed(`x ${backslashed} y`), backslashed);
+    expectAbsent(ev.text, backslashed);
     expect(ev).toEqual({ ok: true, text: `x ${RECORD_REDACTION} y` });
   });
 });
@@ -286,14 +294,19 @@ describe("callEvidence with the host's temp and home roots", () => {
 
   it("marks a credential that is itself a path under temp as the credential, not as a path", () => {
     hostRoots("/tmp", "/home/runner");
-    const ev = callEvidence(completed("read /tmp/vault.key and /tmp/other"), "/tmp/vault.key");
+    const ev = callEvidence(
+      completed(`read ${TEMP_PATH_CREDENTIAL} and /tmp/other`),
+      TEMP_PATH_CREDENTIAL,
+    );
+    expectAbsent(ev.text, TEMP_PATH_CREDENTIAL);
     expect(ev.text).toBe(`read ${RECORD_REDACTION} and <TMP>/other`);
   });
 
   it("decides the elision on the credential redaction's output, before the roots are replaced", () => {
     hostRoots("/tmp", "/home/runner");
     redactForRecordMock.mockImplementationOnce((text) => text);
-    const ev = callEvidence(completed("read /tmp/vault.key"), "/tmp/vault.key");
+    const ev = callEvidence(completed(`read ${TEMP_PATH_CREDENTIAL}`), TEMP_PATH_CREDENTIAL);
+    expectAbsent(ev.text, TEMP_PATH_CREDENTIAL);
     expect(ev.text).toBe(RECORD_REDACTION);
     expect(ev.elided).toBe(true);
   });
@@ -341,12 +354,12 @@ describe("recordingArm", () => {
     expect(inner.invoke).toHaveBeenCalledWith("secret://x", { type: "process" });
     expect(inner.probeMetadata.mock.calls).toEqual([["secret://x"], [undefined]]);
 
+    expectAbsent(JSON.stringify(arm.calls()), CREDENTIAL);
     expect(arm.calls()).toEqual([
       { ok: true, text: `{"stdout":"${RECORD_REDACTION}"}` },
       { ok: false, text: "", error: `Secret not found: ${RECORD_REDACTION}` },
       { ok: false, text: "", error: `Secret not found: ${RECORD_REDACTION}` },
     ]);
-    expect(JSON.stringify(arm.calls())).not.toContain(CREDENTIAL);
   });
 
   it("captures nothing for a call that threw, and forwards close()", async () => {

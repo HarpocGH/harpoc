@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runNode } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const MCP_ENTRY = join(
   dirname(createRequire(import.meta.url).resolve("@harpoc/mcp-server/package.json")),
   "dist",
   "index.js",
 );
+const REMOVED_FLAG_TOKEN = "not.a.jwt";
 
 let vaultDir: string;
 
@@ -51,11 +53,11 @@ describe("harpoc-mcp --token-file and the removed --token (spawned binary)", () 
   }, 30_000);
 
   it("refuses the removed --token flag, never echoing its value", async () => {
-    const result = await runMcp(["--token", "not.a.jwt"]);
+    const result = await runMcp(["--token", REMOVED_FLAG_TOKEN]);
     expect(result.code).toBe(1);
+    expectAbsent(result.stderr, REMOVED_FLAG_TOKEN);
     expect(result.stderr).toContain("--token was removed");
     expect(result.stderr).toContain("--token-file <path>");
-    expect(result.stderr).not.toContain("not.a.jwt");
     expect(result.stderr).not.toContain("Vault is locked");
   }, 30_000);
 });

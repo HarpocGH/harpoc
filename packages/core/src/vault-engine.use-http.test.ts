@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionConfig } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { validateUrl } from "./injection/url-validator.js";
 import { retainDecryptedValues } from "./__fixtures__/engine-seams.js";
@@ -60,6 +60,7 @@ interface EchoArrival {
   body: string;
 }
 const echoArrivals: EchoArrival[] = [];
+const BEARER_TOKEN = "my-bearer-token";
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -171,6 +172,7 @@ describe("useSecret (HTTP injection)", () => {
     expect(response.status).toBe(200);
     const body = JSON.parse(response.body ?? "{}") as Record<string, string>;
     // Exact-match redaction scrubs the secret value from reflected responses
+    expectAbsent(body.authorization, BEARER_TOKEN);
     expect(body.authorization).toBe("Bearer [REDACTED]");
   });
 });
@@ -310,6 +312,7 @@ describe("response mode enforcement (HTTP)", () => {
     expect(res.status).toBe(200);
     expect(res.headers).toBeDefined();
     const body = JSON.parse(res.body ?? "{}") as Record<string, string>;
+    expectAbsent(body.authorization, secretValue);
     expect(body.authorization).toBe("Bearer [REDACTED]");
   });
 
@@ -322,8 +325,8 @@ describe("response mode enforcement (HTTP)", () => {
     });
     if (res.type !== "http") throw new Error("expected http result");
     expect(res.body).toBeDefined();
-    expect(res.body).not.toContain(Buffer.from(secretValue).toString("base64"));
-    expect(res.body).not.toContain(Buffer.from(secretValue).toString("hex"));
+    expectAbsent(res.body, Buffer.from(secretValue).toString("base64"));
+    expectAbsent(res.body, Buffer.from(secretValue).toString("hex"));
     expect(res.body).toContain("[REDACTED]");
   });
 
@@ -459,6 +462,7 @@ describe("response mode enforcement (HTTP)", () => {
     });
     if (res.type !== "http") throw new Error("expected http result");
     const body = JSON.parse(res.body ?? "{}") as Record<string, string>;
+    expectAbsent(body.authorization, secretValue);
     expect(body.authorization).toBe("Bearer [REDACTED]");
   });
 
@@ -724,9 +728,9 @@ describe("HTTP injection modes on the wire (I14)", () => {
     expect(res.status).toBe(200);
     expect(echoArrivals).toHaveLength(1);
     const raw = res.body ?? "";
-    expect(raw).not.toContain(VALUE);
-    expect(raw).not.toContain(Buffer.from(VALUE).toString("base64"));
-    expect(raw).not.toContain(encodeURIComponent(VALUE));
+    expectAbsent(raw, VALUE);
+    expectAbsent(raw, Buffer.from(VALUE).toString("base64"));
+    expectAbsent(raw, encodeURIComponent(VALUE));
     return { arrival: echoArrivals[0] as EchoArrival, echoed: JSON.parse(raw) as EchoArrival };
   }
 

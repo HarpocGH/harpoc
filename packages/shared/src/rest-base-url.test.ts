@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { parseRestBaseUrl } from "./rest-base-url.js";
 
+const URL_PASSWORD = "s3cret";
+
 describe("parseRestBaseUrl", () => {
   it.each([
     ["http://127.0.0.1:3000", "http://127.0.0.1:3000/"],
@@ -44,7 +46,9 @@ describe("parseRestBaseUrl", () => {
 
   it("the refusal carries no part of the value", () => {
     expect(
-      JSON.stringify(parseRestBaseUrl("https://user:s3cret@vault.example/?k=s3cret")),
-    ).not.toContain("s3cret");
+      JSON.stringify(
+        parseRestBaseUrl(`https://user:${URL_PASSWORD}@vault.example/?k=${URL_PASSWORD}`),
+      ).includes(URL_PASSWORD),
+    ).toBe(false);
   });
 });

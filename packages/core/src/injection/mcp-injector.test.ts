@@ -5,6 +5,7 @@ import type { AuditLogger } from "../audit/audit-logger.js";
 import { POLICY, SECRET, STDIO_CONFIG, mcpAction } from "./__fixtures__/mcp-downstream.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 let registry: McpConnectionRegistry;
 let injector: McpInjector;
@@ -166,19 +167,20 @@ describe("McpInjector — output sanitization (I2b)", () => {
   it("redacts the credential echoed from the downstream env", async () => {
     const result = await run(mcpAction("leak-env"));
     const text = JSON.stringify(result);
-    expect(text).not.toContain(SECRET);
+    expectAbsent(text, SECRET);
     expect(text).toContain("[REDACTED]");
   });
 
   it("redacts a base64 encoding of the credential", async () => {
     const result = await run(mcpAction("leak-env-b64"));
     const text = JSON.stringify(result);
-    expect(text).not.toContain(Buffer.from(SECRET, "utf8").toString("base64"));
+    expectAbsent(text, Buffer.from(SECRET, "utf8").toString("base64"));
     expect(text).toContain("[REDACTED]");
   });
 
   it("redacts the credential inside structured_content leaves", async () => {
     const result = await run(mcpAction("leak-structured"));
+    expectAbsent(JSON.stringify(result.structured_content), SECRET);
     expect(result.structured_content).toEqual({ nested: { secret: "[REDACTED]" } });
   });
 

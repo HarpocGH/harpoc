@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * HTTP execution context — response modes (thesis §4.5.2, §6 sec:attack-i2a-bypass).
@@ -131,8 +132,8 @@ describe("HTTP context — response modes (structural I2a)", () => {
       injection: { type: "bearer" },
     });
     if (res.type !== "http") throw new Error("expected http result");
+    expectAbsent(res.body, SECRET);
     expect(res.body).toContain("[REDACTED]");
-    expect(res.body).not.toContain(SECRET);
   });
 
   it("filtered redacts encoded echoes (base64 / hex)", async () => {
@@ -144,8 +145,8 @@ describe("HTTP context — response modes (structural I2a)", () => {
       injection: { type: "bearer" },
     });
     if (res.type !== "http") throw new Error("expected http result");
-    expect(res.body).not.toContain(Buffer.from(SECRET).toString("base64"));
-    expect(res.body).not.toContain(Buffer.from(SECRET).toString("hex"));
+    expectAbsent(res.body, Buffer.from(SECRET).toString("base64"));
+    expectAbsent(res.body, Buffer.from(SECRET).toString("hex"));
     expect(res.body).toContain("[REDACTED]");
   });
 

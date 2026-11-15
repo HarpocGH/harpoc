@@ -24,6 +24,7 @@ import {
   trustFixtureCaByDefault,
 } from "./__fixtures__/upstream-server.js";
 import type { UpstreamFixture } from "./__fixtures__/upstream-server.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const MARKER = "[REDACTED]";
 
@@ -96,6 +97,7 @@ function echoHeaders(): void {
 }
 
 const BASIC = (userPass: string): string => `Basic ${Buffer.from(userPass).toString("base64")}`;
+const LEASE_VALUES_PATTERN = /10\.0\.0\.1|127\.0\.0\.1/;
 
 describe("brokered requests — the four placements", () => {
   it("a bearer placeholder is swapped upstream and redacted in the reply; one lease, completed {200, sanitized}", async () => {
@@ -113,11 +115,11 @@ describe("brokered requests — the four placements", () => {
     expect(seen?.headers.host).toBe(`127.0.0.1:${upstream.port}`);
 
     expect(reply.status).toBe(200);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.headers["x-echo"]).toBe(`Bearer ${MARKER}`);
     expect(JSON.parse(reply.body)).toMatchObject({ authorization: `Bearer ${MARKER}` });
     expect(reply.headers["content-length"]).toBeUndefined();
     expect(reply.headers["transfer-encoding"]).toBe("chunked");
-    expect(reply.raw).not.toContain(SECRET_VALUE);
 
     expect(double.resolveForProxy).toHaveBeenCalledTimes(1);
     expect(double.resolveForProxy).toHaveBeenCalledWith(
@@ -142,8 +144,8 @@ describe("brokered requests — the four placements", () => {
 
     const sent = BASIC(`alice:${SECRET_VALUE}`);
     expect(upstream.seen[0]?.headers.authorization).toBe(sent);
-    expect(reply.raw).not.toContain(sent.slice("Basic ".length));
-    expect(reply.raw).not.toContain(SECRET_VALUE);
+    expectAbsent(reply.raw, sent.slice("Basic ".length));
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.headers["x-echo"]).toBe(`Basic ${MARKER}`);
     expect(double.leases[0]?.complete).toHaveBeenCalledWith({ status: 200, sanitized: true });
   });
@@ -314,8 +316,8 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
       });
 
       expect(reply.status).toBe(status);
+      expectAbsent(reply.raw, header.slice("Bearer ".length));
       expect(JSON.parse(reply.body)).toMatchObject({ error: code });
-      expect(reply.raw).not.toContain(header.slice("Bearer ".length));
       expect(double.resolveForProxy).not.toHaveBeenCalled();
       expect(upstream.seen).toHaveLength(0);
     },
@@ -542,8 +544,8 @@ describe("the upstream leg", () => {
     const reply = await send("/q?token=harpoc:gh-pat&x=1");
 
     expect(reply.status).toBe(302);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.headers.location).toBe(`/127.0.0.1:${upstream.port}/q?token=harpoc:gh-pat&x=1`);
-    expect(reply.raw).not.toContain(SECRET_VALUE);
     expect(upstream.seen[0]?.url).toBe(`/q?token=${SECRET_VALUE}&x=1`);
     expect(double.leases[0]?.complete).toHaveBeenCalledWith({ status: 302, sanitized: false });
   });
@@ -733,10 +735,10 @@ describe("the upstream leg", () => {
           authorization: "Bearer harpoc:gh-pat",
         },
       });
+      expectAbsent(reply.raw, value);
       expect(reply.raw).toContain(MARKER);
-      expect(reply.raw).not.toContain(value);
     }
-    expect(errors.map((err) => err.message).join("\n")).not.toMatch(/10\.0\.0\.1|127\.0\.0\.1/);
+    expect(LEASE_VALUES_PATTERN.test(errors.map((err) => err.message).join("\n"))).toBe(false);
   });
 
   it("a refusal after the lease records its own code on the row and in onError; the client gets the generic 500", async () => {
@@ -745,17 +747,17 @@ describe("the upstream leg", () => {
     const reply = await send("/user", { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(500);
+    expectAbsent(reply.raw, SECRET_VALUE, "the reply");
     expect(JSON.parse(reply.body)).toEqual({
       error: ErrorCode.INTERNAL_ERROR,
       message: "Internal proxy error",
     });
-    expect(reply.raw).not.toContain(SECRET_VALUE);
     expect(upstream.seen).toHaveLength(0);
     expect(lease.complete).toHaveBeenCalledTimes(1);
     expect(lease.complete).toHaveBeenCalledWith({ error: ErrorCode.INVALID_INJECTION_CONFIG });
+    expectAbsent(errors[0]?.message, SECRET_VALUE, "the onError message");
     expect(errors).toHaveLength(1);
     expect(errors[0]?.code).toBe(ErrorCode.INVALID_INJECTION_CONFIG);
-    expect(errors[0]?.message).not.toContain(SECRET_VALUE);
     expect([...lease.value].every((byte) => byte === 0)).toBe(true);
   });
 

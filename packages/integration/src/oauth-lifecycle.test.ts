@@ -18,7 +18,7 @@ import type { TestServer } from "./helpers/rest-helpers.js";
 import { callTool, parseToolResult } from "./helpers/mcp-helpers.js";
 import { startMockOAuthProvider } from "./helpers/mock-oauth-provider.js";
 import type { MockOAuthProvider } from "./helpers/mock-oauth-provider.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -39,6 +39,9 @@ const CC_ACCESS_TOKEN = "at-cc-1";
 const AC_NAME = "ac-app";
 const AC_CLIENT_ID = "ac-client";
 const AC_CLIENT_SECRET = "ac-secret-1";
+const REFRESHED_ACCESS_TOKEN = "at-2";
+const SEEDED_ACCESS_TOKEN = "at-1";
+const SEEDED_REFRESH_TOKEN = "rt-1";
 
 let mock: MockOAuthProvider;
 let sink: Server;
@@ -130,8 +133,8 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
     // honoured `setNextTokens` and handed out its default token instead.
     expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe(CC_ACCESS_TOKEN);
 
-    expect(raw).not.toContain(CC_CLIENT_SECRET);
-    expect(raw).not.toContain(CC_ACCESS_TOKEN);
+    expectAbsent(raw, CC_CLIENT_SECRET);
+    expectAbsent(raw, CC_ACCESS_TOKEN);
   });
 
   it("2. REST status reports the stored access token without a refresh token", async () => {
@@ -176,10 +179,10 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       client_id: CC_CLIENT_ID,
       client_secret: CC_CLIENT_SECRET,
     });
-    expect(mock.requests[before]).not.toHaveProperty("refresh_token");
-    expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe("at-2");
-    expect(raw).not.toContain(CC_CLIENT_SECRET);
-    expect(raw).not.toContain("at-2");
+    expect("refresh_token" in (mock.requests[before] as object)).toBe(false);
+    expect(await vault.engine["getOAuthAccessToken"](ccSecretId)).toBe(REFRESHED_ACCESS_TOKEN);
+    expectAbsent(raw, CC_CLIENT_SECRET);
+    expectAbsent(raw, REFRESHED_ACCESS_TOKEN);
   });
 
   it("3b. REST refresh on an authorization-code-shaped secret rotates the access token", async () => {
@@ -220,10 +223,10 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       client_id: AC_CLIENT_ID,
       client_secret: AC_CLIENT_SECRET,
     });
-    expect(raw).not.toContain("rt-1");
-    expect(raw).not.toContain("at-2");
-    expect(raw).not.toContain(AC_CLIENT_SECRET);
-    expect(raw).not.toContain("at-1");
+    expectAbsent(raw, SEEDED_REFRESH_TOKEN);
+    expectAbsent(raw, REFRESHED_ACCESS_TOKEN);
+    expectAbsent(raw, AC_CLIENT_SECRET);
+    expectAbsent(raw, SEEDED_ACCESS_TOKEN);
 
     const status = vault.engine.getOAuthTokenStatus(acSecretId);
     expect(status.access_token_expires_at).toBe(refreshedExpiresAt);
@@ -253,9 +256,9 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
 
     expect(res.status).toBe(200);
     const raw = await res.text();
-    expect(sinkAuthorization).toEqual(["Bearer at-2"]);
-    expect(raw).not.toContain("at-2");
-    expect(raw).not.toContain("at-1");
+    expect(sinkAuthorization).toEqual([`Bearer ${REFRESHED_ACCESS_TOKEN}`]);
+    expectAbsent(raw, REFRESHED_ACCESS_TOKEN);
+    expectAbsent(raw, SEEDED_ACCESS_TOKEN);
     // The stored token was still valid, so injection triggered no auto-refresh.
     expect(mock.requests.length).toBe(providerCalls);
   });

@@ -14,6 +14,9 @@ import {
   parseVaultDirOption,
   readLaunchTokenFile,
 } from "./cli-options.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const URL_CREDENTIAL = "s3cret";
 
 describe("parseHttpPortOption", () => {
   it("defaults to DEFAULT_MCP_HTTP_PORT when --port is absent", () => {
@@ -252,11 +255,11 @@ describe("parseUrlOption (B1)", () => {
     "refuses credentials in %j without echoing them",
     (raw) => {
       const parsed = parseUrlOption(raw);
+      expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
       expect(parsed).toEqual({
         ok: false,
         message: "Error: --url must not carry credentials; pass the token with --token-file.\n",
       });
-      expect(JSON.stringify(parsed)).not.toContain("s3cret");
     },
   );
 
@@ -264,11 +267,11 @@ describe("parseUrlOption (B1)", () => {
     "refuses the query or fragment of %j without echoing it",
     (raw) => {
       const parsed = parseUrlOption(raw);
+      expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
       expect(parsed).toEqual({
         ok: false,
         message: "Error: --url must be a base URL, without a query or fragment.\n",
       });
-      expect(JSON.stringify(parsed)).not.toContain("s3cret");
     },
   );
 

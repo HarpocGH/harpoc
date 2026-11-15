@@ -4,20 +4,24 @@ import { encodingsOf } from "../assert/encodings.js";
 import { targetedVerdict, counterpartVerdict } from "./targeted.js";
 import { Outcome } from "./scenario.js";
 import type { Arm, CallOutcome } from "../arms/arm.js";
+import { expectAbsent } from "@harpoc/test-utils";
+
+const PEM_KEY_BODY = "MIIBVgIBADAN";
+const DB_COUNTERPART_PASSWORD = "db-counterpart-password";
 
 describe("thrown verdict diagnostics (F10)", () => {
   it("strips a PEM private key from an excerpt", () => {
     const key = "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADAN\n-----END PRIVATE KEY-----";
     const text = `ssh failed loading ${key} at line 3`;
     const out = redactForDiagnostics(text, key);
-    expect(out).not.toContain("MIIBVgIBADAN");
+    expectAbsent(out, PEM_KEY_BODY);
     expect(out).toContain("[REDACTED]");
   });
 
   it("strips the base64 form as well as the raw one", () => {
-    const cred = "db-counterpart-password";
+    const cred = DB_COUNTERPART_PASSWORD;
     const b64 = Buffer.from(cred, "utf8").toString("base64");
-    expect(redactForDiagnostics(`auth failed: ${b64}`, cred)).not.toContain(b64);
+    expectAbsent(redactForDiagnostics(`auth failed: ${b64}`, cred), b64);
   });
 
   it("leaves unrelated diagnostic text intact (negative control)", () => {
@@ -57,7 +61,7 @@ describe("thrown verdict wiring (F10 fix round 1)", () => {
     const message = thrownMessage(() => targetedVerdict(arm, false, outcome, CREDENTIAL));
 
     for (const enc of encodingsOf(CREDENTIAL)) {
-      expect(message).not.toContain(enc.needle);
+      expectAbsent(message, enc.needle, enc.label);
     }
     // A test that passes because the message became useless is not a fix:
     // the diagnostic context has to survive redaction.
@@ -76,7 +80,7 @@ describe("thrown verdict wiring (F10 fix round 1)", () => {
     );
 
     for (const enc of encodingsOf(CREDENTIAL)) {
-      expect(message).not.toContain(enc.needle);
+      expectAbsent(message, enc.needle, enc.label);
     }
     expect(message).toContain("ok=false");
     expect(message).toContain("baseline counterpart did not complete the operation");
@@ -96,7 +100,7 @@ describe("thrown verdict wiring (F10 fix round 1)", () => {
     const message = thrownMessage(() => targetedVerdict(arm, false, outcome, CREDENTIAL));
 
     for (const enc of encodingsOf(CREDENTIAL)) {
-      expect(message).not.toContain(enc.needle);
+      expectAbsent(message, enc.needle, enc.label);
     }
     expect(message).toContain("ok=false");
     expect(message).toContain("arm is not discriminating");

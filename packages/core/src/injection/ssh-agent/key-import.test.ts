@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { analyzeKeyMaterial, decryptKeyForImport } from "./key-import.js";
 import { loadPrivateKey } from "./key-loader.js";
@@ -19,6 +19,8 @@ const readFixture = (name: string): string => readFileSync(join(FIXTURES, name),
 
 const PASSPHRASE = "correct horse battery";
 const CHALLENGE = Buffer.from("harpoc key-import challenge");
+const WRONG_PASSPHRASE = "wrong-passphrase";
+const ARMOR_MARKER = "BEGIN";
 
 function encryptedPkcs8(type: "rsa" | "ed25519" | "ec"): { privateKey: string; publicKey: string } {
   const encoding = {
@@ -164,7 +166,7 @@ describe("decryptKeyForImport — roundtrip", () => {
       const pemText = pem.toString("utf8");
 
       expect(pemText.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
-      expect(pemText).not.toContain("ENCRYPTED");
+      expect(pemText.includes("ENCRYPTED")).toBe(false);
       expect(analyzeKeyMaterial(pemText)).toBe("unencrypted-key");
 
       // Parses without a passphrase and still matches the original public key.
@@ -202,8 +204,8 @@ describe("decryptKeyForImport — rejection", () => {
       () => decryptKeyForImport(privateKey, "wrong-passphrase"),
       ErrorCode.KEY_PASSPHRASE_INVALID,
     );
-    expect(err.message).not.toContain("wrong-passphrase");
-    expect(err.message).not.toContain("BEGIN");
+    expectAbsent(err.message, WRONG_PASSPHRASE);
+    expectAbsent(err.message, ARMOR_MARKER);
   });
 
   it("throws KEY_PASSPHRASE_INVALID on material that is not a decryptable key", async () => {

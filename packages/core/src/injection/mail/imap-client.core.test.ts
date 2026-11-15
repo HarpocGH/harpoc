@@ -4,10 +4,12 @@ import { ImapClient } from "./imap-client.js";
 import type { ImapConnectOptions } from "./imap-client.js";
 import { getFixtureCaPem, FIXTURE_HOST, startFakeImap } from "./__fixtures__/fake-imap-server.js";
 import type { FakeImap, ImapScript } from "./__fixtures__/fake-imap-server.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const servers: FakeImap[] = [];
 const clients: ImapClient[] = [];
+const LOGIN_PASSWORD = "hunter2secret";
+const ACCESS_TOKEN = "tok-abc-123";
 
 async function fake(script: ImapScript): Promise<FakeImap> {
   const srv = await startFakeImap(script);
@@ -111,9 +113,9 @@ describe("ImapClient — connect: TLS, greeting, CAPABILITY, auth", () => {
       "base64",
     );
     const raw = srv.raw().toString("latin1");
+    expectAbsent(raw, ACCESS_TOKEN);
     expect(raw).toContain("AUTHENTICATE XOAUTH2");
     expect(raw).toContain(blob);
-    expect(raw).not.toContain("tok-abc-123");
     expect(srv.commands().map((c) => c.name)).toContain("AUTHENTICATE");
   });
 
@@ -123,7 +125,7 @@ describe("ImapClient — connect: TLS, greeting, CAPABILITY, auth", () => {
       code: "IMAP_OPERATION_FAILED",
     });
     const raw = srv.raw().toString("latin1");
-    expect(raw).not.toContain("hunter2secret");
+    expectAbsent(raw, LOGIN_PASSWORD);
   });
 });
 
@@ -165,8 +167,8 @@ describe("ImapClient — capped-output discipline and failures", () => {
       () => client.command("FETCH", [{ kind: "atom", value: "1" }]),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
+    expectAbsent(err.message, LOGIN_PASSWORD);
     expect(err.message).toContain(FIXTURE_HOST);
-    expect(err.message).not.toContain("hunter2secret");
   });
 
   it("refuses a response stream that blows past the session cap", async () => {
@@ -185,8 +187,8 @@ describe("ImapClient — capped-output discipline and failures", () => {
       () => client.select("INBOX", false),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
+    expectAbsent(err.message, LOGIN_PASSWORD);
     expect(err.message).toContain(FIXTURE_HOST);
-    expect(err.message).not.toContain("hunter2secret");
   });
 
   it("a failed LOGIN (tagged NO) folds to imapOperationFailed", async () => {
@@ -211,8 +213,8 @@ describe("ImapClient — capped-output discipline and failures", () => {
       () => client.fetch([1], "envelope"),
       ErrorCode.IMAP_OPERATION_FAILED,
     );
+    expectAbsent(err.message, LOGIN_PASSWORD);
     expect(err.message).toBe(`IMAP operation 'fetch' failed: ${FIXTURE_HOST}:${srv.port}`);
-    expect(err.message).not.toContain("hunter2secret");
   });
 
   it("parses a FETCH response of 32 nested lists (the item list, then 31 inside the ENVELOPE) and refuses a 33rd IMAP_OPERATION_FAILED", async () => {

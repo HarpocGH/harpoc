@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
 import {
@@ -12,6 +12,8 @@ import {
   policy,
   redisAction,
 } from "./__fixtures__/database-injector-doubles.js";
+
+const DB_PASSWORD = "s3cr3t";
 
 // E81: the audited TLS opt-out is a per-use fact — the connection config
 // records the operator's choice, the use row records that the credential
@@ -150,6 +152,7 @@ describe("DatabaseInjector sanitized audit detail (E70)", () => {
 
     const res = await inj.executeWithSecret(action(), SECRET, policy(), undefined, "secret-1");
 
+    expectAbsent(JSON.stringify(res.rows), DB_PASSWORD);
     expect(JSON.stringify(res.rows)).toContain("[REDACTED]");
     expect(lastDetail(log)).toMatchObject({ sanitized: true });
   });

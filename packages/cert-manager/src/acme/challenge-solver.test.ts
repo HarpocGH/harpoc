@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { Http01Solver, dns01TxtValue } from "./challenge-solver.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const TOKEN = "evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ-PCt92wr-oA";
 const KEY_AUTHORIZATION = `${TOKEN}.mock-thumbprint-value`;
@@ -43,7 +44,7 @@ describe("Http01Solver", () => {
     const response = await fetch(challengeUrl(port, "/.well-known/acme-challenge/wrong-token"));
     expect(response.status).toBe(404);
     const body = await response.text();
-    expect(body).not.toContain(KEY_AUTHORIZATION);
+    expectAbsent(body, KEY_AUTHORIZATION);
   });
 
   it("returns 404 for a POST to the challenge path", async () => {
