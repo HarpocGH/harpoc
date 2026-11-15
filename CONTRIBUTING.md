@@ -53,9 +53,17 @@ pnpm test
 - Passwords in tests must be at least 8 characters (`MIN_PASSWORD_LENGTH`)
 - Mock Argon2 in unit tests for performance (see existing test suites for examples)
 - Run all tests: `pnpm test`
-- Cross-package test helpers — `expectVaultError` and the `scaffold.test.ts` helpers — come from
-  `@harpoc/test-utils`, a private source-only package (`exports: "./src/index.ts"`, no build) that every
-  package with a test suite except `@harpoc/shared` lists under `devDependencies`, never `dependencies`
+- Cross-package test helpers — `expectVaultError`, `expectAbsent` and the `scaffold.test.ts` helpers —
+  come from `@harpoc/test-utils`, a private source-only package (`exports: "./src/index.ts"`, no build)
+  that every package with a test suite except `@harpoc/shared` lists under `devDependencies`, never
+  `dependencies`
+- A test that asserts a fixture credential is absent calls `expectAbsent(text, SECRET)` from
+  `@harpoc/test-utils`, before the row's other assertions on that text. A failing
+  `expect(text).not.toContain(SECRET)` prints both operands — the credential and the text that holds
+  it; the helper prints a label, the position and the lengths. Bind a literal credential to an
+  upper-case constant three lines or more from the call, since a failing line's code frame shows its
+  neighbours. The lint refuses `.not.toContain(<name>)` in test files for the constant names the
+  suites check for absence
 - The E2E evaluation harness is **not** part of `pnpm test`. It needs Docker and is Linux-only, so its
   script is `test:e2e` rather than `test` — `turbo run test` therefore skips it and a contributor
   without Docker gets a green run. To run it: `pnpm --filter @harpoc/e2e fleet:up`, then
