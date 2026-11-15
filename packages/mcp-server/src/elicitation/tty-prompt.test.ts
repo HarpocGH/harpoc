@@ -6,6 +6,7 @@ import { expectAbsent } from "@harpoc/test-utils";
 
 const TYPED_PREFIX = "s3c";
 const TYPED_VALUE = "s3cret";
+const ENTERED_VALUE = "new-value";
 
 interface FakeTerminal {
   terminal: ControllingTerminal;
@@ -250,7 +251,8 @@ describe("collectValueFromTty", () => {
     fake.emit("new-value\r");
 
     const value = await promise;
-    expect(Buffer.from(value as Uint8Array).toString("utf8")).toBe("new-value");
+    expectAbsent(fake.written(), ENTERED_VALUE);
+    expect(Buffer.from(value as Uint8Array).toString("utf8")).toBe(ENTERED_VALUE);
     expect(fake.written()).toContain('"my-key"');
     expect(fake.written()).toContain("Enter new value");
     expect(fake.close).toHaveBeenCalled();

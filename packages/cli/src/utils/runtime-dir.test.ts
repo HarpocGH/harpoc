@@ -11,7 +11,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join, parse, posix, sep, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TestContext } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, maxUnixSocketPathBytes } from "@harpoc/shared";
 import {
   agentSocketPipeName,
   assertConsumerDir,
@@ -46,7 +46,14 @@ const FLAG_AS_PATH =
 
 const LINK_REFUSAL = "is a symbolic link or junction";
 
+const REAL_PLATFORM = process.platform;
+
 let dir: string;
+
+/** The platform `consumerSocketPaths` reads by default, stubbed for one row and put back after it. */
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
 const links: string[] = [];
 const otherDirs: string[] = [];
 
@@ -69,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stubPlatform(REAL_PLATFORM);
   for (const path of links.splice(0)) unlinkSync(path);
   for (const path of otherDirs.splice(0)) {
     rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -879,7 +887,15 @@ describe("consumerSocketPaths", () => {
     );
   });
 
-  // unix(7): Linux's sun_path is 108 bytes, the terminating NUL included (X-3).
+  /** A consumer directory whose `proxy.sock` path is exactly `bytes` bytes: its name and that path. */
+  function consumerOfPathBytes(bytes: number): { name: string; path: string } {
+    const name = "a".repeat(bytes - Buffer.byteLength(join(dir, "proxy.sock")) - 1);
+    const path = join(dir, name, "proxy.sock");
+    expect(Buffer.byteLength(path)).toBe(bytes);
+    return { name, path };
+  }
+
+  // Linux's sun_path is 108 bytes (unix(7)), darwin's 104 (unix(4)), the terminating NUL included (X-3).
   it("refuses a consumer whose socket path would not fit a Unix socket address", async () => {
     const name = "a".repeat(100);
     mkdirSync(join(dir, name));
@@ -889,9 +905,65 @@ describe("consumerSocketPaths", () => {
       ErrorCode.INVALID_INPUT,
     );
     expect(err.message).toBe(
-      `consumer "${name}": the socket path is ${String(Buffer.byteLength(path))} bytes, over the 107 a Unix socket path holds: ${path}`,
+      `consumer "${name}": the socket path is ${String(Buffer.byteLength(path))} bytes, over the ${String(maxUnixSocketPathBytes(process.platform))} a Unix socket path holds: ${path}`,
     );
   });
+
+  it("refuses a consumer whose socket path is one byte over this platform's bound (107; darwin 103), naming its length and the bound", async () => {
+    const bound = maxUnixSocketPathBytes(process.platform);
+    const { name, path } = consumerOfPathBytes(bound + 1);
+    mkdirSync(join(dir, name));
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: dir, source }, "proxy.sock"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `consumer "${name}": the socket path is ${String(bound + 1)} bytes, over the ${String(bound)} a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it("darwin's bound on any host (the platform passed): a 104-byte socket path is refused naming its length and the 103", async () => {
+    const { name, path } = consumerOfPathBytes(104);
+    mkdirSync(join(dir, name));
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: dir, source }, "proxy.sock", "darwin"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `consumer "${name}": the socket path is 104 bytes, over the 103 a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it("the platform defaults to process.platform: stubbed to darwin, a 104-byte socket path is refused naming the 103", async () => {
+    const { name, path } = consumerOfPathBytes(104);
+    mkdirSync(join(dir, name));
+    stubPlatform("darwin");
+    const err = await expectVaultError(
+      () => consumerSocketPaths({ path: dir, source }, "proxy.sock"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `consumer "${name}": the socket path is 104 bytes, over the 103 a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "accepts a consumer whose socket path is exactly this platform's bound (107; darwin 103) (POSIX)",
+    () => {
+      const { name, path } = consumerOfPathBytes(maxUnixSocketPathBytes(process.platform));
+      consumer(name);
+      expect(consumerSocketPaths({ path: dir, source }, "proxy.sock")).toEqual([path]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "darwin's bound on any POSIX host (the platform passed): a 103-byte socket path is accepted (POSIX)",
+    () => {
+      const { name, path } = consumerOfPathBytes(103);
+      consumer(name);
+      expect(consumerSocketPaths({ path: dir, source }, "proxy.sock", "darwin")).toEqual([path]);
+    },
+  );
 
   it("names the runtime directory's source when it cannot be listed", async () => {
     const missing = join(dir, "missing");

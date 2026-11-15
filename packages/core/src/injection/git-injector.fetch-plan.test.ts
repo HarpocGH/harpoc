@@ -19,7 +19,7 @@ import { GitInjector, fetchRefspecPlan, parseFetchRefspec } from "./git-injector
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
@@ -47,6 +47,7 @@ const describeGitSsh = describe.skipIf(GIT === null || SSH === null);
 const NULL_GIT_CONFIG = process.platform === "win32" ? "NUL" : "/dev/null";
 const REPO = "https://8.8.8.8/org/repo.git";
 const TOKEN = "s3cret-token-value";
+const PEM_ARMOR = "PRIVATE KEY";
 const MOCKED = ["ls-remote", "fetch"];
 
 const OK_RESULT: SpawnCapturedResult = {
@@ -271,7 +272,9 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "refs/heads/main:refs/remotes/origin/main",
       "^refs/heads/wip",
     ]);
-    expect(calls().every(([, a]) => a.every((x) => !x.includes(TOKEN)))).toBe(true);
+    for (const [, args] of calls()) {
+      for (const arg of args) expectAbsent(arg, TOKEN, "an argument");
+    }
   });
 
   it("fetch: every option of the fetch's forwarded table reaches the network fetch, normalized and in order; the others stay with the local fetch, which takes the caller's arguments as given (E-36)", async () => {
@@ -445,7 +448,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "secret-1",
     );
     expect(result.exit_code).toBe(128);
-    expect(JSON.stringify(result).includes(user)).toBe(false);
+    expectAbsent(JSON.stringify(result), user);
     expect(result.stderr.includes("[REDACTED]")).toBe(true);
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect(row.detail.sanitized).toBe(true);
@@ -656,6 +659,6 @@ describeGitSsh("the fetch step plan over SSH (RX-B9-17)", () => {
       expect("SSH_AUTH_SOCK" in opts.env).toBe(false);
     }
     expect((local as SpawnCall)[1].slice(-1)).toEqual(["+refs/heads/*:refs/remotes/origin/*"]);
-    expect(calls().every(([, a]) => a.every((x) => !x.includes("PRIVATE KEY")))).toBe(true);
+    expect(calls().every(([, a]) => a.every((x) => !x.includes(PEM_ARMOR)))).toBe(true);
   });
 });

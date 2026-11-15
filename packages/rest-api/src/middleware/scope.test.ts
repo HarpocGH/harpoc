@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { VaultState } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createApp } from "../app.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -41,6 +41,7 @@ describe("recordScopeRefusal records a token-shaped path segment as <token> (C-1
       headers: HEADERS,
     });
 
+    expectAbsent(JSON.stringify(engine.auditScopeRefusal.mock.calls), PASTED_TOKEN);
     expect(res.status).toBe(403);
     expect(engine.revokeToken).toHaveBeenCalledTimes(0);
     expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
@@ -51,7 +52,6 @@ describe("recordScopeRefusal records a token-shaped path segment as <token> (C-1
     ];
     expect(operation === "DELETE /api/v1/tokens/<token>").toBe(true);
     expect(reason).toBe("permission");
-    expect(JSON.stringify(engine.auditScopeRefusal.mock.calls).includes(PASTED_TOKEN)).toBe(false);
   });
 
   it.each([
@@ -67,14 +67,12 @@ describe("recordScopeRefusal records a token-shaped path segment as <token> (C-1
         headers: HEADERS,
       });
 
+      expectAbsent(JSON.stringify(engine.auditScopeRefusal.mock.calls), PASTED_TOKEN);
       expect(res.status).toBe(403);
       expect(engine.revokeToken).toHaveBeenCalledTimes(0);
       expect(engine.auditScopeRefusal).toHaveBeenCalledTimes(1);
       const operation = engine.auditScopeRefusal.mock.calls[0]?.[1] as string;
       expect(operation === "DELETE /api/v1/tokens/<token>").toBe(true);
-      expect(JSON.stringify(engine.auditScopeRefusal.mock.calls).includes(PASTED_TOKEN)).toBe(
-        false,
-      );
     },
   );
 
@@ -108,7 +106,7 @@ describe("recordScopeRefusal records a token-shaped path segment as <token> (C-1
     const operation = engine.auditScopeRefusal.mock.calls[0]?.[1] as string;
     expect(operation === "DELETE /api/v1/tokens/<token>").toBe(true);
     const recorded = JSON.stringify(engine.auditScopeRefusal.mock.calls);
-    expect(TOKEN_PARTS.some((part) => recorded.includes(part))).toBe(false);
+    for (const part of TOKEN_PARTS) expectAbsent(recorded, part);
   });
 
   it("DEL, a C1 control, U+2028 and U+2029 are recorded as their percent-escapes", async () => {

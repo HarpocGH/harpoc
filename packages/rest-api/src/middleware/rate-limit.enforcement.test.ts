@@ -11,6 +11,7 @@ import {
 import type { VaultApiToken } from "@harpoc/shared";
 import { createApp } from "../app.js";
 import { RateLimiter } from "./rate-limit.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * T8 (REST half): rate limiting was enforced nowhere in the tests — removing
@@ -497,6 +498,7 @@ describe("the request-audit line writes a token-shaped path segment as <token> (
       `/api/v1/tokens/${PASTED_TOKEN}`,
       { method: "DELETE", headers: AUTH },
     );
+    expectAbsent(JSON.stringify(auditLineSpy.mock.calls), PASTED_TOKEN);
     expect(res.status).toBe(403);
     expect(auditLineSpy).toHaveBeenCalledTimes(1);
     const [format, method, path, status, principal, ip] = auditLineSpy.mock.calls[0] as unknown[];
@@ -506,7 +508,6 @@ describe("the request-audit line writes a token-shaped path segment as <token> (
     expect(status).toBe(403);
     expect(principal).toBe("test-agent");
     expect(ip).toBe("unknown");
-    expect(JSON.stringify(auditLineSpy.mock.calls).includes(PASTED_TOKEN)).toBe(false);
   });
 
   it("control characters in the path are written as their percent-escapes, one line a request", async () => {

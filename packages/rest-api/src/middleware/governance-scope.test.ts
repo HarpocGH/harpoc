@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { VaultState } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import { createApp } from "../app.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -41,14 +41,12 @@ describe("unscopedTokenMiddleware records a token-shaped path segment as <token>
       headers: HEADERS,
     });
 
+    expectAbsent(JSON.stringify(engine.auditGovernanceRefusal.mock.calls), PASTED_TOKEN);
     expect(res.status).toBe(403);
     expect(engine.revokeToken).toHaveBeenCalledTimes(0);
     expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
     const operation = engine.auditGovernanceRefusal.mock.calls[0]?.[1] as string;
     expect(operation === "DELETE /api/v1/tokens/<token>").toBe(true);
-    expect(JSON.stringify(engine.auditGovernanceRefusal.mock.calls).includes(PASTED_TOKEN)).toBe(
-      false,
-    );
   });
 
   it("a segment holding a whole token after Bearer%20 is recorded as <token>, whole", async () => {
@@ -61,14 +59,12 @@ describe("unscopedTokenMiddleware records a token-shaped path segment as <token>
       },
     );
 
+    expectAbsent(JSON.stringify(engine.auditGovernanceRefusal.mock.calls), PASTED_TOKEN);
     expect(res.status).toBe(403);
     expect(engine.revokeToken).toHaveBeenCalledTimes(0);
     expect(engine.auditGovernanceRefusal).toHaveBeenCalledTimes(1);
     const operation = engine.auditGovernanceRefusal.mock.calls[0]?.[1] as string;
     expect(operation === "DELETE /api/v1/tokens/<token>").toBe(true);
-    expect(JSON.stringify(engine.auditGovernanceRefusal.mock.calls).includes(PASTED_TOKEN)).toBe(
-      false,
-    );
   });
 
   it("control: a minted jti is recorded as before", async () => {

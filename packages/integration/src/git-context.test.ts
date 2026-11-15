@@ -6,7 +6,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * Git context (thesis §4.5.6, §6.2 remote-redirection). Deterministic
@@ -84,7 +84,7 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
     for (const needle of refused) {
       expect(text.includes(JSON.stringify(needle).slice(1, -1)), needle).toBe(false);
     }
-    expect(text.includes(TOKEN_FRAGMENT)).toBe(false);
+    expectAbsent(text, TOKEN_FRAGMENT);
   }
 
   it("blocks a redirected HTTPS remote outside the URL allowlist", async () => {
@@ -300,8 +300,8 @@ describeGit("Git context (both mechanisms, §4.5.6)", () => {
         }),
       ErrorCode.URL_NOT_ALLOWED,
     );
-    expect(err.message.includes(TOKEN_FRAGMENT)).toBe(false);
-    expect(String(err.stack).includes(TOKEN_FRAGMENT)).toBe(false);
-    expect(JSON.stringify(err).includes(TOKEN_FRAGMENT)).toBe(false);
+    expectAbsent(err.message, TOKEN_FRAGMENT, "the error message");
+    expectAbsent(String(err.stack), TOKEN_FRAGMENT, "the error stack");
+    expectAbsent(JSON.stringify(err), TOKEN_FRAGMENT, "the serialized error");
   });
 });

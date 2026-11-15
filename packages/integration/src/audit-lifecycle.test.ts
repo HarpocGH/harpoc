@@ -40,6 +40,7 @@ import {
   connectModernInMemoryClient,
   silenceAuditLines,
   expectVaultError,
+  expectAbsent,
 } from "@harpoc/test-utils";
 
 silenceAuditLines();
@@ -872,7 +873,7 @@ describe("the MCP server's refusals write their failed rows on a real engine (A7
         .queryAudit({ eventType: AuditEventType.SERVER_START })
         .filter((row) => row.id > mark);
       const serialized = JSON.stringify(starts);
-      expect(serialized.includes(launchToken)).toBe(false);
+      expectAbsent(serialized, launchToken);
       expect(serialized.includes("mcp-launcher")).toBe(false);
       expect(starts.map((row) => [row.success, row.principal_id, row.detail])).toEqual([
         [false, null, { transport: "stdio", tokenless: false, tty_prompt: false, error: expected }],

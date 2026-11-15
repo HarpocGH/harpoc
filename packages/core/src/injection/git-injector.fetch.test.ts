@@ -20,7 +20,7 @@ import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * M6 (B9): a fetch runs its one credential-bearing step into a vault-written
@@ -212,6 +212,7 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
     const localOnly = oid(wd, "localonly");
     moveRemote();
     const result = await fetchThroughInjector({});
+    expectAbsent(JSON.stringify(result), TOKEN, "the result");
     expect(result.exit_code, result.stderr).toBe(0);
     expect(result.operation).toBe("fetch");
     const bare = join(srv, "repo.git");
@@ -226,8 +227,7 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
     expect(refsOf("refs/remotes/origin/localonly")).toEqual([]);
     expect(git(wd, "status", "--porcelain")).toBe("");
     expect(readFileSync(join(wd, ".git", "config")).equals(config)).toBe(true);
-    expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-    expect(readFileSync(join(wd, ".git", "FETCH_HEAD"), "utf8").includes(TOKEN)).toBe(false);
+    expectAbsent(readFileSync(join(wd, ".git", "FETCH_HEAD"), "utf8"), TOKEN, "FETCH_HEAD");
   });
 
   it("--prune removes a branch deleted on the remote; a refspec naming one branch prunes nothing else", async () => {
@@ -377,8 +377,8 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
     expect(result.exit_code).toBe(0);
     const landed = quiet(() => oid(wd, `refs/remotes/${USER}-fork/new`));
     expect(landed).toBe(oid(join(srv, "repo.git"), "new"));
-    expect(JSON.stringify(result).includes(USER)).toBe(false);
-    expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+    expectAbsent(JSON.stringify(result), USER);
+    expectAbsent(JSON.stringify(result), TOKEN);
   });
 
   it("a submodule whose pointer the fetched commits move is left to the caller: the local fetch does not recurse (RX-B9-16)", async () => {

@@ -17,6 +17,7 @@ import {
   daemonArgs,
   issueTokenSpec,
 } from "./two-identity.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 describe("the two-identity deployment's argv and paths", () => {
   it("names the consumer directory's token file and sockets under the runtime directory", () => {
@@ -133,13 +134,14 @@ describe("the two-identity deployment's user-side scripts", () => {
         }),
         label: "token-file request",
       });
+      expectAbsent(run.stdout, token, "stdout");
+      expectAbsent(run.stderr, token, "stderr");
       expect(run.code, run.stderr).toBe(0);
       expect(JSON.parse(run.stdout)).toEqual({ status: 403, body: '{"error":"ACCESS_DENIED"}' });
       // Boolean-shaped: a failing comparison never echoes the token.
       expect(
         seen.length === 1 && seen[0] === `GET /api/v1/secrets/api-key/value Bearer ${token}`,
       ).toBe(true);
-      expect(run.stdout.includes(token) || run.stderr.includes(token)).toBe(false);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

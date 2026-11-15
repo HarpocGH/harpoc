@@ -37,6 +37,7 @@ import {
   writeKnownHosts,
   writeTempSshFile,
 } from "./ssh-common.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 vi.mock("../crypto/argon2.js", async (importOriginal) =>
   (await import("../__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -762,8 +763,9 @@ describe.skipIf(SSH === null)(
     it("no audit row, no ssh output and no onError report carries a private key or a session identifier", () => {
       const trail = JSON.stringify(vault().queryAudit());
       expect(needles.length).toBeGreaterThan(8);
-      for (const text of [trail, ...outputs]) {
-        for (const needle of needles) expect(text.includes(needle)).toBe(false);
+      for (const needle of needles) expectAbsent(trail, needle, "the audit trail");
+      for (const output of outputs) {
+        for (const needle of needles) expectAbsent(output, needle, "an ssh output or report");
       }
     });
   },

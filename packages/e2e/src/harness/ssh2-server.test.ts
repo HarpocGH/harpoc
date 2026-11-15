@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { KEYS_DIR, clientKeyPem, knownHostPinOnPort } from "./ssh.js";
 import { SSH2_EXEC_REPLY, privateKeyNeedles, startSsh2Server } from "./ssh2-server.js";
 import type { Ssh2Server } from "./ssh2-server.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const { Client, utils } = ssh2;
 const OUT = join(KEYS_DIR, "out");
@@ -149,12 +150,12 @@ describe("the in-process ssh2 server", () => {
     const pem = clientKeyPem();
     const needles = privateKeyNeedles(pem);
     const body = pem.split(/\r?\n/).filter((line) => line.length > 0 && !line.startsWith("-----"));
-    // Boolean-shaped throughout: a failing assertion never prints key material.
+    // Boolean-shaped or through expectAbsent: a failing assertion never prints key material.
     expect(needles.includes(pem)).toBe(true);
     expect(needles.includes(body.join(""))).toBe(true);
     expect(body.filter((l) => l.length >= 16).every((line) => needles.includes(line))).toBe(true);
     expect(needles.length).toBe(2 + body.filter((l) => l.length >= 16).length + 3);
     const publicLine = readFileSync(join(OUT, "client_ed25519.pub"), "utf8");
-    expect(needles.some((needle) => publicLine.includes(needle))).toBe(false);
+    for (const needle of needles) expectAbsent(publicLine, needle);
   });
 });

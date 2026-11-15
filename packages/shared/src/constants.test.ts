@@ -39,6 +39,7 @@ import {
   MAX_NAME_LENGTH,
   MAX_PROCESS_OUTPUT_BYTES,
   MAX_UNIX_SOCKET_PATH_BYTES,
+  MAX_UNIX_SOCKET_PATH_BYTES_DARWIN,
   MIN_REDACTABLE_FRAGMENT,
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
@@ -344,6 +345,10 @@ describe("vault defaults", () => {
 
   it("MAX_UNIX_SOCKET_PATH_BYTES is 107 — sun_path's 108 bytes less the NUL (RA-6)", () => {
     expect(MAX_UNIX_SOCKET_PATH_BYTES).toBe(107);
+  });
+
+  it("MAX_UNIX_SOCKET_PATH_BYTES_DARWIN is 103 — darwin's sun_path's 104 bytes less the NUL", () => {
+    expect(MAX_UNIX_SOCKET_PATH_BYTES_DARWIN).toBe(103);
   });
 
   it("MAX_NAME_LENGTH is 255", () => {

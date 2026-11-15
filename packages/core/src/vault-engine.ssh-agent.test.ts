@@ -13,7 +13,7 @@ import {
   SecretType,
   tokenlessStdioCaller,
 } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { AgentBinding, AgentSignRequest } from "./injection/ssh-agent/agent-connection.js";
 import {
@@ -1148,8 +1148,8 @@ describe("signForAgentSocket — nothing secret leaves in a message or a row", (
       '"git"',
     ];
     const haystack = [...messages, JSON.stringify(useRows())].join("\n");
+    for (const needle of needles) expectAbsent(haystack, needle);
     expect(messages).toHaveLength(5);
     expect(pemLines.length).toBeGreaterThan(6);
-    for (const needle of needles) expect(haystack.includes(needle)).toBe(false);
   });
 });

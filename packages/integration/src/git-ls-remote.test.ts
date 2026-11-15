@@ -12,6 +12,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { startGitSmartHttp } from "./helpers/git-smart-http-plain.js";
 import type { GitSmartHttp } from "./helpers/git-smart-http-plain.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * M6 (deployment model B, tranche B9): `ls-remote` through the vault on a real
@@ -198,7 +199,9 @@ describeGit("Git context — ls-remote through the vault (M6)", () => {
       expect(result.exit_code).toBe(0);
       expect(result.stdout.includes("\trefs/heads/leak-[REDACTED]")).toBe(true);
       const json = JSON.stringify(result);
-      expect(json.includes(TOKEN) || json.includes(BASIC) || json.includes(USER)).toBe(false);
+      expectAbsent(json, TOKEN);
+      expectAbsent(json, BASIC);
+      expectAbsent(json, USER);
       expect(lastRow()).toMatchObject({
         success: true,
         detail: { operation: "ls-remote", exit_code: 0, sanitized: true },
@@ -218,7 +221,9 @@ describeGit("Git context — ls-remote through the vault (M6)", () => {
       expect(result.stderr.includes("remote: denied for [REDACTED]\n")).toBe(true);
       expect(result.stderr.includes("[REDACTED]:[REDACTED]")).toBe(false);
       const json = JSON.stringify(result);
-      expect(json.includes(TOKEN) || json.includes(BASIC) || json.includes(USER)).toBe(false);
+      expectAbsent(json, TOKEN);
+      expectAbsent(json, BASIC);
+      expectAbsent(json, USER);
       expect(lastRow()).toMatchObject({
         success: true,
         detail: { operation: "ls-remote", exit_code: 128, sanitized: true },
@@ -232,6 +237,8 @@ describeGit("Git context — ls-remote through the vault (M6)", () => {
     const rows = vault.engine.queryAudit({ eventType: AuditEventType.SECRET_USE });
     expect(rows.filter((row) => row.detail?.operation === "ls-remote")).toHaveLength(3);
     const text = JSON.stringify(rows);
-    expect(text.includes(TOKEN) || text.includes(BASIC) || text.includes(USER)).toBe(false);
+    expectAbsent(text, TOKEN);
+    expectAbsent(text, BASIC);
+    expectAbsent(text, USER);
   });
 });

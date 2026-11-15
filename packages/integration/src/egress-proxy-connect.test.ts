@@ -18,6 +18,7 @@ import {
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The egress proxy's CONNECT mode end to end (design M4 (ii), tranche B8): the
@@ -489,16 +490,16 @@ describe.skipIf(GIT === null)(
       });
 
       it("proxy ca init names the constrained host and prints no key; export writes the root certificate", () => {
+        for (const needle of PRIVATE_KEY_NEEDLES) {
+          expectAbsent(canon(caPem), needle, "the exported certificate");
+          expectAbsent(canon(initOutput.stdout), needle, "init's stdout");
+        }
         expect(initOutput.stdout).toContain(CA_HOST);
         expect(initOutput.stderr.includes("Note:")).toBe(false);
         const ca = new X509Certificate(caPem);
         expect(ca.ca).toBe(true);
         expect(ca.checkIssued(ca)).toBe(true);
         expect(caPem.trimStart().startsWith("-----BEGIN CERTIFICATE-----")).toBe(true);
-        for (const needle of PRIVATE_KEY_NEEDLES) {
-          expect(canon(caPem).includes(needle)).toBe(false);
-          expect(canon(initOutput.stdout).includes(needle)).toBe(false);
-        }
       });
 
       it("the tunnel for 127.0.0.1 presents a leaf and the intermediate that issued it under the exported root, the chain verified by Node's TLS", async () => {
@@ -537,7 +538,7 @@ describe.skipIf(GIT === null)(
           expect(run.code).toBe(0);
           expect([run.httpCode, run.connectCode]).toEqual(["200", "200"]);
           expect(run.body.includes("refs/heads/[REDACTED]")).toBe(true);
-          expect(run.body.includes(VALUE)).toBe(false);
+          expectAbsent(run.body, VALUE);
           const last = brokered().at(-1);
           expect(last?.url).toBe("/leaky.git/info/refs?service=git-upload-pack");
           expect(last?.headers["proxy-authorization"]).toBeUndefined();
@@ -565,7 +566,8 @@ describe.skipIf(GIT === null)(
         for (const r of seen) {
           const sent = JSON.stringify(r.headers);
           expect(r.headers["proxy-authorization"] === undefined).toBe(true);
-          expect(sent.includes("harpoc:") || sent.includes(useToken)).toBe(false);
+          expect(sent.includes("harpoc:")).toBe(false);
+          expectAbsent(sent, useToken, "a request's headers");
           expect([undefined, realBasic].includes(r.headers.authorization)).toBe(true);
         }
         // git's discovery request carries no credential — a pass-through inside the tunnel.
@@ -625,13 +627,13 @@ describe.skipIf(GIT === null)(
         const answer = await rawConnect(proxyPort, authority, {
           "Proxy-Authorization": `Bearer ${useToken}`,
         });
+        expectAbsent(answer.body, useToken);
         expect(answer.status).toBe(403);
         expect(answer.headers.connection).toEqual(["close"]);
         const body = JSON.parse(answer.body) as { error: string; message: string };
         expect(body.error).toBe(ErrorCode.PROXY_CONNECT_DENIED);
         expect(body.message).toContain(OUTSIDE_HOST);
         expect(body.message).toContain(fixturePort());
-        expect(answer.body.includes(useToken)).toBe(false);
         expect(fixture?.requests.length).toBe(before);
         expect((await auditRows(AuditEventType.SECRET_USE)).length).toBe(rowsBefore);
       }, 60_000);
@@ -725,7 +727,7 @@ describe.skipIf(GIT === null)(
           );
           expect(run.code).toBe(0);
           expect(run.body.includes("refs/heads/[REDACTED]")).toBe(true);
-          expect(run.body.includes(VALUE)).toBe(false);
+          expectAbsent(run.body, VALUE);
         },
         60_000,
       );
@@ -798,10 +800,10 @@ describe.skipIf(GIT === null)(
           ...outputs,
         ];
         for (const text of swept) {
-          expect(text.includes(VALUE)).toBe(false);
-          expect(text.includes(useToken)).toBe(false);
+          expectAbsent(text, VALUE, "a swept output");
+          expectAbsent(text, useToken, "a swept output");
           for (const needle of PRIVATE_KEY_NEEDLES)
-            expect(canon(text).includes(needle)).toBe(false);
+            expectAbsent(canon(text), needle, "a swept output");
         }
       }, 60_000);
 

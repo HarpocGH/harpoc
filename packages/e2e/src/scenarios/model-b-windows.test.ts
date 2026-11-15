@@ -17,6 +17,7 @@ import type { TwoAccountDeployment } from "../harness/two-identity-windows.js";
 import { MODEL_B_WINDOWS_SCENARIOS, captureCalls } from "./model-b-windows.js";
 import type { ModelBWindowsScenario } from "./model-b-windows.js";
 import { Outcome } from "./scenario.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The Windows ids (RE-B7-3 as ruled) as a literal: a list derived from the
@@ -156,7 +157,7 @@ describe("the pipe row's verdict and its diagnostic (a stubbed deployment)", () 
       ),
     ).toBe(true);
     expect(message.includes("ssh exited 255")).toBe(true);
-    expect(message.includes(PASSWORD_NEEDLE)).toBe(false);
+    expectAbsent(message, PASSWORD_NEEDLE);
     expect(
       message.includes("debug1: an echo of [CREDENTIAL]\nPermission denied (publickey)."),
     ).toBe(true);

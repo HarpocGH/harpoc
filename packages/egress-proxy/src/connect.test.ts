@@ -187,8 +187,9 @@ describe("CONNECT — the tunnel", () => {
     expect(upstream.seen[0]?.headers.authorization).toBe(`Bearer ${SECRET_VALUE}`);
     expect(upstream.seen[0]?.headers["proxy-authorization"]).toBeUndefined();
     expect(upstream.seen[0]?.headers["accept-encoding"]).toBe("identity");
+    expectAbsent(reply.headers["x-echo"], SECRET_VALUE, "the x-echo header");
     expect(reply.headers["x-echo"]).toBe(`Bearer ${MARKER}`);
-    expectAbsent(reply.body, SECRET_VALUE);
+    expectAbsent(reply.body, SECRET_VALUE, "the body");
     expect(double.resolveForProxy).toHaveBeenCalledWith(
       "secret://gh-pat",
       {
@@ -222,6 +223,7 @@ describe("CONNECT — the tunnel", () => {
 
     expect(reply.status).toBe(200);
     expect(upstream.seen[0]?.headers.authorization).toBe(`token ${SECRET_VALUE}`);
+    expectAbsent(reply.headers["x-echo"], SECRET_VALUE);
     expect(reply.headers["x-echo"]).toBe(`token ${MARKER}`);
   });
 
@@ -275,6 +277,7 @@ describe("CONNECT — the tunnel", () => {
     const reply = await viaTunnel(agentWith(), "/redir", { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(302);
+    expectAbsent(reply.headers.location, SECRET_VALUE);
     expect(reply.headers.location).toBe(`https://192.0.2.1/next?k=${MARKER}`);
   });
 
@@ -304,6 +307,7 @@ describe("CONNECT — the tunnel", () => {
 
     expect(reply.status).toBe(200);
     expect(upstream.seen[0]?.headers.authorization).toBe(`Bearer ${SECRET_VALUE}`);
+    expectAbsent(reply.headers["x-echo"], SECRET_VALUE);
     expect(reply.headers["x-echo"]).toBe(`Bearer ${MARKER}`);
   });
 

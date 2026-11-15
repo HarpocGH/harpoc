@@ -81,26 +81,53 @@ describe("parseRestUrl", () => {
   });
 
   it.each([
-    ["-x", "--url: a flag, not a URL"],
-    ["localhost:3000", "--url must use HTTPS (plain HTTP is allowed for loopback only)"],
-    ["127.0.0.1:3000", "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)"],
-    ["", "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)"],
-    ["vault", "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)"],
-    ["http://vault.example.com", "--url must use HTTPS (plain HTTP is allowed for loopback only)"],
-    ["ftp://127.0.0.1", "--url must use HTTPS (plain HTTP is allowed for loopback only)"],
+    ["a flag", "-x", "--url: a flag, not a URL"],
     [
+      "a loopback name without a scheme",
+      "localhost:3000",
+      "--url must use HTTPS (plain HTTP is allowed for loopback only)",
+    ],
+    [
+      "a loopback address without a scheme",
+      "127.0.0.1:3000",
+      "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)",
+    ],
+    [
+      "an empty value",
+      "",
+      "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)",
+    ],
+    [
+      "a bare word",
+      "vault",
+      "--url: not a URL (give the server's base URL, e.g. http://127.0.0.1:3000)",
+    ],
+    [
+      "plain HTTP to a non-loopback host",
+      "http://vault.example.com",
+      "--url must use HTTPS (plain HTTP is allowed for loopback only)",
+    ],
+    [
+      "a scheme other than http(s)",
+      "ftp://127.0.0.1",
+      "--url must use HTTPS (plain HTTP is allowed for loopback only)",
+    ],
+    [
+      "a URL with credentials",
       "https://admin:hunter2@vault.example.com",
       "--url: credentials in the URL are refused; the bearer is read from --token-file",
     ],
     [
+      "a URL with a query",
       "https://vault.example.com/?token=x",
       "--url: a query or fragment is refused; give the server's base URL",
     ],
     [
+      "a URL with a fragment",
       "https://vault.example.com/#frag",
       "--url: a query or fragment is refused; give the server's base URL",
     ],
-  ])("refuses %j INVALID_INPUT without naming the value", async (value, message) => {
+  ])("refuses %s INVALID_INPUT without naming the value", async (_label, value, message) => {
     const err = await expectVaultError(() => parseRestUrl(value), ErrorCode.INVALID_INPUT);
     expect(err.message).toBe(message);
   });

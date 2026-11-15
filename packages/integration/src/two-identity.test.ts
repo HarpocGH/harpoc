@@ -17,6 +17,7 @@ import {
   startCliServerOnFreePort,
   type CliServer,
 } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * Deployment model B on a real kernel (design M3 § Tests): the vault runs as one
@@ -279,7 +280,7 @@ describe.skipIf(process.platform !== "linux")(
       const agentRead = await runAs(agent, ["cat", environ]);
       expect(agentRead.code).not.toBe(0);
       expect(agentRead.stderr).toMatch(/Permission denied|No such file or directory/);
-      expect(agentRead.stdout.includes(SECRET_VALUE)).toBe(false);
+      expectAbsent(agentRead.stdout, SECRET_VALUE, "the agent's read");
       let thrown: unknown;
       try {
         readFileSync(environ);
@@ -296,7 +297,7 @@ describe.skipIf(process.platform !== "linux")(
       expect(killed.code).toBe(0);
       const answer = await pending;
       expect(answer.status).toBe(200);
-      expect(answer.body.includes(SECRET_VALUE)).toBe(false);
+      expectAbsent(answer.body, SECRET_VALUE, "the answer");
       expect(JSON.parse(answer.body)).toMatchObject({
         data: { type: "process", exit_code: null, signal: "SIGTERM" },
       });

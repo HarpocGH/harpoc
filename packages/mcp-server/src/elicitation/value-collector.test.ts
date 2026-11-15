@@ -534,11 +534,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         arguments: { name: "api-key", type: "api_key" },
       })) as { content: Array<{ text: string }> };
 
+      expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
         status: string;
         message: string;
       };
-      expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
       expect(payload.status).toBe("created");
       expect(engine.createSecret).toHaveBeenCalledTimes(1);
       expect(engine.createSecret).toHaveBeenCalledWith(
@@ -582,8 +582,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         arguments: { handle: "secret://api-key" },
       })) as { content: Array<{ text: string }> };
 
-      const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
       expectAbsent(result.content[0]?.text, FORM_ROTATE_VALUE);
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
       expect(payload.status).toBe("rotated");
       expect(captured).toBe(FORM_ROTATE_VALUE);
     } finally {
@@ -656,6 +656,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         name: "create_secret",
         arguments: { name: "api-key", type: "api_key" },
       })) as { content: Array<{ text: string }> };
+      expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
         status: string;
         message: string;
@@ -695,11 +696,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
         name: "create_secret",
         arguments: { name: "api-key", type: "api_key" },
       })) as { content: Array<{ text: string }> };
+      expectAbsent(result.content[0]?.text, PROMPT_CREATE_VALUE);
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
         status: string;
         message: string;
       };
-      expectAbsent(result.content[0]?.text, PROMPT_CREATE_VALUE);
       expect(payload.status).toBe("created");
       expect(payload.message).toContain("a terminal prompt");
       expect(tty).toHaveBeenCalledTimes(1);
@@ -766,8 +767,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           token_endpoint: "https://127.0.0.1:8443/oauth/token",
         },
       })) as { content: Array<{ text: string }> };
-      const payload = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
       expectAbsent(result.content[0]?.text, PROMPT_CLIENT_SECRET);
+      const payload = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
       expect(payload).toEqual({ handle: "secret://m2m", status: "active", message: "authorized" });
       expect(tty).toHaveBeenCalledTimes(1);
       expect(tty).toHaveBeenCalledWith({
@@ -884,8 +885,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           name: "api-key",
           type: "api_key",
         });
-        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
         expectAbsent(result.content[0]?.text, FORM_CREATE_VALUE);
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
         expect(payload.status).toBe("created");
         expect(engine.createSecret).toHaveBeenCalledTimes(1);
         expect(engine.createSecret).toHaveBeenCalledWith(
@@ -1115,8 +1116,8 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
 
       try {
         const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
-        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
         expectAbsent(result.content[0]?.text, FORM_ROTATE_VALUE);
+        const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
         expect(payload.status).toBe("rotated");
         expect(captured).toBe(FORM_ROTATE_VALUE);
       } finally {
@@ -1311,6 +1312,7 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
           name: "api-key",
           type: "api_key",
         });
+        expectAbsent(result.content[0]?.text, PROMPT_CREATE_VALUE);
         const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
           status: string;
           message: string;
@@ -1344,11 +1346,11 @@ describe("URL-mode elicitation end-to-end (InMemory transport)", () => {
 
       try {
         const result = await modern.callTool("rotate_secret", { handle: "secret://api-key" });
+        expectAbsent(result.content[0]?.text, PROMPT_ROTATE_VALUE);
         const payload = JSON.parse(result.content[0]?.text ?? "{}") as {
           status: string;
           message: string;
         };
-        expectAbsent(result.content[0]?.text, PROMPT_ROTATE_VALUE);
         expect(payload.status).toBe("rotated");
         expect(payload.message).toContain("a terminal prompt");
         expect(tty).toHaveBeenCalledTimes(1);

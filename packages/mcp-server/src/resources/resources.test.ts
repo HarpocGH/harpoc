@@ -147,8 +147,8 @@ describe("MCP Resources", () => {
 
     it("the list answers exactly six metadata keys per row, never the row", async () => {
       const text = getResourceText(await readResource(server, "secret://vault/secrets"));
-      const data = JSON.parse(text) as Record<string, unknown>[];
       expectAbsent(text, SENTINEL);
+      const data = JSON.parse(text) as Record<string, unknown>[];
       expect(data).toHaveLength(2);
       for (const row of data) {
         expect(Object.keys(row).sort()).toEqual([
@@ -339,8 +339,8 @@ describe("MCP Resources", () => {
         },
       ]);
       const text = getResourceText(await readResource(server, "secret://vault/health"));
-      const data = JSON.parse(text) as Record<string, unknown>;
       expectAbsent(text, SENTINEL);
+      const data = JSON.parse(text) as Record<string, unknown>;
       expect(Object.keys(data).sort()).toEqual([
         "by_status",
         "expiring_soon",

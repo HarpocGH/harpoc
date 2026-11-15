@@ -175,15 +175,15 @@ describe("at-rest opacity (thesis: encrypted at rest)", () => {
     // Positive control: the OAuth row exists and its non-secret parts are there.
     expect(combined.includes(Buffer.from("oauth_tokens", "utf8"))).toBe(true);
 
-    for (const sentinel of [
+    for (const [name, sentinel] of Object.entries({
       CLIENT_SECRET,
       ACCESS_TOKEN,
       REFRESH_TOKEN,
       ROTATED_REFRESH,
       ROTATED_ACCESS,
-    ]) {
+    })) {
       for (const needle of encodings(sentinel)) {
-        expect(combined.includes(needle), `${sentinel} found at rest`).toBe(false);
+        expect(combined.includes(needle), `${name} found at rest`).toBe(false);
       }
     }
   });

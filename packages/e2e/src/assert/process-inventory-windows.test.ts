@@ -13,6 +13,7 @@ import {
   parseInventory,
 } from "./process-inventory-windows.js";
 import type { InventoryEntry } from "./process-inventory-windows.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const CREDENTIAL = "b7-inventory-credential-value-5d1e";
 const PLACEHOLDER = "harpoc:api-key";
@@ -50,7 +51,7 @@ describe("parseInventory", () => {
       thrown = err;
     }
     expect(thrown instanceof SyntaxError).toBe(true);
-    expect(thrown instanceof Error && thrown.message.includes(fragment)).toBe(false);
+    expectAbsent(thrown instanceof Error ? thrown.message : undefined, fragment);
     expect(thrown instanceof Error && thrown.cause === undefined).toBe(true);
     expect(thrown instanceof Error ? thrown.message : undefined).toBe(
       `process inventory: the listing (${String(listing.length)} characters) is not valid JSON`,

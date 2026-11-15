@@ -324,8 +324,8 @@ describe("start_oauth_flow", () => {
     );
     expect(Array.from(bytes).every((b) => b === 0)).toBe(true);
 
-    const data = toolData(result);
     expectAbsent((result.content[0] as { text: string }).text, secret);
+    const data = toolData(result);
     expect(Object.keys(data).sort()).toEqual(["handle", "message", "status"]);
   });
 

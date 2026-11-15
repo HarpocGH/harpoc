@@ -251,29 +251,29 @@ describe("parseUrlOption (B1)", () => {
   );
 
   // The refusal names the defect, never the value: the value is the credential.
-  it.each(["http://agent:s3cret@127.0.0.1:3000", "https://s3cret@vault.example"])(
-    "refuses credentials in %j without echoing them",
-    (raw) => {
-      const parsed = parseUrlOption(raw);
-      expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
-      expect(parsed).toEqual({
-        ok: false,
-        message: "Error: --url must not carry credentials; pass the token with --token-file.\n",
-      });
-    },
-  );
+  it.each([
+    ["a URL with a user and a password", "http://agent:s3cret@127.0.0.1:3000"],
+    ["a URL with a user part alone", "https://s3cret@vault.example"],
+  ])("refuses credentials in %s without echoing them", (_label, raw) => {
+    const parsed = parseUrlOption(raw);
+    expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
+    expect(parsed).toEqual({
+      ok: false,
+      message: "Error: --url must not carry credentials; pass the token with --token-file.\n",
+    });
+  });
 
-  it.each(["http://127.0.0.1:3000?token=s3cret", "http://127.0.0.1:3000/#s3cret"])(
-    "refuses the query or fragment of %j without echoing it",
-    (raw) => {
-      const parsed = parseUrlOption(raw);
-      expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
-      expect(parsed).toEqual({
-        ok: false,
-        message: "Error: --url must be a base URL, without a query or fragment.\n",
-      });
-    },
-  );
+  it.each([
+    ["a URL whose query carries a token", "http://127.0.0.1:3000?token=s3cret"],
+    ["a URL whose fragment carries a token", "http://127.0.0.1:3000/#s3cret"],
+  ])("refuses the query or fragment of %s without echoing it", (_label, raw) => {
+    const parsed = parseUrlOption(raw);
+    expectAbsent(JSON.stringify(parsed), URL_CREDENTIAL);
+    expect(parsed).toEqual({
+      ok: false,
+      message: "Error: --url must be a base URL, without a query or fragment.\n",
+    });
+  });
 
   it.each(["http://vault.example:3000", "http://10.0.0.5:3000", "http://0.0.0.0:3000"])(
     "refuses plain http: to the non-loopback %j",

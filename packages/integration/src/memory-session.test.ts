@@ -27,6 +27,7 @@ import {
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The memory session on the built CLI (design M2, tranche B5): `server start --session
@@ -416,7 +417,8 @@ describe("the memory session on the built CLI (server start --session memory, th
         expect(row.detail).toMatchObject({ subject: AGENT, scope: ["use", "list"] });
       }
       const trail = JSON.stringify(rotations);
-      expect(trail.includes(firstToken.trim()) || trail.includes(second.trim())).toBe(false);
+      expectAbsent(trail, firstToken.trim());
+      expectAbsent(trail, second.trim());
     },
     90_000,
   );
@@ -518,7 +520,7 @@ describe("the memory session on the built CLI (server start --session memory, th
     ];
     expect(issued.length).toBeGreaterThan(0);
     for (const text of swept) {
-      for (const token of issued) expect(text.includes(token.trim())).toBe(false);
+      for (const token of issued) expectAbsent(text, token.trim(), "a swept output");
     }
   }, 60_000);
 });

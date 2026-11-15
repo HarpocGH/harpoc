@@ -11,6 +11,7 @@ import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const GIT = resolveExecutable("git", controlledPathDirs());
 // Skipped where git does not resolve.
@@ -273,9 +274,9 @@ describeGit(
       async (_title, scenario) => {
         const runs = await scenarios[scenario]();
         for (const { result, configKept } of runs) {
+          expectAbsent(JSON.stringify(result), USER, "a run's result");
+          expectAbsent(JSON.stringify(result), TOKEN, "a run's result");
           expect(result).toBeTypeOf("object");
-          expect(JSON.stringify(result).includes(USER)).toBe(false);
-          expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
           expect(configKept).toBe(true);
         }
       },
@@ -293,8 +294,8 @@ describeGit(
       expect(exitOf(all.result)).toBe(0);
       expect(oid(bare, "refs/heads/work")).toBe(oid(wd, "refs/heads/work"));
       for (const { result, configKept } of [plain, all]) {
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "a push's result");
+        expectAbsent(JSON.stringify(result), TOKEN, "a push's result");
         expect(configKept).toBe(true);
       }
     });
@@ -333,8 +334,8 @@ describeGit(
       })();
       expect(onBranch).toBe(true);
       expect(oid(dest, "HEAD")).toBe(oid(named, `refs/heads/${USER}-main`));
-      expect(JSON.stringify(result).includes(USER)).toBe(false);
-      expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+      expectAbsent(JSON.stringify(result), USER);
+      expectAbsent(JSON.stringify(result), TOKEN);
     });
 
     it("a failed probe's result is returned redacted: a pull in a directory that is no repository", async () => {
@@ -359,11 +360,11 @@ describeGit(
       expect(returned).toBe(true);
       const result = outcome as GitResult;
       expect(result.exit_code === 0).toBe(false);
-      expect(JSON.stringify(result).includes(USER)).toBe(false);
+      expectAbsent(JSON.stringify(result), USER, "the result");
       expect(result.stderr.includes("[REDACTED]")).toBe(true);
       const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
       expect(row.detail.sanitized).toBe(true);
-      expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
+      expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
     });
 
     describe("the clone reads the remote's HEAD through the parse seam (F2-E10, W7)", () => {
@@ -450,10 +451,10 @@ describeGit(
         const result = await clone(at(server.port, "user-head.git"), SECRET, server.port);
         expect(exitOf(result)).toBe(0);
         expect(onBranch(dest(), `${USER}-main`)).toBe(true);
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
+        expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone of a remote whose HEAD is detached, under a user name that occurs inside HEAD's object id, checks out that object id", async () => {
@@ -475,9 +476,9 @@ describeGit(
         );
         expect(exitOf(result)).toBe(0);
         expect(headIs(dest(), head)).toBe(true);
-        expect(JSON.stringify(result).includes(user)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), user, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone whose remote HEAD names a branch carrying the credential's token, with master at the same commit, lands on master: the token stays redacted inside the parse", async () => {
@@ -488,10 +489,10 @@ describeGit(
         const result = await clone(at(server.port, "token-head.git"), SECRET, server.port);
         expect(exitOf(result)).toBe(0);
         expect(onBranch(dest(), "master")).toBe(true);
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
+        expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone under a credential whose token is its user half, its remote HEAD naming a branch carrying the token with master at the same commit, lands on master: the token stays redacted inside the parse (C-15)", async () => {
@@ -513,8 +514,8 @@ describeGit(
         );
         expect(exitOf(result)).toBe(0);
         expect(onBranch(dest(), "master")).toBe(true);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone whose remote-HEAD read fails returns it through the full redaction: neither the result nor the audit row carries the user name or the token", async () => {
@@ -523,12 +524,12 @@ describeGit(
         const failed = result as GitResult;
         expect(failed.exit_code === 0).toBe(false);
         expect(failed.stderr.includes("[REDACTED]")).toBe(true);
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
         const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
         expect(row.detail.sanitized).toBe(true);
-        expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone whose remote-HEAD read exceeds the step's deadline returns it through the full redaction: neither the result nor the failed audit row carries the user name or the token", async () => {
@@ -555,12 +556,12 @@ describeGit(
         const stalled = result as GitResult;
         expect(stalled.timed_out === true).toBe(true);
         expect(stalled.error === ErrorCode.PROCESS_TIMEOUT).toBe(true);
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
         const row = log.mock.calls.at(-1)?.[0] as { success: boolean };
         expect(row.success).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
 
       it("a clone whose remote-HEAD read passes the output cap parses the seam's copy: a default branch named with the credential's user name is learned, and neither the result nor the audit row carries the user name or the token (C-16)", async () => {
@@ -591,10 +592,10 @@ describeGit(
         });
         expect(exitOf(result)).toBe(0);
         expect(onBranch(dest(), `${USER}-main`)).toBe(true);
-        expect(JSON.stringify(result).includes(USER)).toBe(false);
-        expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(USER)).toBe(false);
-        expect(JSON.stringify(log.mock.calls).includes(TOKEN)).toBe(false);
+        expectAbsent(JSON.stringify(result), USER, "the result");
+        expectAbsent(JSON.stringify(result), TOKEN, "the result");
+        expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+        expectAbsent(JSON.stringify(log.mock.calls), TOKEN, "the audit calls");
       });
     });
   },

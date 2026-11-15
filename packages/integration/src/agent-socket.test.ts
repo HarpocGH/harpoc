@@ -26,6 +26,7 @@ import {
   sshKeyFixturePath,
   sshPublicKeyBlob,
 } from "./helpers/ssh-key-fixtures.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The persistent agent socket on the built CLI (design M5, tranche B3):
@@ -357,7 +358,7 @@ describe.skipIf(process.platform === "win32")(
       expect(needles.length).toBe(6);
       const swept = [daemon?.stdoutSoFar() ?? "", daemon?.stderrSoFar() ?? "", trail, ...outputs];
       for (const text of swept) {
-        for (const needle of needles) expect(canon(text).includes(needle)).toBe(false);
+        for (const needle of needles) expectAbsent(canon(text), needle, "a swept output");
       }
     }, 60_000);
 

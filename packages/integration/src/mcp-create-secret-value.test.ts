@@ -3,7 +3,11 @@ import type { VaultEngine } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
 import { AuditEventType, SecretType } from "@harpoc/shared";
 import type { Permission, TokenPrincipalType } from "@harpoc/shared";
-import { connectInMemoryClient, connectModernInMemoryClient } from "@harpoc/test-utils";
+import {
+  connectInMemoryClient,
+  connectModernInMemoryClient,
+  expectAbsent,
+} from "@harpoc/test-utils";
 import type { InMemoryMcpClient, InMemoryToolResult } from "@harpoc/test-utils";
 import { createTestVault, destroyTestVault, registerAgents } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
@@ -123,14 +127,14 @@ describe("create_secret collects the value, then creates the secret (C-4)", () =
 
       const text = result.content[0]?.text ?? "";
       expect(result.isError ?? false).toBe(false);
-      expect(text.includes(VALUE)).toBe(false);
+      expectAbsent(text, VALUE, "the tool text");
       const payload = JSON.parse(text) as { handle: string; status: string };
       expect(payload.handle).toBe(handle);
       expect(payload.status).toBe("created");
       expect(statusesOf(secretName)).toEqual(["active"]);
 
       const rows = rowsSince(mark);
-      expect(JSON.stringify(rows).includes(VALUE)).toBe(false);
+      expectAbsent(JSON.stringify(rows), VALUE, "the audit rows");
       expect(rows.filter((row) => !row.success)).toEqual([]);
       const creates = rows.filter((row) => row.event_type === AuditEventType.SECRET_CREATE);
       expect(creates).toHaveLength(1);
@@ -238,7 +242,7 @@ describe("create_secret collects the value, then creates the secret (C-4)", () =
       expect(result.isError).toBe(true);
       const text = result.content[0]?.text ?? "";
       expect(text.includes(`Secret already exists: ${secretName}`)).toBe(true);
-      expect(text.includes(VALUE)).toBe(false);
+      expectAbsent(text, VALUE);
       expect(typed?.length).toBe(Buffer.byteLength(VALUE));
       expect(typed?.every((byte) => byte === 0)).toBe(true);
       expect(statusesOf(secretName)).toEqual(["pending"]);

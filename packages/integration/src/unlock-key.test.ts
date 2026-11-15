@@ -23,6 +23,7 @@ import {
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The headless start on the built CLI (design M1, tranche B4): `unlock-key enroll`
@@ -470,10 +471,10 @@ describe("the headless start on the built CLI (unlock-key enroll, server start -
     ];
     const swept = [trail, daemon?.stdoutSoFar() ?? "", daemon?.stderrSoFar() ?? "", ...outputs];
     for (const text of swept) {
-      for (const needle of needles) expect(canon(text).includes(needle)).toBe(false);
+      for (const needle of needles) expectAbsent(canon(text), needle, "a swept output");
       const stripped = text.replace(/\s+/g, "");
       for (const [form, needle] of strippedForms) {
-        expect(stripped.includes(needle), `an output carries the key as ${form}`).toBe(false);
+        expectAbsent(stripped, needle, `the key as ${form}`);
       }
     }
   }, 60_000);

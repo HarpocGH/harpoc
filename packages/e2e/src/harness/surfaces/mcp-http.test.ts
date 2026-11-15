@@ -69,12 +69,12 @@ describe("mcp-http surface", () => {
       env_var: "TOKEN",
     });
 
+    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
     expect(outcome.ok).toBe(false);
     // The agent-facing surface conveys the human-readable refusal, NOT the
     // machine-readable error code: the SDK renders a thrown VaultError as its
     // `.message`, and `.code` never crosses the wire. Scenario classification
     // therefore keys on the outcome, not on a code the surface never emits.
     expect(outcome.errorText ?? "").toMatch(/not in secret allowlist/i);
-    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
   });
 });

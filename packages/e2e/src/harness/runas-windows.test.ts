@@ -35,8 +35,11 @@ import {
   sshArgsWindows,
 } from "./two-identity-windows.js";
 import { TOKEN_FILE_REQUEST, WRITE_STDIN_TO_FILE } from "./two-identity.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const NODE = process.execPath;
+const LAUNCHER_PASSWORD = "pw-fixture-7f3a";
+const LOGON_PASSWORD = "wrong-password-fixture-1";
 const PRINT_ARGV_AND_ENV =
   "process.stdout.write(JSON.stringify({ argv: process.argv.slice(1), env: Object.keys(process.env) }))";
 /** An account no host has: a refused logon counts toward no real account's lockout. */
@@ -125,13 +128,11 @@ describe("launcherSpec", () => {
       ["C:\\Windows\\System32\\curl.exe", "--version"],
       { env: { SSH_AUTH_SOCK: "\\\\.\\pipe\\harpoc-agent1-ssh-agent" }, stdin: "in" },
     );
+    expectAbsent(JSON.stringify({ ...spec, password: undefined }), LAUNCHER_PASSWORD);
     expect(spec.user).toBe("agent1");
-    expect(spec.password).toBe("pw-fixture-7f3a");
+    expect(spec.password).toBe(LAUNCHER_PASSWORD);
     expect(spec.arguments).toBe("--version");
     expect(spec.stdin).toBe("in");
-    expect(JSON.stringify({ ...spec, password: undefined }).includes("pw-fixture-7f3a")).toBe(
-      false,
-    );
   });
 
   it("refuses a relative command: the launcher resolves no PATH", () => {
@@ -403,10 +404,10 @@ describe.skipIf(process.platform !== "win32")("the launcher on Windows", () => {
       { user: "harpoc-b7-no-such-account", password: "wrong-password-fixture-1" },
       [NODE, "-e", "process.stdout.write('ran')"],
     );
+    expectAbsent(run.stderr, LOGON_PASSWORD);
     expect(run.code).toBe(LAUNCH_FAILED_EXIT);
     expect(run.stdout).toBe("");
     expect(launchFailure(run)).toBe(ERROR_LOGON_FAILURE);
-    expect(run.stderr.includes("wrong-password-fixture-1")).toBe(false);
   }, 60_000);
 
   it("the system's bound is LOGON_COMMAND_LINE_LIMIT: with an account it cannot log on, 1024 characters reach the logon (ERROR_LOGON_FAILURE) and 1025 are refused E_INVALIDARG before it", async () => {

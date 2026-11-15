@@ -32,6 +32,7 @@ vi.mock("@harpoc/core", async (importOriginal) => ({
 import { createEngine } from "../../utils/vault-loader.js";
 import { registerUnlockKeyEnrollCommand } from "./enroll.js";
 import { buildCli, spyCli, type CliSpies } from "../../__fixtures__/cli-harness.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const PASSWORD = "enroll-master-pw-1";
 /** The fixture key's bytes; the engine double hands out a fresh buffer of them per test. */
@@ -80,9 +81,8 @@ afterEach(() => {
  * No form of the key a CLI leak would take reached stdout or stderr: hex, base64, the decimal list
  * of a `Uint8Array` in a template string, `util.inspect`'s list, `JSON.stringify`'s object and the
  * raw bytes (this fixture's are printable), nor — whitespace removed — `util.inspect`'s multi-line
- * rendering of the array. Every assertion on the key is a boolean naming the form, so a red never
- * echoes a byte of it (two-identity.test.ts's form); a row sweeps before it asserts on the
- * captured output.
+ * rendering of the array. Every check on the key is an `expectAbsent` whose label names the form,
+ * so a red never echoes a byte of it; a row sweeps before it asserts on the captured output.
  */
 function expectNoKeyBytes(): void {
   const bytes = Buffer.from(KEY_BYTES);
@@ -95,19 +95,13 @@ function expectNoKeyBytes(): void {
     ["raw bytes", bytes.toString("latin1")],
   ];
   for (const [form, needle] of forms) {
-    expect(spies.stdout().includes(needle), `stdout carries the key as ${form}`).toBe(false);
-    expect(spies.stderr().includes(needle), `stderr carries the key as ${form}`).toBe(false);
+    expectAbsent(spies.stdout(), needle, `stdout, the key as ${form}`);
+    expectAbsent(spies.stderr(), needle, `stderr, the key as ${form}`);
   }
   const decimal = KEY_BYTES.join(",");
   const stripped = (text: string): string => text.replace(/\s+/g, "");
-  expect(
-    stripped(spies.stdout()).includes(decimal),
-    "stdout carries the key as an inspected array",
-  ).toBe(false);
-  expect(
-    stripped(spies.stderr()).includes(decimal),
-    "stderr carries the key as an inspected array",
-  ).toBe(false);
+  expectAbsent(stripped(spies.stdout()), decimal, "stdout, the key as an inspected array");
+  expectAbsent(stripped(spies.stderr()), decimal, "stderr, the key as an inspected array");
 }
 
 /** The writer was called once, with --out and the engine's buffer itself (not a copy). */

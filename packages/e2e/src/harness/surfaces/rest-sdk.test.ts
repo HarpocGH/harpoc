@@ -83,9 +83,9 @@ describe.each(DRIVERS)("%s surface", (name, start) => {
       env_var: "TOKEN",
     });
 
+    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
     expect(outcome.ok).toBe(false);
     expect(outcome.errorText ?? "").toMatch(/not in secret allowlist/i);
-    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
   });
 
   it("refuses an out-of-scope token — the token is enforced, not decorative", async () => {
@@ -102,8 +102,8 @@ describe.each(DRIVERS)("%s surface", (name, start) => {
       env_var: "TOKEN",
     });
 
+    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
     expect(outcome.ok).toBe(false);
     expect(outcome.errorText ?? "").toMatch(/permission|denied/i);
-    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
   });
 });

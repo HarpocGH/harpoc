@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import type { VaultApiToken } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import {
   refuseEmptyToken,
   resolveTokenCaller,
@@ -300,6 +300,7 @@ describe("a scope refusal on a real engine (A8)", () => {
     const rows = deniedRows();
     expect(rows).toHaveLength(1);
     const [row] = rows;
+    expectAbsent(JSON.stringify(row), jwt);
     expect({
       success: row?.success,
       secret_id: row?.secret_id,
@@ -320,7 +321,6 @@ describe("a scope refusal on a real engine (A8)", () => {
     });
     expect(JSON.stringify(row).includes("a8-name")).toBe(false);
     expect(JSON.stringify(row).includes("a8-proj")).toBe(false);
-    expect(JSON.stringify(row).includes(jwt)).toBe(false);
   });
 
   it("secret list's cross-project refusal leaves one access.denied row, interface cli", async () => {
@@ -337,6 +337,7 @@ describe("a scope refusal on a real engine (A8)", () => {
     );
     expect(err.message).toBe("Access denied: Token is scoped to project: a8-proj");
     const rows = deniedRows();
+    expectAbsent(JSON.stringify(rows[0]), jwt);
     expect(rows.map((row) => ({ principal_id: row.principal_id, detail: row.detail }))).toEqual([
       {
         principal_id: "a8-agent",
@@ -349,7 +350,6 @@ describe("a scope refusal on a real engine (A8)", () => {
       },
     ]);
     expect(JSON.stringify(rows[0]).includes("a8-elsewhere")).toBe(false);
-    expect(JSON.stringify(rows[0]).includes(jwt)).toBe(false);
   });
 
   it("a name-pattern refusal leaves one access.denied row, interface cli, no pattern in it", async () => {
@@ -359,6 +359,7 @@ describe("a scope refusal on a real engine (A8)", () => {
       ErrorCode.ACCESS_DENIED,
     );
     const rows = deniedRows();
+    expectAbsent(JSON.stringify(rows[0]), jwt);
     expect(rows.map((row) => ({ principal_id: row.principal_id, detail: row.detail }))).toEqual([
       {
         principal_id: "a8-agent",
@@ -372,6 +373,5 @@ describe("a scope refusal on a real engine (A8)", () => {
     ]);
     expect(JSON.stringify(rows[0]).includes("a8-db-")).toBe(false);
     expect(JSON.stringify(rows[0]).includes("a8-name")).toBe(false);
-    expect(JSON.stringify(rows[0]).includes(jwt)).toBe(false);
   });
 });

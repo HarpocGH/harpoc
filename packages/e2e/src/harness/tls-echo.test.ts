@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { caPem } from "./pki.js";
 import { startTlsEcho } from "./tls-echo.js";
 import type { TlsEcho } from "./tls-echo.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 interface Answer {
   status: number;
@@ -94,8 +95,8 @@ describe("the in-process TLS echo", () => {
     expect(answer.body === JSON.stringify({ path: "/echo/held", method: "GET", held: true })).toBe(
       true,
     );
-    expect(answer.body.includes(credential)).toBe(false);
-    expect(JSON.stringify(answer.headers).includes(credential)).toBe(false);
+    expectAbsent(answer.body, credential, "the body");
+    expectAbsent(JSON.stringify(answer.headers), credential, "the headers");
   });
 
   it("answers /echo/held at once where no hold is armed", async () => {

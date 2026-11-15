@@ -21,6 +21,7 @@ import { expectAbsent } from "@harpoc/test-utils";
 const needle = (text: string): Uint8Array => new Uint8Array(Buffer.from(text));
 const PLAIN_VALUE = "VALUE";
 const LONGER_VALUE = "VALUEX";
+const USERINFO_PASSWORD = "pw";
 
 function target(requestUrl: string): ParsedTarget {
   const parsed = parseTarget(requestUrl);
@@ -46,16 +47,16 @@ describe("parseTarget", () => {
   });
 
   it.each([
-    "",
-    "/",
-    "//api.github.com/x",
-    "/a@b.example/x",
-    "/a b/x",
-    "/api.github.com:99999/x",
-    "*",
-    "ftp://api.github.com/x",
-    "http://user:pw@api.github.com/x",
-  ])("refuses %j", (requestUrl) => {
+    ["an empty target", ""],
+    ["no host segment", "/"],
+    ["an empty host segment", "//api.github.com/x"],
+    ["userinfo in the host segment", "/a@b.example/x"],
+    ["a space in the host segment", "/a b/x"],
+    ["a port out of range", "/api.github.com:99999/x"],
+    ["the asterisk form", "*"],
+    ["a scheme other than http(s)", "ftp://api.github.com/x"],
+    ["credentials in an absolute URI", `http://user:${USERINFO_PASSWORD}@api.github.com/x`],
+  ])("refuses %s", (_label, requestUrl) => {
     expect(parseTarget(requestUrl)).toEqual({
       ok: false,
       message:

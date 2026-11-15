@@ -18,6 +18,7 @@ import {
   captureCalls,
 } from "./scenarios/model-b-windows.js";
 import { win32 } from "node:path";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * Deployment model B on Windows (tranche B7): the built CLI daemon as the vault
@@ -139,7 +140,7 @@ describe.skipIf(process.platform !== "win32")(
         const observed = await row.observe(d, capture);
         const calls = capture.calls();
         const token = await d.agentToken();
-        expect(JSON.stringify(calls).includes(token)).toBe(false);
+        expectAbsent(JSON.stringify(calls), token);
         const record = recordModelBWindows(
           {
             scenario: row.scenario,

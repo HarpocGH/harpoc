@@ -6,7 +6,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { startTestServer } from "./helpers/rest-helpers.js";
 import type { TestServer } from "./helpers/rest-helpers.js";
 import { runCli } from "./helpers/spawn-cli.js";
-import { silenceAuditLines } from "@harpoc/test-utils";
+import { expectAbsent, silenceAuditLines } from "@harpoc/test-utils";
 
 silenceAuditLines();
 
@@ -129,7 +129,7 @@ describe("Governance refuses a project-claimed admin token (R11/N12)", () => {
     expect(count(masked)).toBe(maskedBefore + 1);
     expect(count(minted)).toBe(mintedBefore + 1);
     const denied = vault.engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
-    expect(JSON.stringify(denied).includes(unscoped)).toBe(false);
+    expectAbsent(JSON.stringify(denied), unscoped);
   });
 });
 

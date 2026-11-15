@@ -92,6 +92,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
 const SFTP_CONFIG: ConnectionConfig = {
   ssh: { known_hosts: ["deploy.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"] },
 };
+const PEM_ARMOR = "PRIVATE KEY";
 
 function allowedPolicy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   return policy({
@@ -195,7 +196,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     ]);
 
     expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
-    expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
+    expect(args.every((a) => !a.includes(PEM_ARMOR))).toBe(true);
     expect(opts.redact).toContain(keyPem);
   });
 

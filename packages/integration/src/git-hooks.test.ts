@@ -21,6 +21,7 @@ import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * N11 (R11, 2026-09-04): a `git pull` into a caller-supplied working tree
@@ -356,7 +357,7 @@ describeGit("Git context — hooks of the caller's tree never run (N11)", () => 
       expect((await git(bare, "rev-parse", "refs/heads/main")).trim()).toBe(head);
       expect(authorizedPushes).toBeGreaterThan(0);
       expect(existsSync(prePushMarker)).toBe(false);
-      expect(JSON.stringify(pushed).includes(PUSH_TOKEN)).toBe(false);
+      expectAbsent(JSON.stringify(pushed), PUSH_TOKEN);
       const pushRows = vault.engine
         .queryAudit({ eventType: AuditEventType.SECRET_USE })
         .filter((event) => event.detail?.operation === "push");

@@ -30,7 +30,7 @@ import {
   writeUnlockKeyDpapi,
   writeUnlockKeyFile,
 } from "./unlock-key-source.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -74,7 +74,7 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promi
 }
 
 function expectNoKeyIn(message: string): void {
-  for (const form of KEY_FORMS) expect(message.includes(form)).toBe(false);
+  for (const form of KEY_FORMS) expectAbsent(message, form);
 }
 
 beforeEach(() => {

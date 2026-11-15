@@ -1544,7 +1544,7 @@ describe.skipIf(process.platform !== "win32")(
         says: "exists; the sealed key is written to a new file only",
       },
     ])(
-      "$script refuses ($says) with exit 2 before its administrator check",
+      "$script refuses ($says) with exit 2 before its administrator check (row %#)",
       ({ script, args, says }) => {
         const run = runPs1(`windows/${script}`, args());
         expect(run.status, run.measured).toBe(2);

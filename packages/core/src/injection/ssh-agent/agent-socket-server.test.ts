@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
-import { ErrorCode, VaultError, agentSocketCaller } from "@harpoc/shared";
+import { ErrorCode, VaultError, agentSocketCaller, maxUnixSocketPathBytes } from "@harpoc/shared";
 import { AgentSocketServer } from "./agent-socket-server.js";
 import type { AgentSocketEngine, AgentSocketServerOptions } from "./agent-socket-server.js";
 import { loadPrivateKey } from "./key-loader.js";
@@ -618,15 +618,16 @@ describe.skipIf(process.platform === "win32")("AgentSocketServer on a Unix socke
     expect(vi.mocked(restrictWindowsPipeToAccount)).not.toHaveBeenCalled();
   });
 
-  it("refuses a path over 107 bytes, naming its length, before anything is created or recorded", async () => {
+  it("refuses a path one byte over this platform's bound (107; darwin 103), naming its length, before anything is created or recorded", async () => {
     const base = mkdtempSync(join(tmpdir(), "harpoc-agent-socket-"));
     dir = base;
-    const socketPath = join(base, "x".repeat(108 - base.length - 1));
-    expect(Buffer.byteLength(socketPath)).toBe(108);
+    const bound = maxUnixSocketPathBytes(process.platform);
+    const socketPath = join(base, "x".repeat(bound + 1 - Buffer.byteLength(base) - 1));
+    expect(Buffer.byteLength(socketPath)).toBe(bound + 1);
 
     const err = await expectVaultError(() => start({ socketPath }), ErrorCode.INVALID_INPUT);
     expect(err.message).toBe(
-      `ssh-agent socket: path is 108 bytes, over the 107 a Unix socket address holds: ${socketPath}`,
+      `ssh-agent socket: path is ${String(bound + 1)} bytes, over the ${String(bound)} a Unix socket address holds: ${socketPath}`,
     );
     expect(existsSync(socketPath)).toBe(false);
     expect(double.auditServerStart).not.toHaveBeenCalled();

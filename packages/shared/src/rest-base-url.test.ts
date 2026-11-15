@@ -40,7 +40,7 @@ describe("parseRestBaseUrl", () => {
     ["http://vault.example", "plain_http_off_loopback"],
     ["http://10.0.0.5:3000", "plain_http_off_loopback"],
     ["http://0.0.0.0:3000", "plain_http_off_loopback"],
-  ])("refuses %s as %s", (value, reason) => {
+  ])("refuses row %# as $1", (value, reason) => {
     expect(parseRestBaseUrl(value)).toEqual({ ok: false, reason });
   });
 

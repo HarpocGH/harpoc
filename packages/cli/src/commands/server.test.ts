@@ -1914,8 +1914,8 @@ describe("server start", () => {
 
     /**
      * No form of the fixture key reached stdout or stderr, `JSON.stringify`'s object included —
-     * every assertion a boolean naming the form, so a red never echoes the output it searched
-     * (two-identity.test.ts's form); a row sweeps before it asserts on the captured output.
+     * every check an `expectAbsent` whose label names the form, so a red never echoes the output it
+     * searched; a row sweeps before it asserts on the captured output.
      */
     function expectNoKeyBytes(): void {
       const bytes = Buffer.from(KEY_BYTES);
@@ -1928,19 +1928,13 @@ describe("server start", () => {
         ["raw bytes", bytes.toString("latin1")],
       ];
       for (const [form, needle] of forms) {
-        expect(spies.stdout().includes(needle), `stdout carries the key as ${form}`).toBe(false);
-        expect(spies.stderr().includes(needle), `stderr carries the key as ${form}`).toBe(false);
+        expectAbsent(spies.stdout(), needle, `stdout, the key as ${form}`);
+        expectAbsent(spies.stderr(), needle, `stderr, the key as ${form}`);
       }
       const decimal = KEY_BYTES.join(",");
       const stripped = (text: string): string => text.replace(/\s+/g, "");
-      expect(
-        stripped(spies.stdout()).includes(decimal),
-        "stdout carries the key as an inspected array",
-      ).toBe(false);
-      expect(
-        stripped(spies.stderr()).includes(decimal),
-        "stderr carries the key as an inspected array",
-      ).toBe(false);
+      expectAbsent(stripped(spies.stdout()), decimal, "stdout, the key as an inspected array");
+      expectAbsent(stripped(spies.stderr()), decimal, "stderr, the key as an inspected array");
     }
 
     /** The engine was unlocked once, from the vault directory, with the reader's buffer itself. */

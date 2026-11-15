@@ -12,7 +12,7 @@ import type { TestVault } from "./helpers/engine-factory.js";
 import { startGitSmartHttp } from "./helpers/git-smart-http-plain.js";
 import type { GitSmartHttp } from "./helpers/git-smart-http-plain.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * M6 (deployment model B, tranche B9): a `fetch` through the vault on a real
@@ -287,10 +287,14 @@ describeGit("Git context — fetch through the vault (M6)", () => {
     expect(results).toHaveLength(3);
     const basic = Buffer.from(`${USER}:${TOKEN}`).toString("base64");
     const json = JSON.stringify(results);
-    expect(json.includes(TOKEN) || json.includes(basic) || json.includes(USER)).toBe(false);
+    expectAbsent(json, TOKEN, "the results");
+    expectAbsent(json, basic, "the results");
+    expectAbsent(json, USER, "the results");
     for (const file of filesUnder(wt)) {
       const text = readFileSync(file).toString("latin1");
-      expect(text.includes(TOKEN) || text.includes(basic) || text.includes(USER), file).toBe(false);
+      expectAbsent(text, TOKEN, file);
+      expectAbsent(text, basic, file);
+      expectAbsent(text, USER, file);
     }
   });
 

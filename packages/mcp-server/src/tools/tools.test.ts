@@ -191,8 +191,8 @@ describe("MCP Tools", () => {
     it("never includes secret values — each row is exactly the nine metadata keys", async () => {
       const result = await callTool(server, "list_secrets", {});
       const text = getToolText(result);
-      const data = JSON.parse(text) as Record<string, unknown>[];
       expectAbsent(text, SENTINEL);
+      const data = JSON.parse(text) as Record<string, unknown>[];
       expect(data).toHaveLength(2);
       for (const row of data) {
         expect(Object.keys(row).sort()).toEqual([

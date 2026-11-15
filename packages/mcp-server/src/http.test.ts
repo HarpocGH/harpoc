@@ -1192,9 +1192,9 @@ describe("the 2026-07-28 leg (dual-era, design R1)", () => {
         name: "create_secret",
         arguments: { name: "api-key", type: "api_key" },
       })) as { content: Array<{ text: string }> };
+      expectAbsent(result.content[0]?.text, FORM_POSTED_VALUE);
       const payload = JSON.parse(result.content[0]?.text ?? "{}") as { status: string };
 
-      expectAbsent(result.content[0]?.text, FORM_POSTED_VALUE);
       expect(payload.status).toBe("created");
       expect(captured).toBe(FORM_POSTED_VALUE);
       expect(vi.mocked(engine.verifyToken).mock.calls.length - before).toBeGreaterThanOrEqual(4);

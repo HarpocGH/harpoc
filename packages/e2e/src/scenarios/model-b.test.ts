@@ -13,6 +13,7 @@ import {
   MODEL_B_SCENARIOS,
   dockerRunArgs,
 } from "./model-b.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The contract's scenario ids (program plan § Cross-tranche interfaces, the
@@ -140,7 +141,6 @@ describe("the docker row's container", () => {
       from = at + run.length;
     }
     expect(CONTAINER_CLIENT.includes("process.env.HARPOC_PROXY_TOKEN_FILE")).toBe(true);
-    // Boolean-shaped: a failing comparison never echoes the token.
-    expect(argv.some((part) => part.includes(token))).toBe(false);
+    for (const part of argv) expectAbsent(part, token, "an argument");
   });
 });

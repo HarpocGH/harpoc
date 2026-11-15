@@ -7,6 +7,7 @@ const R = "[REDACTED]";
 const LITERAL_TOKEN = "tok-en";
 const REPEATED_TOKEN = "ab";
 const ESCAPE_LETTER_TOKEN = "u";
+const ESCAPE_UNIT_TOKEN = "u0062";
 
 describe("redactEscapeTolerant", () => {
   it("redacts a literal occurrence", () => {
@@ -75,7 +76,12 @@ describe("redactEscapeTolerant", () => {
     // Process stdout is not JSON: here `b` is six literal characters and
     // the credential really is present. This is what forbids the escape-unit
     // skip — losing this match would leak the credential.
-    const out = redactEscapeTolerant("printing token: \\u0062 done", "u0062", R);
+    const out = redactEscapeTolerant(
+      `printing token: \\${ESCAPE_UNIT_TOKEN} done`,
+      ESCAPE_UNIT_TOKEN,
+      R,
+    );
+    expectAbsent(out, ESCAPE_UNIT_TOKEN);
     expect(out).toBe(`printing token: \\${R} done`);
   });
 });

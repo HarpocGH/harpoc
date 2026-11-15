@@ -5,45 +5,116 @@ import type { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, maxUnixSocketPathBytes } from "@harpoc/shared";
 import { prepareUnixSocketPath } from "./unix-socket.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
 const LABEL = "test socket";
 const CHILD_DEADLINE_MS = 10_000;
+const REAL_PLATFORM = process.platform;
 
 let dir: string;
+
+/** The platform `prepareUnixSocketPath` reads by default, stubbed for one row and put back after it. */
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
+
+/** This platform's bound, read when the row runs. */
+function bound(): number {
+  return maxUnixSocketPathBytes(process.platform);
+}
+
+/** A path under the row's directory of exactly `bytes` bytes. */
+function pathOf(bytes: number): string {
+  const path = join(dir, "x".repeat(bytes - Buffer.byteLength(dir) - 1));
+  expect(Buffer.byteLength(path)).toBe(bytes);
+  return path;
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harpoc-unix-socket-"));
 });
 
 afterEach(() => {
+  stubPlatform(REAL_PLATFORM);
   rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe("prepareUnixSocketPath", () => {
-  it("refuses a path over 107 bytes, naming its length, before touching the filesystem", async () => {
-    const path = join(dir, "x".repeat(108 - dir.length - 1));
-    expect(Buffer.byteLength(path)).toBe(108);
+  it("refuses a path one byte over this platform's bound (107; darwin 103), naming its length and the bound, before touching the filesystem", async () => {
+    const path = pathOf(bound() + 1);
 
     const err = await expectVaultError(
       () => prepareUnixSocketPath(path, LABEL),
       ErrorCode.INVALID_INPUT,
     );
     expect(err.message).toBe(
-      `test socket: path is 108 bytes, over the 107 a Unix socket address holds: ${path}`,
+      `test socket: path is ${String(bound() + 1)} bytes, over the ${String(bound())} a Unix socket address holds: ${path}`,
     );
     expect(existsSync(path)).toBe(false);
   });
 
-  it("passes a 107-byte path that does not exist and creates nothing", async () => {
-    const path = join(dir, "x".repeat(107 - dir.length - 1));
-    expect(Buffer.byteLength(path)).toBe(107);
+  it("passes a path of this platform's bound (107; darwin 103) that does not exist and creates nothing", async () => {
+    const path = pathOf(bound());
 
     await expect(prepareUnixSocketPath(path, LABEL)).resolves.toBeUndefined();
     expect(existsSync(path)).toBe(false);
   });
+
+  it("darwin's bound on any host (the platform passed): a 104-byte path is refused naming its length and the 103", async () => {
+    const path = pathOf(104);
+
+    const err = await expectVaultError(
+      () => prepareUnixSocketPath(path, LABEL, "darwin"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `test socket: path is 104 bytes, over the 103 a Unix socket address holds: ${path}`,
+    );
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("the platform defaults to process.platform: stubbed to darwin, a 104-byte path is refused naming the 103", async () => {
+    const path = pathOf(104);
+    stubPlatform("darwin");
+
+    const err = await expectVaultError(
+      () => prepareUnixSocketPath(path, LABEL),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `test socket: path is 104 bytes, over the 103 a Unix socket address holds: ${path}`,
+    );
+  });
+
+  it("darwin's bound on any host (the platform passed): a 103-byte path that does not exist passes and creates nothing", async () => {
+    const path = pathOf(103);
+
+    await expect(prepareUnixSocketPath(path, LABEL, "darwin")).resolves.toBeUndefined();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  // A real bind needs a Unix socket file, which exists on POSIX only (a Windows `listen(path)`
+  // is a named pipe): the macOS legs bind at 103 bytes, Linux at 107.
+  it.skipIf(process.platform === "win32")(
+    "a real listen on a path of exactly this platform's bound succeeds after the ladder passes it (POSIX)",
+    async () => {
+      const path = pathOf(bound());
+      await prepareUnixSocketPath(path, LABEL);
+
+      const server: Server = createServer();
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(path, () => resolve());
+      });
+      try {
+        expect(lstatSync(path).isSocket()).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
 
   it("refuses a path that exists and is not a socket, and leaves it untouched", async () => {
     const path = join(dir, "ssh-agent.sock");

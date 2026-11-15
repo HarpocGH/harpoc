@@ -208,6 +208,10 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
 
     expect(res.status).toBe(200);
     const raw = await res.text();
+    expectAbsent(raw, SEEDED_REFRESH_TOKEN);
+    expectAbsent(raw, REFRESHED_ACCESS_TOKEN);
+    expectAbsent(raw, AC_CLIENT_SECRET);
+    expectAbsent(raw, SEEDED_ACCESS_TOKEN);
     const body = JSON.parse(raw) as { data: { refreshed: boolean; expires_at: number } };
     expect(body.data.refreshed).toBe(true);
     expect(body.data.expires_at).toBeGreaterThan(seededExpiresAt);
@@ -223,10 +227,6 @@ describe("OAuth lifecycle across REST, engine and MCP", () => {
       client_id: AC_CLIENT_ID,
       client_secret: AC_CLIENT_SECRET,
     });
-    expectAbsent(raw, SEEDED_REFRESH_TOKEN);
-    expectAbsent(raw, REFRESHED_ACCESS_TOKEN);
-    expectAbsent(raw, AC_CLIENT_SECRET);
-    expectAbsent(raw, SEEDED_ACCESS_TOKEN);
 
     const status = vault.engine.getOAuthTokenStatus(acSecretId);
     expect(status.access_token_expires_at).toBe(refreshedExpiresAt);

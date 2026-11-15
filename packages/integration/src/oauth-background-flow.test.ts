@@ -130,10 +130,10 @@ describe("REST background authorization-code flow", () => {
 
     expect(res.status).toBe(201);
     const raw = await res.text();
+    expectAbsent(raw, CLIENT_SECRET);
     const body = JSON.parse(raw) as {
       data: { handle: string; status: string; auth_url: string; message: string };
     };
-    expectAbsent(raw, CLIENT_SECRET);
     expect(body.data.handle).toBe(`secret://${OK_NAME}`);
     expect(body.data.status).toBe("pending_authorization");
     expect(body.data.message).toContain("auth_url");

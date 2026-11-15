@@ -11,7 +11,7 @@ import type { VaultEngineOptions } from "./vault-engine.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -131,7 +131,7 @@ describe("enrolment (enrollUnlockKey, unlockKeyStatus)", () => {
     expect(allZero(key)).toBe(false);
     const values = SLOT_ROWS.map(readMeta);
     expect(values.every((value) => typeof value === "string" && value.length > 0)).toBe(true);
-    expect(values.includes(Buffer.from(key).toString("base64"))).toBe(false);
+    expectAbsent(values, Buffer.from(key).toString("base64"));
   });
 
   it("unlockKeyStatus reports no slot, the slot with its enrolment time, then none after revoke — one vault.read row a read and no other", async () => {
@@ -643,6 +643,6 @@ describe("the key never leaves as data (hard rule 4)", () => {
 
     expect(messages.length).toBe(4);
     const haystack = [...messages, JSON.stringify(viaKey.queryAudit()), ...metaValues, session];
-    for (const needle of needles) expect(haystack.join("\n").includes(needle)).toBe(false);
+    for (const needle of needles) expectAbsent(haystack.join("\n"), needle);
   });
 });

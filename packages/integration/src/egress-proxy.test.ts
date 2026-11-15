@@ -16,6 +16,7 @@ import {
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * The egress credential proxy end to end (design M4 (i), tranche B2): the built
@@ -293,7 +294,8 @@ describe.skipIf(GIT === null)(
       for (const r of seen) {
         const sent = JSON.stringify(r.headers);
         expect(r.headers["proxy-authorization"] === undefined).toBe(true);
-        expect(sent.includes("harpoc:") || sent.includes(useToken)).toBe(false);
+        expect(sent.includes("harpoc:")).toBe(false);
+        expectAbsent(sent, useToken, "a request's headers");
         expect([undefined, realBasic].includes(r.headers.authorization)).toBe(true);
       }
       // git's first request carries no credential — a pass-through, untouched.
@@ -335,7 +337,7 @@ describe.skipIf(GIT === null)(
         outputs.push(run.stdout, run.stderr);
         expect(run.code, run.stderr).toBe(0);
         expect(run.stdout.includes("refs/heads/[REDACTED]")).toBe(true);
-        expect(run.stdout.includes(VALUE)).toBe(false);
+        expectAbsent(run.stdout, VALUE);
         expect(brokered().at(-1)?.url).toBe("/leaky.git/info/refs?service=git-upload-pack");
       },
       60_000,
@@ -391,7 +393,8 @@ describe.skipIf(GIT === null)(
       });
       expect(refused.status).toBe(403);
       const body = refused.body;
-      expect(body.includes(VALUE) || body.includes(useToken)).toBe(false);
+      expectAbsent(body, VALUE);
+      expectAbsent(body, useToken);
       expect((JSON.parse(body) as { error: string }).error).toBe(ErrorCode.URL_NOT_ALLOWED);
       const failed = (await auditRows(AuditEventType.SECRET_USE)).filter(
         (r) => r.detail?.["context"] === "proxy" && !r.success,
@@ -407,8 +410,8 @@ describe.skipIf(GIT === null)(
       const trail = await cli(["audit", "--limit", "500", "--json"]);
       const swept = [daemon?.stdoutSoFar() ?? "", daemon?.stderrSoFar() ?? "", trail, ...outputs];
       for (const text of swept) {
-        expect(text.includes(VALUE)).toBe(false);
-        expect(text.includes(useToken)).toBe(false);
+        expectAbsent(text, VALUE, "a swept output");
+        expectAbsent(text, useToken, "a swept output");
       }
     }, 60_000);
 

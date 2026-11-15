@@ -151,8 +151,8 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
 
     // The private key reaches ssh only through the ephemeral agent socket:
     expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
-    expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
-    expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+    expect(args.every((a) => !a.includes(PEM_ARMOR))).toBe(true);
+    expect(Object.values(opts.env).every((v) => !v.includes(PEM_ARMOR))).toBe(true);
     // and it is redacted from any captured output.
     expect(opts.redact).toContain(keyPem);
   });

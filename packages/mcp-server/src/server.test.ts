@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { expectVaultError, inMemoryClientFor } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError, inMemoryClientFor } from "@harpoc/test-utils";
 import type { VaultEngine } from "@harpoc/core";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import { createMcpServer, createStdioServerFactory } from "./server.js";
+
+const REFUSED_LAUNCH_TOKEN_PART = "refused-launch-token";
 
 async function callTool(server: McpServer, name: string, args: Record<string, unknown>) {
   return (await inMemoryClientFor(server)).callTool(name, args);
@@ -237,7 +239,7 @@ describe("createMcpServer", () => {
         error: refusal.code,
       });
       const recorded = JSON.stringify(vi.mocked(engine.auditServerStart).mock.calls);
-      expect(recorded.includes("refused-launch-token")).toBe(false);
+      expectAbsent(recorded, REFUSED_LAUNCH_TOKEN_PART);
     },
   );
 

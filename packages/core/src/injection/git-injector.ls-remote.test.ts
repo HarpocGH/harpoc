@@ -10,6 +10,7 @@ import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { GitInjector } from "./git-injector.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * M6 (B9): an ls-remote is one credential-bearing step against an empty relay
@@ -181,9 +182,9 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
 
   it("a ref name carrying the credential comes back redacted", async () => {
     const result = await lsRemote("repo.git", {});
+    expectAbsent(JSON.stringify(result), TOKEN);
     expect(result.exit_code, result.stderr).toBe(0);
     expect(result.stdout.includes("\trefs/heads/[REDACTED]\n")).toBe(true);
-    expect(JSON.stringify(result).includes(TOKEN)).toBe(false);
   });
 
   it("--exit-code on an empty remote is exit 2 with no error: a successful use", async () => {

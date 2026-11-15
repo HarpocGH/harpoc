@@ -4,9 +4,14 @@ import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { VaultError } from "@harpoc/shared";
+import { maxUnixSocketPathBytes, VaultError } from "@harpoc/shared";
 import { IDENTITY_COMMENT, createAgentResponder } from "./agent-protocol.js";
 import { loadPrivateKey, opensshPublicKeyLine } from "./key-loader.js";
+
+const SOCKET_NAME = "agent.sock";
+
+/** The six random characters `mkdtempSync` appends to its prefix. */
+const MKDTEMP_SUFFIX = "XXXXXX";
 
 /**
  * An ephemeral, in-process ssh-agent (thesis §4.5.7). The private key is parsed
@@ -38,7 +43,16 @@ export class EphemeralSshAgent {
     private tempDir: string | null,
   ) {}
 
-  static start(privateKeyPem: string): Promise<EphemeralSshAgent> {
+  /**
+   * Starts the agent: a named pipe on a win32 host, else a Unix socket in a new temporary
+   * directory. `platform` (`process.platform` by default) is the platform whose
+   * `maxUnixSocketPathBytes` (107; darwin 103) bounds the socket path, and nothing else: a path
+   * over it is refused `SSH_AGENT_FAILED` naming its length before anything is created.
+   */
+  static start(
+    privateKeyPem: string,
+    platform: NodeJS.Platform = process.platform,
+  ): Promise<EphemeralSshAgent> {
     let key: ReturnType<typeof loadPrivateKey>;
     try {
       key = loadPrivateKey(privateKeyPem);
@@ -52,14 +66,24 @@ export class EphemeralSshAgent {
     if (process.platform === "win32") {
       authSock = `\\\\.\\pipe\\harpoc-ssh-${randomBytes(12).toString("hex")}`;
     } else {
+      const prefix = join(tmpdir(), "harpoc-agent-");
+      const bytes = Buffer.byteLength(join(`${prefix}${MKDTEMP_SUFFIX}`, SOCKET_NAME));
+      const max = maxUnixSocketPathBytes(platform);
+      if (bytes > max) {
+        return Promise.reject(
+          VaultError.sshAgentFailed(
+            `the agent's socket path is ${String(bytes)} bytes, over the ${String(max)} a Unix socket address holds`,
+          ),
+        );
+      }
       try {
-        tempDir = mkdtempSync(join(tmpdir(), "harpoc-agent-"));
+        tempDir = mkdtempSync(prefix);
       } catch {
         return Promise.reject(
           VaultError.sshAgentFailed("the agent's socket directory could not be created"),
         );
       }
-      authSock = join(tempDir, "agent.sock");
+      authSock = join(tempDir, SOCKET_NAME);
     }
 
     const sockets = new Set<Socket>();

@@ -161,7 +161,7 @@ describe("sweepDescendants", () => {
   });
 
   it.each([0, -1, 1.5, Number.NaN])(
-    "refuses a non-positive-integer pid %p without listing",
+    "refuses a non-positive-integer pid %s without listing",
     async (pid) => {
       const d = deps([]);
       await expect(sweepDescendants(pid, WINDOW, d)).resolves.toEqual({

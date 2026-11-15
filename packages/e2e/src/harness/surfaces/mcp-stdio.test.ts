@@ -79,9 +79,9 @@ describe("mcp-stdio surface", () => {
       env_var: "TOKEN",
     });
 
+    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
     expect(outcome.ok).toBe(false);
     expect(outcome.errorText ?? "").toMatch(/not in secret allowlist/i);
-    assertOpaque(SECRET, { result: outcome.result, error: outcome.errorText });
   }, 60_000);
 
   it("passes the whole parent environment to the child, not the SDK's allowlist", async () => {

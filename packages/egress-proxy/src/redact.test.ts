@@ -7,6 +7,7 @@ import { expectAbsent } from "@harpoc/test-utils";
 const NEEDLE = "ghp_S3cr3tValue-xyz";
 const MARK = REDACTION_MARKER;
 const SECRET_TOKEN = "s3cr3t-token";
+const MULTIBYTE_NEEDLE = "pässwörd-🔑";
 
 async function redact(
   chunks: readonly (Buffer | string)[],
@@ -57,6 +58,7 @@ describe("createRedactingTransform — exact-value redaction of a response strea
 
   it("a needle wholly inside one chunk", async () => {
     const result = await redact([`{"token":"${NEEDLE}"}`], [NEEDLE]);
+    expectAbsent(result.output.toString(), NEEDLE);
     expect(result.output.toString()).toBe(`{"token":"${MARK}"}`);
     expect(result.changed).toBe(true);
   });
@@ -68,6 +70,7 @@ describe("createRedactingTransform — exact-value redaction of a response strea
         [`before ${NEEDLE.slice(0, offset)}`, `${NEEDLE.slice(offset)} after`],
         [NEEDLE],
       );
+      expectAbsent(result.output.toString(), NEEDLE);
       expect(result.output.toString()).toBe(`before ${MARK} after`);
       expect(result.changed).toBe(true);
     },
@@ -90,16 +93,19 @@ describe("createRedactingTransform — exact-value redaction of a response strea
 
   it("two occurrences in one chunk", async () => {
     const result = await redact([`a ${NEEDLE} b ${NEEDLE} c`], [NEEDLE]);
+    expectAbsent(result.output.toString(), NEEDLE);
     expect(result.output.toString()).toBe(`a ${MARK} b ${MARK} c`);
   });
 
   it("back-to-back occurrences are two markers", async () => {
     const result = await redact([`${NEEDLE}${NEEDLE}`], [NEEDLE]);
+    expectAbsent(result.output.toString(), NEEDLE);
     expect(result.output.toString()).toBe(`${MARK}${MARK}`);
   });
 
   it("a needle at the very end is redacted by the flush", async () => {
     const result = await redact(["0123456789", `ok ${NEEDLE}`], [NEEDLE]);
+    expectAbsent(result.output.toString(), NEEDLE);
     expect(result.output.toString()).toBe(`0123456789ok ${MARK}`);
   });
 
@@ -122,6 +128,8 @@ describe("createRedactingTransform — exact-value redaction of a response strea
       [`{"echo":"Basic ${encoded}","raw":"`, `${NEEDLE}"}`],
       [NEEDLE, encoded],
     );
+    expectAbsent(result.output.toString(), NEEDLE);
+    expectAbsent(result.output.toString(), encoded);
     expect(result.output.toString()).toBe(`{"echo":"Basic ${MARK}","raw":"${MARK}"}`);
   });
 
@@ -175,9 +183,10 @@ describe("createRedactingTransform — exact-value redaction of a response strea
   });
 
   it("a multibyte UTF-8 needle split inside a code point", async () => {
-    const needle = Buffer.from("pässwörd-🔑");
+    const needle = Buffer.from(MULTIBYTE_NEEDLE);
     const body = Buffer.concat([Buffer.from("«"), needle, Buffer.from("»")]);
     const result = await redact([body.subarray(0, 4), body.subarray(4)], [needle]);
+    expectAbsent(result.output.toString(), MULTIBYTE_NEEDLE);
     expect(result.output.toString()).toBe(`«${MARK}»`);
   });
 
@@ -241,10 +250,21 @@ describe("createRedactingTransform — exact-value redaction of a response strea
 
 describe("redactBytes — the same match over one complete value (a response header)", () => {
   it.each([
-    [`https://192.0.2.10/cb?token=${NEEDLE}`, `https://192.0.2.10/cb?token=${MARK}`, true],
-    ["https://192.0.2.10/cb?token=other", "https://192.0.2.10/cb?token=other", false],
-  ])("%s", (value, expected, changed) => {
+    [
+      "a URL whose token is the needle",
+      `https://192.0.2.10/cb?token=${NEEDLE}`,
+      `https://192.0.2.10/cb?token=${MARK}`,
+      true,
+    ],
+    [
+      "a URL whose token is another value",
+      "https://192.0.2.10/cb?token=other",
+      "https://192.0.2.10/cb?token=other",
+      false,
+    ],
+  ])("%s", (_label, value, expected, changed) => {
     const result = redactBytes(Buffer.from(value), [Buffer.from(NEEDLE)]);
+    expectAbsent(result.output.toString(), NEEDLE);
     expect(result.output.toString()).toBe(expected);
     expect(result.changed).toBe(changed);
   });

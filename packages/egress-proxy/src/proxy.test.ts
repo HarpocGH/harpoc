@@ -512,6 +512,7 @@ describe("the upstream leg", () => {
     const reply = await send("/login", { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(302);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.headers.location).toBe(`/objects.example:8443/cb?code=${MARKER}`);
     expect(upstream.seen).toHaveLength(1);
     expect(double.leases[0]?.complete).toHaveBeenCalledWith({ status: 302, sanitized: true });
@@ -532,6 +533,7 @@ describe("the upstream leg", () => {
     });
 
     expect(reply.status).toBe(302);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(reply.headers.location).toBe(`https://objects.example/cb?code=${MARKER}`);
     expect(upstream.seen).toHaveLength(1);
   });
@@ -558,6 +560,7 @@ describe("the upstream leg", () => {
     const reply = await send("/user", { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(401);
+    expectAbsent(reply.raw, SECRET_VALUE);
     expect(JSON.parse(reply.body)).toEqual({ message: `bad credentials ${MARKER}` });
     expect(double.leases[0]?.complete).toHaveBeenCalledWith({ status: 401, sanitized: true });
   });

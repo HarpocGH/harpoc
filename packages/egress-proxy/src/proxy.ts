@@ -108,6 +108,20 @@ function internalProxyError(): VaultError {
   return new VaultError(ErrorCode.INTERNAL_ERROR, "Internal proxy error");
 }
 
+const SOCKET_LABEL = "Egress proxy socket";
+
+/** The agent socket's `bindRefusal` (core), mirrored: a ladder, bind or mode errno as a code, never node's text. */
+function socketRefusal(err: unknown, path: string): VaultError {
+  if (err instanceof VaultError) return err;
+  const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  if (code === "EADDRINUSE") {
+    return VaultError.invalidInput(`${SOCKET_LABEL}: another process is listening on ${path}`);
+  }
+  return VaultError.invalidInput(
+    `${SOCKET_LABEL}: cannot listen on ${path} (${code ?? "unknown error"})`,
+  );
+}
+
 interface Authenticated {
   token: VaultApiToken;
   caller: CallerContext;
@@ -510,7 +524,6 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     return server;
   }
 
-  /** Bind; a bind failure (EADDRINUSE, EACCES) rejects as node raised it — the CLI's fatal path prints it. */
   async function startListener(
     server: Server,
     target: { port: number; host: string } | { path: string },
@@ -562,12 +575,15 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     async listenSocket(path: string): Promise<void> {
       if (process.platform === "win32") {
         throw VaultError.invalidInput(
-          `Egress proxy socket: not supported on Windows (no socket directory mode to rely on): ${path}`,
+          `${SOCKET_LABEL}: not supported on Windows (no socket directory mode to rely on): ${path}`,
         );
       }
-      await prepareUnixSocketPath(path, "Egress proxy socket");
-      const server = newServer();
-      await startListener(server, { path });
+      try {
+        await prepareUnixSocketPath(path, SOCKET_LABEL);
+        await startListener(newServer(), { path });
+      } catch (err) {
+        throw socketRefusal(err, path);
+      }
       socketPaths.add(path);
     },
 

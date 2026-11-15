@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext } from "@harpoc/shared";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { VaultEngineOptions } from "./vault-engine.js";
 import { nonReadAuditCount, registerAgents } from "./__fixtures__/engine-seams.js";
@@ -289,12 +289,12 @@ describe("JWT tokens", () => {
       ErrorCode.INVALID_INPUT,
     );
     expect(err.message === UNKNOWN_JTI_MESSAGE).toBe(true);
-    expect(err.message.includes(token)).toBe(false);
+    expectAbsent(err.message, token, "the message");
 
     const failed = engine.queryAudit({ eventType: AuditEventType.TOKEN_REVOKE, success: false });
     expect(failed.length).toBe(1);
+    expectAbsent(JSON.stringify(failed[0]?.detail), token, "the failed row");
     expect(Object.keys(failed[0]?.detail ?? {})).toEqual(["error"]);
-    expect(JSON.stringify(failed[0]?.detail).includes(token)).toBe(false);
     expect(engine.listIssuedTokens({ status: "all" }).map((t) => t.status)).toEqual(["active"]);
   });
 

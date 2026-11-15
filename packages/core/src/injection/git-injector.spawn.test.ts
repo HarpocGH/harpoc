@@ -146,6 +146,7 @@ const FORCED = [
 const GIT_TOKEN = "s3cret-token-value";
 const PEM_ARMOR = "PRIVATE KEY";
 const SHORT_USERNAME = "ab";
+const GIT_USERNAME = "git-user";
 
 function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   return {
@@ -230,9 +231,12 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     expect(cloneOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
 
     // The credential appears in no argv element of any step in any form.
-    expect(
-      calls.every(([, a]) => a.every((x) => !x.includes(GIT_TOKEN) && !x.includes("git-user"))),
-    ).toBe(true);
+    for (const [, args] of calls) {
+      for (const arg of args) {
+        expectAbsent(arg, GIT_TOKEN, "an argument");
+        expectAbsent(arg, GIT_USERNAME, "an argument");
+      }
+    }
   });
 
   it("push: the network step is the forced config, --git-dir of the relay, the operation, the caller's options, `--`, then the repository; the working-tree steps carry no credential (I18, S1)", async () => {
@@ -286,9 +290,12 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
         expect(localOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
         expect(localOpts.env.HARPOC_GIT_USERNAME).toBeUndefined();
       }
-      expect(
-        calls.every(([, a]) => a.every((x) => !x.includes(GIT_TOKEN) && !x.includes("git-user"))),
-      ).toBe(true);
+      for (const [, stepArgs] of calls) {
+        for (const arg of stepArgs) {
+          expectAbsent(arg, GIT_TOKEN, "an argument");
+          expectAbsent(arg, GIT_USERNAME, "an argument");
+        }
+      }
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -460,7 +467,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(opts.cwd).toBe((args[8] as string).slice("--git-dir=".length));
       expect(args.some((a) => a.includes("harpoc-f1-dest"))).toBe(false);
       expect(opts.env.GIT_ASKPASS).toBeTruthy();
-      expect(opts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
+      expect(opts.env.HARPOC_GIT_PASSWORD).toBe(GIT_TOKEN);
     }
     expect(fetchOpts.cwd).toBe(relay);
     expect(lsOpts.cwd).toBe(relay);
@@ -1009,8 +1016,8 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
   );
 
   it("the clone's ls-remote parse list holds no user half under the shared floor beside the placeholder password (MIN_REDACTABLE_FRAGMENT)", async () => {
-    const [, , listOpts] = (await cloneWith("ab:x-oauth-basic"))[0] as SpawnCall;
-    expect((listOpts.redact ?? []).includes(SHORT_USERNAME)).toBe(false);
+    const [, , listOpts] = (await cloneWith(`${SHORT_USERNAME}:x-oauth-basic`))[0] as SpawnCall;
+    expectAbsent(listOpts.redact, SHORT_USERNAME);
   });
 
   it("a successful but truncated ls-remote listing is parsed from the seam's copy: the relay's HEAD at the fetch names the default branch that carries the credential's user name (C-16)", async () => {
@@ -1039,8 +1046,8 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       undefined,
     );
     expect(result.exit_code).toBe(0);
-    expect(JSON.stringify(result).includes("git-user")).toBe(false);
-    expect(headAtFetch === "ref: refs/heads/git-user-main\n").toBe(true);
+    expectAbsent(JSON.stringify(result), GIT_USERNAME);
+    expect(headAtFetch === `ref: refs/heads/${GIT_USERNAME}-main\n`).toBe(true);
   });
 });
 
@@ -1617,8 +1624,8 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
 
     // The private key reaches ssh only through the ephemeral agent socket.
     for (const [, args, opts] of calls) {
-      expect(args.every((a) => !a.includes("PRIVATE KEY"))).toBe(true);
-      expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+      expect(args.every((a) => !a.includes(PEM_ARMOR))).toBe(true);
+      expect(Object.values(opts.env).every((v) => !v.includes(PEM_ARMOR))).toBe(true);
     }
   });
 
@@ -1670,7 +1677,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       expect(opts.env.SSH_AUTH_SOCK).toBeTruthy();
       expect(opts.env.GIT_CONFIG_NOSYSTEM).toBe("1");
       expect(opts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
-      expect(Object.values(opts.env).every((v) => !v.includes("PRIVATE KEY"))).toBe(true);
+      expect(Object.values(opts.env).every((v) => !v.includes(PEM_ARMOR))).toBe(true);
       for (const [, , localOpts] of calls.slice(0, 3)) {
         expect(localOpts.cwd).toBe(wd);
         expect(localOpts.env.SSH_AUTH_SOCK).toBeUndefined();
@@ -1800,7 +1807,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
   // are now single-quoted for sh, the known_hosts value additionally
   // double-quoted for readconf.
   it("single-quotes GIT_SSH_COMMAND parts sh would split or expand; known_hosts value stays readconf-quoted", async () => {
-    const spaced = mkdtempSync(join(tmpdir(), "harpoc sh $probe-"));
+    const spaced = mkdtempSync(join(tmpdir(), "h $probe-"));
     const saved = overrideTempEnv(spaced);
     try {
       const { privateKey: keyPem } = generateKeyPairSync("rsa", {
@@ -1844,7 +1851,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
     "composes a GIT_SSH_COMMAND real sh splits back into the intended argv",
     async () => {
       const sh = findRoundtripSh() as string;
-      const spaced = mkdtempSync(join(tmpdir(), "harpoc sh $probe-"));
+      const spaced = mkdtempSync(join(tmpdir(), "h $probe-"));
       const saved = overrideTempEnv(spaced);
       try {
         const { privateKey: keyPem } = generateKeyPairSync("rsa", {

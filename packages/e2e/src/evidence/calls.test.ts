@@ -88,6 +88,7 @@ describe("callEvidence", () => {
   it("caps each text at EVIDENCE_TEXT_CAP after the redaction and says so", () => {
     const long = `${CREDENTIAL}${"x".repeat(EVIDENCE_TEXT_CAP * 2)}`;
     const ev = callEvidence(completed(long, { stderr: "short" }), CREDENTIAL);
+    expectAbsent(ev.text, CREDENTIAL);
     expect(ev.text).toHaveLength(EVIDENCE_TEXT_CAP);
     expect(ev.text.startsWith(RECORD_REDACTION)).toBe(true);
     expect(ev.truncated).toBe(true);

@@ -14,6 +14,7 @@ import {
   NEGATIVE_CONTROL_VALUE,
   captureCalls,
 } from "./scenarios/model-b.js";
+import { expectAbsent } from "@harpoc/test-utils";
 
 /**
  * Deployment model B's evidence (design § 6 ch6 rows, tranche B6): the built
@@ -136,7 +137,7 @@ describe.skipIf(process.platform !== "linux")(
         const calls = capture.calls();
         // A token is no credential the record redacts: a record that carries one is never written.
         const token = await d.agentToken();
-        expect(JSON.stringify(calls).includes(token)).toBe(false);
+        expectAbsent(JSON.stringify(calls), token);
         const record = recordModelB(
           {
             scenario: row.scenario,

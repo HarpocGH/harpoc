@@ -83,13 +83,13 @@ describe("cli surface", () => {
       env_var: "TOKEN",
     });
 
-    expect(outcome.ok).toBe(false);
-    expect(cliErrorCode(outcome.errorText)).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
     assertOpaque(SECRET, {
       error: outcome.errorText,
       stdout: outcome.stdout,
       stderr: outcome.stderr,
     });
+    expect(outcome.ok).toBe(false);
+    expect(cliErrorCode(outcome.errorText)).toBe(ErrorCode.COMMAND_NOT_ALLOWED);
   }, 60_000);
 
   it("refuses an out-of-scope token — the CLI token is enforced, not decorative", async () => {

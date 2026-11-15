@@ -20,4 +20,5 @@ export * from "./schemas.js";
 export * from "./server-lifecycle.js";
 export * from "./socket-peer.js";
 export * from "./token-endpoint-auth.js";
+export * from "./unix-socket-path.js";
 export * from "./version.js";

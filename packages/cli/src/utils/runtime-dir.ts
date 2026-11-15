@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, statSync, type Dirent, type Stats } from "node:
 import { basename, join, posix, sep, win32 } from "node:path";
 import { listWindowsAclSync } from "@harpoc/core";
 import type { WindowsAclListing } from "@harpoc/core";
-import { agentNameSchema, MAX_UNIX_SOCKET_PATH_BYTES, VaultError } from "@harpoc/shared";
+import { agentNameSchema, maxUnixSocketPathBytes, VaultError } from "@harpoc/shared";
 
 /** Where the runtime directory came from — the label its refusals name. */
 export type RuntimeDirSource = "--runtime-dir" | "$RUNTIME_DIRECTORY" | "%ProgramData%";
@@ -194,18 +194,24 @@ export function consumerDirs(runtimeDir: RuntimeDir): ConsumerDirEntry[] {
 /**
  * `<runtime-dir>/<consumer>/<socketName>` for every consumer directory under the runtime
  * directory, by name (POSIX: a Unix socket each). A directory entry is a consumer: its name must
- * be a consumer name, the socket path must fit a Unix socket address and the directory must pass
- * `assertConsumerDir` — a misconfigured consumer refuses the start instead of being skipped.
- * A link entry is refused; other entries are ignored.
+ * be a consumer name, the socket path must fit a Unix socket address on `platform`
+ * (`maxUnixSocketPathBytes`: 107; darwin 103) and the directory must pass `assertConsumerDir` —
+ * a misconfigured consumer refuses the start instead of being skipped. A link entry is refused;
+ * other entries are ignored.
  */
-export function consumerSocketPaths(runtimeDir: RuntimeDir, socketName: string): string[] {
+export function consumerSocketPaths(
+  runtimeDir: RuntimeDir,
+  socketName: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const max = maxUnixSocketPathBytes(platform);
   return consumerNames(runtimeDir).map((consumer) => {
     const dir = consumerDir(runtimeDir.path, consumer);
     const path = join(dir, socketName);
     const bytes = Buffer.byteLength(path);
-    if (bytes > MAX_UNIX_SOCKET_PATH_BYTES) {
+    if (bytes > max) {
       throw VaultError.invalidInput(
-        `consumer ${JSON.stringify(consumer)}: the socket path is ${String(bytes)} bytes, over the ${String(MAX_UNIX_SOCKET_PATH_BYTES)} a Unix socket path holds: ${path}`,
+        `consumer ${JSON.stringify(consumer)}: the socket path is ${String(bytes)} bytes, over the ${String(max)} a Unix socket path holds: ${path}`,
       );
     }
     assertConsumerDir(dir);

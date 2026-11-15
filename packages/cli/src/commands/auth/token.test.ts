@@ -232,8 +232,8 @@ describe("auth token --out", () => {
     const out = join(dir, "launch-token.json-mode");
     await run(["--agent", "bot-1", "--out", out, "--json"]);
 
-    const payload = JSON.parse(spies.stdout()) as { token?: string; token_file?: string };
     expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    const payload = JSON.parse(spies.stdout()) as { token?: string; token_file?: string };
     expect(payload.token_file).toBe(out);
     expect(payload.token).toBeUndefined();
     expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");

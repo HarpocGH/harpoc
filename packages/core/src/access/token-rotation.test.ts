@@ -32,7 +32,7 @@ import type {
 } from "./token-rotation.js";
 import { VaultEngine } from "../vault-engine.js";
 import { registerAgents } from "../__fixtures__/engine-seams.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("../crypto/argon2.js", async (importOriginal) =>
   (await import("../__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -455,7 +455,7 @@ describe("TokenRotationScheduler on a recording engine double", () => {
     const needles = double.minted.flatMap((token) => [token, token.split(".")[2] ?? token]);
     expect(double.minted.length).toBe(7);
     expect(seen.length).toBe(18);
-    expect(needles.some((needle) => text.includes(needle))).toBe(false);
+    for (const needle of needles) expectAbsent(text, needle);
   });
 });
 
@@ -489,8 +489,8 @@ describe("writeTokenFile", () => {
 
     const err = await expectVaultError(() => writeTokenFile(file, token), ErrorCode.FILE_IO_ERROR);
 
+    expectAbsent(err.message, token);
     expect(err.message).toBe(`could not write the token file ${file} (ENOENT)`);
-    expect(err.message.includes(token)).toBe(false);
   });
 
   // POSIX: on win32 the mode bits are not the file's access control (statSync reports 0o666).
@@ -636,8 +636,8 @@ describe("writeTokenFile", () => {
       const waited = Date.now() - started;
 
       await exited;
+      expectAbsent(err.message, second);
       expect(err.message).toBe(`could not write the token file ${file} (EPERM)`);
-      expect(err.message.includes(second)).toBe(false);
       expect(waited).toBeGreaterThanOrEqual((WIN32_RENAME_ATTEMPTS - 1) * WIN32_RENAME_RETRY_MS);
       expect(holds(file, first)).toBe(true);
       expect(readdirSync(consumer)).toEqual(["token.jwt"]);
