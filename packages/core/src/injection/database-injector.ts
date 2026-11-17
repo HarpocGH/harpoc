@@ -5,8 +5,10 @@ import type {
   InjectionPolicy,
 } from "@harpoc/shared";
 import {
+  databaseActionSchema,
   DatabaseEngine,
   DEFAULT_DB_TIMEOUT_MS,
+  isDecimalInteger,
   MAX_DB_RESULT_BYTES,
   MAX_DB_ROWS,
   MIN_REDACTABLE_FRAGMENT,
@@ -70,15 +72,18 @@ export class DatabaseInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
   ): ResolvedAdapter {
-    if (isCommandEngine(action.engine)) {
-      const adapter = this.commandAdapters[action.engine];
-      if (adapter) return { kind: "command", adapter };
-    } else {
-      const adapter = this.adapters[action.engine];
-      if (adapter) return { kind: "sql", adapter };
+    const engine: unknown = action.engine;
+    if (typeof engine === "string") {
+      if (isCommandEngine(engine)) {
+        const adapter = ownEntry(this.commandAdapters, engine);
+        if (adapter) return { kind: "command", adapter };
+      } else {
+        const adapter = ownEntry(this.adapters, engine);
+        if (adapter) return { kind: "sql", adapter };
+      }
     }
     this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
-    throw VaultError.unsupportedDbEngine(action.engine);
+    throw VaultError.unsupportedDbEngine(typeof engine === "string" ? engine : "(not a string)");
   }
 
   async executeWithSecret(
@@ -93,9 +98,8 @@ export class DatabaseInjector {
 
     let target: { host: string; port: number };
     try {
-      if (action.engine === DatabaseEngine.MONGODB && !isDocument(action.command)) {
-        throw VaultError.invalidDatabaseConfig("command must be a document for mongodb");
-      }
+      const refusal = databaseInputRefusal(action);
+      if (refusal !== undefined) throw VaultError.invalidDatabaseConfig(refusal);
       const hostField: unknown = action.host;
       if (typeof hostField !== "string") {
         throw VaultError.invalidDatabaseConfig("host must be a string");
@@ -140,7 +144,22 @@ export class DatabaseInjector {
     // deliberately excluded — they resolve no connection config (D13).
     const tlsOptOut = tlsMode === "disable" ? { tls_opt_out: true } : {};
 
-    const { user, password } = parseUserPassword(secretValue);
+    let credential: { user: string; password: string };
+    try {
+      credential = parseUserPassword(secretValue);
+    } catch (err) {
+      if (err instanceof VaultError) {
+        this.audit(
+          action,
+          secretId,
+          { host, port, error: err.code, ...tlsOptOut },
+          false,
+          attribution,
+        );
+      }
+      throw err;
+    }
+    const { user, password } = credential;
     const timeoutMs = action.timeout_ms ?? DEFAULT_DB_TIMEOUT_MS;
 
     // The username half of the credential is redacted alongside the password,
@@ -292,6 +311,7 @@ export class DatabaseInjector {
     success: boolean,
     attribution?: AuditAttribution,
   ): void {
+    const engine: unknown = action.engine;
     this.auditLogger?.log(
       withAttribution(
         {
@@ -299,8 +319,10 @@ export class DatabaseInjector {
           secretId,
           detail: {
             context: "database",
-            engine: action.engine,
-            database: action.database,
+            ...(typeof engine === "string" ? { engine } : {}),
+            ...(FIELD.database.safeParse(action.database).success
+              ? { database: action.database }
+              : {}),
             ...detail,
           },
           success,
@@ -312,16 +334,54 @@ export class DatabaseInjector {
 }
 
 /** Command-style engines dispatch through `DbCommandAdapter.execute` instead of `DbEngineAdapter.connect(...).query(...)`. */
-const COMMAND_ENGINES: readonly DatabaseEngine[] = [DatabaseEngine.REDIS, DatabaseEngine.MONGODB];
+const COMMAND_ENGINES: readonly string[] = [DatabaseEngine.REDIS, DatabaseEngine.MONGODB];
 
-function isCommandEngine(engine: DatabaseEngine): engine is DbCommandEngine {
+function isCommandEngine(engine: string): engine is DbCommandEngine {
   return COMMAND_ENGINES.includes(engine);
+}
+
+function ownEntry<T>(table: Partial<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
 function isDocument(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
+}
+
+const FIELD = databaseActionSchema.shape;
+
+function databaseInputRefusal(action: DatabaseAction): string | undefined {
+  const sql = action.engine === DatabaseEngine.POSTGRESQL || action.engine === DatabaseEngine.MYSQL;
+  if (action.engine === DatabaseEngine.MONGODB && !isDocument(action.command)) {
+    return "command must be a document for mongodb";
+  }
+  if (action.engine === DatabaseEngine.REDIS && !isStringArray(action.command)) {
+    return "command must be a string array for redis";
+  }
+  if (sql && (typeof action.query !== "string" || action.query.length === 0)) {
+    return "query is required for this engine";
+  }
+  if (sql && !FIELD.params.safeParse(action.params).success) {
+    return "params must be an array of at most 1000 values";
+  }
+  if (!FIELD.database.safeParse(action.database).success) return "Invalid database name";
+  if (action.engine === DatabaseEngine.REDIS && !isDecimalInteger(action.database)) {
+    return "database must be a non-negative integer index for redis";
+  }
+  if (!FIELD.timeout_ms.safeParse(action.timeout_ms).success) {
+    return "timeout_ms must be a positive integer up to 300000";
+  }
+  return undefined;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.findIndex((entry) => typeof entry !== "string") === -1
+  );
 }
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */

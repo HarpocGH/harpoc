@@ -16,10 +16,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { generateEd25519HostKeys } from "./__fixtures__/ssh2-host-keys.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import { system32Path } from "../win32-paths.js";
@@ -38,7 +39,7 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "ssh");
@@ -49,7 +50,7 @@ const USER_KEY_PEM = readFileSync(join(FIXTURES, "ed25519_openssh"), "utf8");
 it("ssh-live tier: required legs fail instead of skipping when git or ssh is unresolvable", () => {
   if ((GIT === null || SSH === null) && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but git or ssh does not resolve',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but a supported git or ssh does not resolve',
     );
   }
 });

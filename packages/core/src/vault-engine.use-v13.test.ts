@@ -2437,7 +2437,7 @@ describe("redis/mongodb route through the existing database arm", () => {
         type: "database",
         engine: "redis",
         host: "8.8.8.8",
-        database: "app",
+        database: "0",
         command: ["GET", "key"],
       }),
     ).rejects.toMatchObject({ code: ErrorCode.HOST_NOT_ALLOWED });

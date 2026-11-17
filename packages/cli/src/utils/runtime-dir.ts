@@ -195,9 +195,9 @@ export function consumerDirs(runtimeDir: RuntimeDir): ConsumerDirEntry[] {
  * `<runtime-dir>/<consumer>/<socketName>` for every consumer directory under the runtime
  * directory, by name (POSIX: a Unix socket each). A directory entry is a consumer: its name must
  * be a consumer name, the socket path must fit a Unix socket address on `platform`
- * (`maxUnixSocketPathBytes`: 107; darwin 103) and the directory must pass `assertConsumerDir` —
- * a misconfigured consumer refuses the start instead of being skipped. A link entry is refused;
- * other entries are ignored.
+ * (`maxUnixSocketPathBytes`: 107; darwin and the BSDs 103) and the directory must pass
+ * `assertConsumerDir` — a misconfigured consumer refuses the start instead of being skipped. A
+ * link entry is refused; other entries are ignored.
  */
 export function consumerSocketPaths(
   runtimeDir: RuntimeDir,

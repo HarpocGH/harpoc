@@ -1,8 +1,10 @@
 import { request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
-import { expectAbsent, isConnectionRefused, isIpv6BindUnavailable } from "@harpoc/test-utils";
+import { Server, createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import type { MockInstance } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { VaultEngine } from "@harpoc/core";
 import { OAuthManager } from "@harpoc/oauth-proxy";
@@ -12,6 +14,12 @@ import { startMcpHttpServer } from "./http.js";
 import type { McpHttpServer } from "./http.js";
 import { startValueCollector } from "./elicitation/value-collector.js";
 import type { ValueCollector } from "./elicitation/value-collector.js";
+import {
+  expectAbsent,
+  expectVaultError,
+  isConnectionRefused,
+  isIpv6BindUnavailable,
+} from "@harpoc/test-utils";
 
 // I10 (test-review-2026-10-09): the listener builds its rate limiter and its
 // injection guard itself, so both modules are wrapped — every instance is
@@ -736,6 +744,241 @@ describe("startMcpHttpServer", () => {
     const refill = await initialize();
     expect(refill.status).toBe(200);
   }, 30_000);
+});
+
+describe("startMcpHttpServer — a refused bind and a failed listener", () => {
+  let server: McpHttpServer | undefined;
+  let listen: MockInstance<Server["listen"]>;
+
+  beforeEach(() => {
+    listen = vi.spyOn(Server.prototype, "listen");
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    listen.mockRestore();
+    await server?.close();
+    server = undefined;
+  });
+
+  function failNextBind(err: Error): void {
+    listen.mockImplementationOnce(function (this: Server) {
+      process.nextTick(() => this.emit("error", err));
+      return this;
+    });
+  }
+
+  async function withTakenPort(run: (taken: number) => Promise<void>): Promise<void> {
+    const holder = createServer();
+    await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+    try {
+      await run((holder.address() as AddressInfo).port);
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    }
+  }
+
+  function acceptError(): Error {
+    return Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" });
+  }
+
+  function boundServer(): Server {
+    expect(listen).toHaveBeenCalledTimes(1);
+    return listen.mock.contexts[0] as Server;
+  }
+
+  it("a refused bind leaves no timer behind", async () => {
+    await withTakenPort(async (taken) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      await expect(startMcpHttpServer({ engine: mockEngine(), port: taken })).rejects.toThrow();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  it("control: a bound listener holds one timer and close() clears it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const started = await startMcpHttpServer({ engine: mockEngine(), port: 0 });
+    server = started;
+    expect(vi.getTimerCount()).toBe(1);
+    await started.close();
+    server = undefined;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a taken port is INVALID_INPUT naming the address and EADDRINUSE, never node's text, details.errno, and writes no start row", async () => {
+    await withTakenPort(async (taken) => {
+      const engine = mockEngine();
+      const err = await expectVaultError(
+        () => startMcpHttpServer({ engine, port: taken }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expectAbsent(err.message, "address already in use");
+      expect(err.message).toBe(
+        `MCP Streamable HTTP: another process is listening on 127.0.0.1:${String(taken)} (EADDRINUSE)`,
+      );
+      expect(err.details).toEqual({ errno: "EADDRINUSE" });
+      expect(engine.auditServerStart).not.toHaveBeenCalled();
+    });
+  });
+
+  it("a bind refused EACCES is INVALID_INPUT naming the address and the errno, never node's text, details.errno, and writes no start row", async () => {
+    failNextBind(
+      Object.assign(new Error("listen EACCES: permission denied 127.0.0.1:4100"), {
+        code: "EACCES",
+        syscall: "listen",
+      }),
+    );
+    const engine = mockEngine();
+
+    const err = await expectVaultError(
+      () => startMcpHttpServer({ engine, port: 4100 }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expectAbsent(err.message, "permission denied");
+    expect(err.message).toBe("MCP Streamable HTTP: cannot listen on 127.0.0.1:4100 (EACCES)");
+    expect(err.details).toEqual({ errno: "EACCES" });
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("a bind refused with no errno is INVALID_INPUT naming the address (unknown error), never node's text, no details, and writes no start row", async () => {
+    failNextBind(new Error("listen failed"));
+    const engine = mockEngine();
+
+    const err = await expectVaultError(
+      () => startMcpHttpServer({ engine, port: 4100 }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expectAbsent(err.message, "listen failed");
+    expect(err.message).toBe(
+      "MCP Streamable HTTP: cannot listen on 127.0.0.1:4100 (unknown error)",
+    );
+    expect(err.details).toBeUndefined();
+    expect(engine.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("a taken port on ::1 is INVALID_INPUT naming the address bracketed ([::1]:4100) and EADDRINUSE", async () => {
+    failNextBind(
+      Object.assign(new Error("listen EADDRINUSE: address already in use ::1:4100"), {
+        code: "EADDRINUSE",
+        syscall: "listen",
+      }),
+    );
+
+    const err = await expectVaultError(
+      () => startMcpHttpServer({ engine: mockEngine(), port: 4100, host: "::1" }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      "MCP Streamable HTTP: another process is listening on [::1]:4100 (EADDRINUSE)",
+    );
+  });
+
+  it("an accept error after the bind is handed to onListenerError once, INTERNAL_ERROR naming the bound address and the errno, never node's text, details.errno", async () => {
+    const onListenerError = vi.fn<(err: VaultError) => void>();
+    server = await startMcpHttpServer({ engine: mockEngine(), port: 0, onListenerError });
+
+    boundServer().emit("error", acceptError());
+    expect(onListenerError).toHaveBeenCalledTimes(1);
+    const err = onListenerError.mock.calls[0]?.[0] as VaultError;
+    expectAbsent(err.message, "accept ");
+    expect(err).toBeInstanceOf(VaultError);
+    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(err.message).toBe(
+      `MCP Streamable HTTP: the listener on 127.0.0.1:${String(server.port)} failed (ENOBUFS)`,
+    );
+    expect(err.details).toEqual({ errno: "ENOBUFS" });
+  });
+
+  it("a listener error without a code is handed to onListenerError once, INTERNAL_ERROR naming the bound address (unknown error), never node's text, no details", async () => {
+    const onListenerError = vi.fn<(err: VaultError) => void>();
+    server = await startMcpHttpServer({ engine: mockEngine(), port: 0, onListenerError });
+
+    boundServer().emit("error", new Error("accept failed"));
+    expect(onListenerError).toHaveBeenCalledTimes(1);
+    const err = onListenerError.mock.calls[0]?.[0] as VaultError;
+    expectAbsent(err.message, "accept failed");
+    expect(err).toBeInstanceOf(VaultError);
+    expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(err.message).toBe(
+      `MCP Streamable HTTP: the listener on 127.0.0.1:${String(server.port)} failed (unknown error)`,
+    );
+    expect(err.details).toBeUndefined();
+  });
+
+  it("with the bound server's address() throwing after the bind, an accept error's emit throws nothing and onListenerError receives once the message naming the port taken at the bind", async () => {
+    const onListenerError = vi.fn<(err: VaultError) => void>();
+    server = await startMcpHttpServer({ engine: mockEngine(), port: 0, onListenerError });
+    const bound = boundServer();
+    bound.address = () => {
+      throw Object.assign(new Error("getsockname EBADF"), {
+        code: "EBADF",
+        syscall: "getsockname",
+      });
+    };
+
+    expect(() => bound.emit("error", acceptError())).not.toThrow();
+    expect(onListenerError).toHaveBeenCalledTimes(1);
+    expect((onListenerError.mock.calls[0]?.[0] as VaultError).message).toBe(
+      `MCP Streamable HTTP: the listener on 127.0.0.1:${String(server.port)} failed (ENOBUFS)`,
+    );
+  });
+
+  it("without onListenerError exactly one error listener stays on the bound server, an accept error's emit throws nothing and the listener still accepts", async () => {
+    server = await startMcpHttpServer({ engine: mockEngine(), port: 0 });
+    const bound = boundServer();
+
+    expect(bound.listenerCount("error")).toBe(1);
+    expect(() => bound.emit("error", acceptError())).not.toThrow();
+    const res = await rawRequest(server.port, rpcHeaders(), JSON.stringify(INIT_BODY));
+    expect(res.status).toBe(401);
+  });
+
+  it.each([
+    [70000, "70000"],
+    [-1, "-1"],
+    [1.5, "1.5"],
+    [Number.NaN, "NaN"],
+  ] as const)(
+    "port %s is INVALID_INPUT naming the port, nothing bound, no timer and no start row",
+    async (port, printed) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        const engine = mockEngine();
+        const err = await expectVaultError(
+          () => startMcpHttpServer({ engine, port }),
+          ErrorCode.INVALID_INPUT,
+        );
+        expect(err.message).toBe(`MCP Streamable HTTP: port ${printed} is not 0-65535`);
+        expect(listen).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(engine.auditServerStart).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("ports 0 and 65535 pass the port check: 0 binds and writes its start row, 65535 reaches the bind", async () => {
+    const engine = mockEngine();
+    server = await startMcpHttpServer({ engine, port: 0 });
+    expect(server.port).toBeGreaterThan(0);
+    expect(engine.auditServerStart).toHaveBeenCalledWith({
+      transport: "http",
+      tokenless: false,
+      port: server.port,
+      host: "127.0.0.1",
+    });
+
+    failNextBind(new Error("listen failed"));
+    const err = await expectVaultError(
+      () => startMcpHttpServer({ engine: mockEngine(), port: 65535 }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      "MCP Streamable HTTP: cannot listen on 127.0.0.1:65535 (unknown error)",
+    );
+    expect(listen).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**

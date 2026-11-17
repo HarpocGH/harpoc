@@ -95,6 +95,19 @@ describe("prepareUnixSocketPath", () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  it("FreeBSD's bound on any host (the platform passed): a 104-byte path is refused naming the 103", async () => {
+    const path = pathOf(104);
+
+    const err = await expectVaultError(
+      () => prepareUnixSocketPath(path, LABEL, "freebsd"),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `test socket: path is 104 bytes, over the 103 a Unix socket address holds: ${path}`,
+    );
+    expect(existsSync(path)).toBe(false);
+  });
+
   // A real bind needs a Unix socket file, which exists on POSIX only (a Windows `listen(path)`
   // is a named pipe): the macOS legs bind at 103 bytes, Linux at 107.
   it.skipIf(process.platform === "win32")(

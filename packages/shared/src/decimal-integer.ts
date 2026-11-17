@@ -9,7 +9,7 @@
  * Shared by every numeric CLI flag (`packages/cli`) and `harpoc-mcp --http
  * --port`, so the two entry points cannot disagree on what a port literal is;
  * by the redis `database` index, on the wire (`refineDatabaseAction`,
- * `schemas.ts`) and again in core's `RedisAdapter`; and by
+ * `schemas.ts`) and again in core's database injector and its `RedisAdapter`; and by
  * `contentLengthExceeds` (`http-body.ts`), where a declared Content-Length
  * that is not `1*DIGIT` fails closed.
  */

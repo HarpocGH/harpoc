@@ -28,6 +28,13 @@ import {
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
+import {
+  formatGitVersion,
+  GIT_MIN_VERSION,
+  GIT_PIN_MIN_VERSION,
+  gitVersionAtLeast,
+  readGitVersion,
+} from "./git-injector-version.js";
 import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
@@ -522,6 +529,15 @@ export class GitInjector {
         "repository host has no address of the requested IP version",
       );
     }
+    await this.refuseUnsupportedGit(
+      action,
+      gitPath,
+      policy.env_allowlist,
+      resolvedAddresses !== undefined,
+      {},
+      secretId,
+      attribution,
+    );
 
     const { user, password } = parseGitCredential(secretValue);
     let hooks: { dir: string; dispose: () => void };
@@ -720,6 +736,15 @@ export class GitInjector {
         this.audit(action, secretId, { host, error: err.code }, false, attribution);
       throw err;
     }
+    await this.refuseUnsupportedGit(
+      action,
+      gitPath,
+      policy.env_allowlist,
+      false,
+      { host },
+      secretId,
+      attribution,
+    );
 
     const keyPem = Buffer.from(secretValue).toString("utf8");
     let hooks: { dir: string; dispose: () => void };
@@ -857,6 +882,44 @@ export class GitInjector {
       kh.dispose();
       identity?.dispose();
     }
+  }
+
+  private async refuseUnsupportedGit(
+    action: GitAction,
+    gitPath: string,
+    envAllowlist: string[],
+    pinned: boolean,
+    row: Record<string, unknown>,
+    secretId: string | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<void> {
+    const version = await readGitVersion(gitPath, baseGitEnv(envAllowlist));
+    let refusal: VaultError;
+    if (version === null) {
+      refusal = VaultError.gitOperationFailed("git's version could not be read");
+    } else if (!gitVersionAtLeast(version, GIT_MIN_VERSION)) {
+      refusal = VaultError.gitOperationFailed(
+        `git ${formatGitVersion(version)} is older than ${GIT_MIN_VERSION.join(".")}, which the git context needs`,
+      );
+    } else if (pinned && !gitVersionAtLeast(version, GIT_PIN_MIN_VERSION)) {
+      refusal = VaultError.gitOperationFailed(
+        `git ${formatGitVersion(version)} is older than ${GIT_PIN_MIN_VERSION.join(".")} and would ignore the addresses the vault judged for the repository host`,
+      );
+    } else {
+      return;
+    }
+    this.audit(
+      action,
+      secretId,
+      {
+        ...row,
+        error: refusal.code,
+        ...(version === null ? {} : { git_version: formatGitVersion(version) }),
+      },
+      false,
+      attribution,
+    );
+    throw refusal;
   }
 
   private audit(

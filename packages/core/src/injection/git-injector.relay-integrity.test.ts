@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -51,8 +51,8 @@ vi.mock("./spawn-captured.js", async (importOriginal) => {
   return { ...actual, spawnCaptured: vi.fn() };
 });
 
-const GIT = resolveExecutable("git", controlledPathDirs());
-// Skipped where git does not resolve: the working-tree probes run real git.
+const GIT = resolveSupportedGit();
+// Skipped where no supported git resolves: the working-tree probes run real git.
 const describeGit = describe.skipIf(GIT === null);
 
 const NULL_GIT_CONFIG = process.platform === "win32" ? "NUL" : "/dev/null";

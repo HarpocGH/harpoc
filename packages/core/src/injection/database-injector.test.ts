@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
-import type { ConnectionConfig } from "@harpoc/shared";
-import { ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
+import type { ConnectionConfig, DatabaseAction } from "@harpoc/shared";
+import { DEFAULT_DB_TIMEOUT_MS, ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
@@ -34,6 +34,7 @@ const driverQueries = vi.hoisted(() => [] as { engine: string; args: unknown[] }
 const DB_PASSWORD = "s3cr3t";
 const DB_USERNAME = "admin";
 const FLOOR_USERNAME = "abc";
+const COLONLESS_CREDENTIAL = "admins3cr3t";
 vi.mock("pg", () => ({
   default: {
     Client: class {
@@ -61,6 +62,20 @@ vi.mock("mysql2/promise", () => ({
     }),
   ),
 }));
+
+const COERCING_ENGINES: ReadonlyArray<readonly [string, unknown]> = [
+  ["an array holding postgresql", ["postgresql"]],
+  ["an array holding mysql", ["mysql"]],
+  ["a boxed String", new String("postgresql")],
+  ["an object with toString", { toString: () => "postgresql" }],
+];
+
+const PROTOTYPE_MEMBER_ENGINES: readonly string[] = [
+  "constructor",
+  "__proto__",
+  "toString",
+  "hasOwnProperty",
+];
 
 describe("DatabaseInjector", () => {
   it("parses username:password and runs the query", async () => {
@@ -199,6 +214,60 @@ describe("DatabaseInjector", () => {
       error: "UNSUPPORTED_DB_ENGINE",
     });
   });
+
+  async function expectUnsupportedEngine(
+    overrides: Partial<DatabaseAction>,
+    message: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    vi.mocked(validateHostPort).mockClear();
+    const log = vi.fn();
+    const mock = new MockAdapter({ rows: [] });
+    const cmd = new MockCommandAdapter();
+    const inj = new DatabaseInjector(
+      { log } as unknown as AuditLogger,
+      { postgresql: mock, mysql: mock },
+      { redis: cmd },
+    );
+    const err = await expectVaultError(
+      () => inj.executeWithSecret(action(overrides), SECRET, policy(), undefined, "secret-1"),
+      ErrorCode.UNSUPPORTED_DB_ENGINE,
+    );
+    expect(err.message === message).toBe(true);
+    expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+    expect(mock.lastConnect).toBeUndefined();
+    expect(cmd.lastExecute).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toStrictEqual(detail);
+  }
+
+  it.each(COERCING_ENGINES)(
+    "an engine that is %s, sent with a query object: UNSUPPORTED_DB_ENGINE 'Unsupported database engine: (not a string)', one failed row { context, database, error } without engine, host or port, no validateHostPort call, no adapter, no connect",
+    async (_label, value) => {
+      await expectUnsupportedEngine(
+        {
+          engine: value as DatabaseAction["engine"],
+          query: { text: "SELECT 1" } as unknown as string,
+        },
+        "Unsupported database engine: (not a string)",
+        { context: "database", database: "app", error: "UNSUPPORTED_DB_ENGINE" },
+      );
+    },
+  );
+
+  it.each(PROTOTYPE_MEMBER_ENGINES)(
+    "an engine named after the Object.prototype member '%s': UNSUPPORTED_DB_ENGINE 'Unsupported database engine: ' and the name, one failed row { context, engine, database, error } without host or port, no validateHostPort call, no adapter, no connect",
+    async (name) => {
+      await expectUnsupportedEngine(
+        { engine: name as DatabaseAction["engine"] },
+        `Unsupported database engine: ${name}`,
+        { context: "database", engine: name, database: "app", error: "UNSUPPORTED_DB_ENGINE" },
+      );
+    },
+  );
 
   it("refuses an unknown SQL engine key in the adapter registry (compile-time)", () => {
     const mock = new MockAdapter({ rows: [] });
@@ -552,6 +621,248 @@ describe("DatabaseInjector — a refusal of the host field writes one failed row
       host: "8.8.8.8",
       port: 5432,
       error: "HOST_NOT_ALLOWED",
+    });
+  });
+});
+
+const REFUSED_QUERIES: ReadonlyArray<readonly [string, unknown]> = [
+  ["undefined", undefined],
+  ["an empty string", ""],
+  ["a number", 7],
+  ["an object with text", { text: "SELECT 1" }],
+];
+
+const REFUSED_PARAMS: ReadonlyArray<readonly [string, unknown]> = [
+  ["a string", "abc"],
+  ["an object", { a: 1 }],
+  ["an array of 1001 values", Array.from({ length: 1_001 }, (_, i) => i)],
+];
+
+const REFUSED_DATABASES: ReadonlyArray<readonly [string, unknown]> = [
+  ["an empty string", ""],
+  ["a number", 42],
+  ["an object", {}],
+  ["a name with a slash", "a/b"],
+  ["a name of 256 characters", "x".repeat(256)],
+];
+
+const REFUSED_TIMEOUTS: ReadonlyArray<readonly [string, unknown]> = [
+  ["0", 0],
+  ["-1", -1],
+  ["1.5", 1.5],
+  ["300001", 300_001],
+  ["the string '100'", "100"],
+];
+
+const ACCEPTED_TIMEOUTS: ReadonlyArray<readonly [string, Partial<DatabaseAction>, number]> = [
+  ["1", { timeout_ms: 1 }, 1],
+  ["300000", { timeout_ms: 300_000 }, 300_000],
+  ["absent", {}, DEFAULT_DB_TIMEOUT_MS],
+];
+
+const ACCEPTED_PARAMS: ReadonlyArray<readonly [string, Partial<DatabaseAction>]> = [
+  ["absent", {}],
+  ["an empty array", { params: [] }],
+  ["an array of 1000 values", { params: Array.from({ length: 1_000 }, (_, i) => i) }],
+];
+
+const ACCEPTED_DATABASES: ReadonlyArray<readonly [string, string]> = [
+  ["'$external'", "$external"],
+  ["a name of 255 characters", "x".repeat(255)],
+];
+
+describe("DatabaseInjector — an unparsed caller's input is refused with one failed row before any connection", () => {
+  function auditedSqlInjector(): { inj: DatabaseInjector; mock: MockAdapter; log: Mock } {
+    vi.mocked(validateHostPort).mockClear();
+    const log = vi.fn();
+    const mock = new MockAdapter({ rows: [] });
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger, {
+      postgresql: mock,
+      mysql: mock,
+    });
+    return { inj, mock, log };
+  }
+
+  async function expectRefusedBeforeLookup(
+    overrides: Partial<DatabaseAction>,
+    message: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    const { inj, mock, log } = auditedSqlInjector();
+    const err = await expectVaultError(
+      () => inj.executeWithSecret(action(overrides), SECRET, policy(), undefined, "secret-1"),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expect(err.message === message).toBe(true);
+    expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+    expect(mock.lastConnect).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toStrictEqual(detail);
+  }
+
+  it.each(REFUSED_QUERIES)(
+    "a postgresql query that is %s: INVALID_DATABASE_CONFIG 'query is required for this engine', one failed row { context, engine, database, error } without host or port, no validateHostPort call, no connect",
+    async (_label, value) => {
+      await expectRefusedBeforeLookup(
+        { query: value as string },
+        "query is required for this engine",
+        {
+          context: "database",
+          engine: "postgresql",
+          database: "app",
+          error: "INVALID_DATABASE_CONFIG",
+        },
+      );
+    },
+  );
+
+  it.each(REFUSED_PARAMS)(
+    "mysql params that are %s: INVALID_DATABASE_CONFIG 'params must be an array of at most 1000 values', one failed row { context, engine, database, error } without host or port, no validateHostPort call, no connect",
+    async (_label, value) => {
+      await expectRefusedBeforeLookup(
+        { engine: "mysql", params: value as unknown[] },
+        "params must be an array of at most 1000 values",
+        { context: "database", engine: "mysql", database: "app", error: "INVALID_DATABASE_CONFIG" },
+      );
+    },
+  );
+
+  it.each(REFUSED_DATABASES)(
+    "a database that is %s: INVALID_DATABASE_CONFIG 'Invalid database name', one failed row { context, engine, error } without database, host or port, no validateHostPort call, no connect",
+    async (_label, value) => {
+      await expectRefusedBeforeLookup({ database: value as string }, "Invalid database name", {
+        context: "database",
+        engine: "postgresql",
+        error: "INVALID_DATABASE_CONFIG",
+      });
+    },
+  );
+
+  it.each(REFUSED_TIMEOUTS)(
+    "a timeout_ms of %s: INVALID_DATABASE_CONFIG 'timeout_ms must be a positive integer up to 300000', one failed row { context, engine, database, error } without host or port, no validateHostPort call, no connect",
+    async (_label, value) => {
+      await expectRefusedBeforeLookup(
+        { timeout_ms: value as number },
+        "timeout_ms must be a positive integer up to 300000",
+        {
+          context: "database",
+          engine: "postgresql",
+          database: "app",
+          error: "INVALID_DATABASE_CONFIG",
+        },
+      );
+    },
+  );
+
+  it("two faults, a postgresql query that is a number and params that are a string: 'query is required for this engine' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, database, error } without host or port, no validateHostPort call, no connect", async () => {
+    await expectRefusedBeforeLookup(
+      { query: 7 as unknown as string, params: "x" as unknown as unknown[] },
+      "query is required for this engine",
+      {
+        context: "database",
+        engine: "postgresql",
+        database: "app",
+        error: "INVALID_DATABASE_CONFIG",
+      },
+    );
+  });
+
+  it("two faults, postgresql params that are a string and an empty database: 'params must be an array of at most 1000 values' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, error } without database, host or port, no validateHostPort call, no connect", async () => {
+    await expectRefusedBeforeLookup(
+      { params: "x" as unknown as unknown[], database: "" },
+      "params must be an array of at most 1000 values",
+      { context: "database", engine: "postgresql", error: "INVALID_DATABASE_CONFIG" },
+    );
+  });
+
+  it.each(ACCEPTED_TIMEOUTS)(
+    "a timeout_ms of %s passes the guard and reaches the adapter as its budget, one successful row",
+    async (_label, overrides, budget) => {
+      const { inj, mock, log } = auditedSqlInjector();
+      await inj.executeWithSecret(action(overrides), SECRET, policy(), undefined, "secret-1");
+      expect(mock.lastConnect?.timeoutMs).toBe(budget);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect((log.mock.calls[0]?.[0] as AuditLogOptions).success).toBe(true);
+    },
+  );
+
+  it.each(ACCEPTED_PARAMS)(
+    "mysql params that are %s pass the guard and reach the adapter as given, one successful row",
+    async (_label, overrides) => {
+      const { inj, mock, log } = auditedSqlInjector();
+      await inj.executeWithSecret(
+        action({ engine: "mysql", ...overrides }),
+        SECRET,
+        policy(),
+        undefined,
+        "secret-1",
+      );
+      expect(mock.lastQuery?.params).toBe(overrides.params);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect((log.mock.calls[0]?.[0] as AuditLogOptions).success).toBe(true);
+    },
+  );
+
+  it.each(ACCEPTED_DATABASES)(
+    "a database of %s passes the guard and reaches the adapter with it, one successful row carrying it",
+    async (_label, value) => {
+      const { inj, mock, log } = auditedSqlInjector();
+      await inj.executeWithSecret(
+        action({ database: value }),
+        SECRET,
+        policy(),
+        undefined,
+        "secret-1",
+      );
+      expect(mock.lastConnect?.database).toBe(value);
+      expect(log).toHaveBeenCalledTimes(1);
+      const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+      expect(row.success).toBe(true);
+      expect(row.detail?.database).toBe(value);
+    },
+  );
+
+  it("a postgresql query of one character passes the guard and reaches the adapter as given, one successful row", async () => {
+    const { inj, mock, log } = auditedSqlInjector();
+    await inj.executeWithSecret(action({ query: "x" }), SECRET, policy(), undefined, "secret-1");
+    expect(mock.lastQuery?.sql).toBe("x");
+    expect(log).toHaveBeenCalledTimes(1);
+    expect((log.mock.calls[0]?.[0] as AuditLogOptions).success).toBe(true);
+  });
+
+  it("a credential without a colon: INVALID_DATABASE_CONFIG \"database secret must be in 'username:password' form\" as today, nothing of the credential in the refusal or the row, one failed row past the lookup with host, port and the TLS opt-out stamp, no connect", async () => {
+    const { inj, mock, log } = auditedSqlInjector();
+    const err = await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          action(),
+          new Uint8Array(Buffer.from(COLONLESS_CREDENTIAL)),
+          policy(),
+          { database: { tls_mode: "disable" } },
+          "secret-1",
+        ),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expectAbsent(err.message, COLONLESS_CREDENTIAL, "the refusal");
+    expectAbsent(JSON.stringify(log.mock.calls), COLONLESS_CREDENTIAL, "the audit calls");
+    expect(err.message).toBe("database secret must be in 'username:password' form");
+    expect(vi.mocked(validateHostPort)).toHaveBeenCalledTimes(1);
+    expect(mock.lastConnect).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toStrictEqual({
+      context: "database",
+      engine: "postgresql",
+      database: "app",
+      host: "8.8.8.8",
+      port: 5432,
+      error: "INVALID_DATABASE_CONFIG",
+      tls_opt_out: true,
     });
   });
 });

@@ -11,12 +11,14 @@
 const IPV6_BIND_UNAVAILABLE: ReadonlySet<string> = new Set(["EAFNOSUPPORT", "EADDRNOTAVAIL"]);
 const CONNECTION_REFUSED: ReadonlySet<string> = new Set(["ECONNREFUSED"]);
 
-/** Every `code` on `err`, down its `cause` chain and across any `errors[]`. */
+/** Every `code` and `details.errno` on `err`, down its `cause` chain and across any `errors[]`. */
 function errnoCodes(err: unknown, seen = new Set<unknown>()): string[] {
   if (typeof err !== "object" || err === null || seen.has(err)) return [];
   seen.add(err);
   const record = err as { code?: unknown; cause?: unknown; errors?: unknown };
   const own = typeof record.code === "string" ? [record.code] : [];
+  const errno = (err as { details?: { errno?: unknown } | null }).details?.errno;
+  if (typeof errno === "string") own.push(errno);
   const nested: unknown[] = Array.isArray(record.errors) ? record.errors : [];
   return [
     ...own,

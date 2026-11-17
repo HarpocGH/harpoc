@@ -6,6 +6,7 @@ Thank you for your interest in contributing to Harpoc! This document provides gu
 
 - Node.js 22+
 - pnpm 10 or 11 — the repository pins `packageManager` (pnpm 10.11.0), which both `pnpm/action-setup` in CI and pnpm's own version management honour, so `npx pnpm` on a pnpm 11 host still runs the pinned version
+- git 2.37 or later to run every git row (a git older than 2.32 skips the git suites; one older than 2.37 skips the two rows that dial a pinned address)
 - On Windows, the Microsoft Visual C++ Redistributable (x64), for the build: turbo's binary imports `vcruntime140.dll`, and without it `pnpm build` ends at once with exit code 3221225781 (`0xC0000135`, a library not found). A desktop Windows usually has it through other software; a bare Windows Server image does not (measured on Windows Server 2025, 2026-11-12: `pnpm install --frozen-lockfile` succeeded, `pnpm build` failed until the redistributable was installed). `node.exe` and the two native addons the built CLI loads (`argon2`, `better-sqlite3`) do not import it (read from their import tables; a run without it is not measured).
 
 Approval for the two native build scripts (`argon2`, `better-sqlite3`) lives in `pnpm-workspace.yaml`, which carries the pnpm 10 (`onlyBuiltDependencies`) and pnpm 11 (`allowBuilds`) forms side by side. A package added later that ships an install script needs a verdict in `allowBuilds`, or pnpm 11 fails the install with `ERR_PNPM_IGNORED_BUILDS`.

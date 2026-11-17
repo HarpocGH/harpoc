@@ -7,13 +7,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
+import { GIT_PIN_MIN_VERSION } from "./git-injector-version.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { validateUrl } from "./url-validator.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
+vi.mock("./git-injector-version.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./git-injector-version.js")>();
+  return {
+    ...actual,
+    readGitVersion: vi.fn<typeof actual.readGitVersion>(async () => ({
+      major: 2,
+      minor: 37,
+      patch: 0,
+    })),
+  };
+});
 vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
   return { ...actual, spawnCaptured: vi.fn() };
@@ -37,7 +49,7 @@ vi.mock("./url-validator.js", async (importOriginal) => {
   };
 });
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const NULL_GIT_CONFIG = process.platform === "win32" ? "NUL" : "/dev/null";
 const SECRET = "git-user:s3cret-token-value";
 const PIN_443 = "-c http.curloptResolve=git.example:443:93.184.216.34,[2606:2800:220:1::1]";
@@ -60,21 +72,6 @@ const OK_RESULT: SpawnCapturedResult = {
 
 const { spawnCaptured: realSpawnCaptured } =
   await vi.importActual<typeof import("./spawn-captured.js")>("./spawn-captured.js");
-
-/** Whether the resolved git is at least `major.minor` (git reads `http.curloptResolve` from 2.37). */
-function gitAtLeast(major: number, minor: number): boolean {
-  if (GIT === null) return false;
-  const version = /(\d+)\.(\d+)/.exec(
-    execFileSync(GIT, ["--version"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000,
-    }),
-  );
-  if (version === null) return false;
-  const [have, sub] = [Number(version[1]), Number(version[2])];
-  return have > major || (have === major && sub >= minor);
-}
 
 /** The first non-option token of a git argv, `-c`'s value skipped. */
 function gitSubcommand(args: string[]): string | undefined {
@@ -115,7 +112,7 @@ const PLANS = [
 const IP_PLANS = PLANS.filter(([operation]) => operation !== "ls-remote");
 
 describe.skipIf(GIT === null)(
-  "git over HTTPS is handed the judged addresses (P-1; skipped where git does not resolve)",
+  "git over HTTPS is handed the judged addresses (P-1; skipped where no supported git resolves)",
   () => {
     const injector = new GitInjector(null);
     const spawnMock = vi.mocked(spawnCaptured);
@@ -390,7 +387,7 @@ describe.skipIf(GIT === null)(
   },
 );
 
-describe.skipIf(!gitAtLeast(2, 37))(
+describe.skipIf(resolveSupportedGit(GIT_PIN_MIN_VERSION) === null)(
   "real git connects to the judged address (skipped where git does not resolve or is older than 2.37, which ignores http.curloptResolve)",
   () => {
     const spawnMock = vi.mocked(spawnCaptured);

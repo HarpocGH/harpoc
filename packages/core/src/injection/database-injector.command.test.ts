@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { ConnectionConfig, DatabaseAction } from "@harpoc/shared";
 import { DEFAULT_DB_TIMEOUT_MS, ErrorCode } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
@@ -13,6 +14,12 @@ import {
   policy,
   redisAction,
 } from "./__fixtures__/database-injector-doubles.js";
+import { validateHostPort } from "./url-validator.js";
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return { ...actual, validateHostPort: vi.fn(actual.validateHostPort) };
+});
 
 // Lazy-driver pin (mirrors the pg mock in database-injector.tls.test.ts):
 // running a non-redis action through the REAL default adapters must never
@@ -236,6 +243,136 @@ describe("DatabaseInjector redis dispatch", () => {
   });
 });
 
+const NON_ARRAY_REDIS_COMMANDS: ReadonlyArray<readonly [string, unknown]> = [
+  ["null", null],
+  ["undefined", undefined],
+  ["a string", "PING"],
+  ["an array-like record", { 0: "SET", 1: "k", 2: "v", length: 3 }],
+  ["an empty array", []],
+  ["an array with a non-string entry", ["ECHO", 1]],
+  ["an array with a hole", Object.assign(new Array<string>(3), { 0: "GET", 2: "k" })],
+];
+
+const NON_INDEX_REDIS_DATABASES: readonly string[] = ["app", "-1"];
+
+const ACCEPTED_REDIS_DATABASES: readonly string[] = ["0", "15"];
+
+const ACCEPTED_REDIS_COMMANDS: ReadonlyArray<readonly [string, string[]]> = [
+  ["one entry", ["PING"]],
+  ["1000 entries", Array.from({ length: 1_000 }, () => "x")],
+  ["one empty string", [""]],
+];
+
+describe("DatabaseInjector — an unparsed caller's redis action is judged before any lookup or client", () => {
+  function auditedRedisInjector(): { inj: DatabaseInjector; cmd: MockCommandAdapter; log: Mock } {
+    vi.mocked(validateHostPort).mockClear();
+    const log = vi.fn();
+    const cmd = new MockCommandAdapter();
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger, {}, { redis: cmd });
+    return { inj, cmd, log };
+  }
+
+  async function expectRefusedBeforeLookup(
+    overrides: Partial<DatabaseAction>,
+    message: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    const { inj, cmd, log } = auditedRedisInjector();
+    const err = await expectVaultError(
+      () => inj.executeWithSecret(redisAction(overrides), SECRET, policy(), undefined, "secret-1"),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expect(err.message === message).toBe(true);
+    expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+    expect(cmd.lastExecute).toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.secretId).toBe("secret-1");
+    expect(row.detail).toStrictEqual(detail);
+  }
+
+  it.each(NON_ARRAY_REDIS_COMMANDS)(
+    "a redis command that is %s: INVALID_DATABASE_CONFIG 'command must be a string array for redis', one failed row { context, engine, database, error } without host or port, no validateHostPort call, no adapter call",
+    async (_label, value) => {
+      await expectRefusedBeforeLookup(
+        { command: value as DatabaseAction["command"] },
+        "command must be a string array for redis",
+        { context: "database", engine: "redis", database: "0", error: "INVALID_DATABASE_CONFIG" },
+      );
+    },
+  );
+
+  it.each(NON_INDEX_REDIS_DATABASES)(
+    "a redis database of '%s': INVALID_DATABASE_CONFIG 'database must be a non-negative integer index for redis', one failed row { context, engine, database, error } without host or port, no validateHostPort call, no adapter call",
+    async (value) => {
+      await expectRefusedBeforeLookup(
+        { database: value },
+        "database must be a non-negative integer index for redis",
+        { context: "database", engine: "redis", database: value, error: "INVALID_DATABASE_CONFIG" },
+      );
+    },
+  );
+
+  it("two faults, a redis command that is a string and a database with a slash: 'command must be a string array for redis' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, error } without database, host or port, no validateHostPort call, no adapter call", async () => {
+    await expectRefusedBeforeLookup(
+      { command: "PING" as unknown as string[], database: "a/b" },
+      "command must be a string array for redis",
+      { context: "database", engine: "redis", error: "INVALID_DATABASE_CONFIG" },
+    );
+  });
+
+  it("a redis database with a slash, which the index check would refuse too: 'Invalid database name' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, error } without database, host or port, no validateHostPort call, no adapter call", async () => {
+    await expectRefusedBeforeLookup({ database: "a/b" }, "Invalid database name", {
+      context: "database",
+      engine: "redis",
+      error: "INVALID_DATABASE_CONFIG",
+    });
+  });
+
+  it("two faults, a redis database of 'app' and a timeout_ms of 0: 'database must be a non-negative integer index for redis' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, database, error } without host or port, no validateHostPort call, no adapter call", async () => {
+    await expectRefusedBeforeLookup(
+      { database: "app", timeout_ms: 0 },
+      "database must be a non-negative integer index for redis",
+      { context: "database", engine: "redis", database: "app", error: "INVALID_DATABASE_CONFIG" },
+    );
+  });
+
+  it.each(ACCEPTED_REDIS_DATABASES)(
+    "a redis database of '%s' passes the guard and reaches the adapter with it, one successful row",
+    async (value) => {
+      const { inj, cmd, log } = auditedRedisInjector();
+      await inj.executeWithSecret(
+        redisAction({ database: value }),
+        SECRET,
+        policy(),
+        undefined,
+        "secret-1",
+      );
+      expect(cmd.lastExecute?.opts.database).toBe(value);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect((log.mock.calls[0]?.[0] as AuditLogOptions).success).toBe(true);
+    },
+  );
+
+  it.each(ACCEPTED_REDIS_COMMANDS)(
+    "a redis command of %s passes the guard and reaches the adapter as given, one successful row",
+    async (_label, value) => {
+      const { inj, cmd, log } = auditedRedisInjector();
+      await inj.executeWithSecret(
+        redisAction({ command: value }),
+        SECRET,
+        policy(),
+        undefined,
+        "secret-1",
+      );
+      expect(cmd.lastExecute?.command).toBe(value);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect((log.mock.calls[0]?.[0] as AuditLogOptions).success).toBe(true);
+    },
+  );
+});
+
 // v1.3 T11: mongodb dispatch mirrors the redis dispatch above, but exercised
 // against the REAL `defaultDbCommandAdapters()` (i.e. no hand-registered mock
 // command adapter) to prove the actual wiring: `defaultDbCommandAdapters()`
@@ -374,6 +511,34 @@ describe("DatabaseInjector mongodb dispatch (Task 11 wiring)", () => {
       });
     },
   );
+
+  it("two faults, a mongodb command that is a string and a database with a slash: 'command must be a document for mongodb' wins, INVALID_DATABASE_CONFIG, one failed row { context, engine, error } without database, host or port, no validateHostPort call, no client", async () => {
+    vi.mocked(validateHostPort).mockClear();
+    const log = vi.fn();
+    const inj = new DatabaseInjector({ log } as unknown as AuditLogger);
+    const err = await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          mongoAction({ command: "ping" as unknown as DatabaseAction["command"], database: "a/b" }),
+          SECRET,
+          policy(),
+          undefined,
+          "secret-1",
+        ),
+      ErrorCode.INVALID_DATABASE_CONFIG,
+    );
+    expect(err.message === "command must be a document for mongodb").toBe(true);
+    expect(vi.mocked(validateHostPort)).not.toHaveBeenCalled();
+    expect(mongoClientCalls).toHaveLength(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+    expect(row.success).toBe(false);
+    expect(row.detail).toStrictEqual({
+      context: "database",
+      engine: "mongodb",
+      error: "INVALID_DATABASE_CONFIG",
+    });
+  });
 
   it("parses username:password and pins the SSRF-validated address for mongodb too", async () => {
     const injector = new DatabaseInjector(null);

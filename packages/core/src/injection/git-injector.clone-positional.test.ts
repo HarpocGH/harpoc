@@ -6,9 +6,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { startGitSmartHttp, startRecorder } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 
 /**
@@ -19,8 +19,8 @@ import { GitInjector } from "./git-injector.js";
  * URL-named destination is an invalid path and git fails before connecting.
  */
 
-const GIT = resolveExecutable("git", controlledPathDirs());
-// Skipped where git does not resolve, and on win32 (see above).
+const GIT = resolveSupportedGit();
+// Skipped where no supported git resolves, and on win32 (see above).
 const describePosixGit = describe.skipIf(GIT === null || process.platform === "win32");
 
 const USER = "vaultuser";

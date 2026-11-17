@@ -3,7 +3,13 @@ import { serve } from "@hono/node-server";
 import type { VaultEngine } from "@harpoc/core";
 import type { CertManager } from "@harpoc/cert-manager";
 import type { OAuthManager } from "@harpoc/oauth-proxy";
-import { assertBindAllowed, buildAllowedHostSet, VaultError, VaultState } from "@harpoc/shared";
+import {
+  assertBindAllowed,
+  buildAllowedHostSet,
+  ErrorCode,
+  VaultError,
+  VaultState,
+} from "@harpoc/shared";
 import { createApp } from "./app.js";
 
 export interface ServerOptions {
@@ -22,10 +28,41 @@ export interface ServerOptions {
   certManager?: CertManager;
   /** Absolute path to the built Web UI; served at /ui when set. */
   uiDir?: string;
+  /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
+  onListenerError?: (err: VaultError) => void;
+}
+
+const LABEL = "REST API";
+
+function tcpAddress(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${String(port)}` : `${host}:${String(port)}`;
+}
+
+function listenRefusal(err: unknown, host: string, port: number): VaultError {
+  const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  const address = tcpAddress(host, port);
+  const message =
+    errno === "EADDRINUSE"
+      ? `${LABEL}: another process is listening on ${address} (EADDRINUSE)`
+      : `${LABEL}: cannot listen on ${address} (${errno ?? "unknown error"})`;
+  return new VaultError(
+    ErrorCode.INVALID_INPUT,
+    message,
+    errno === undefined ? undefined : { errno },
+  );
+}
+
+function listenerFailure(err: unknown, host: string, port: number): VaultError {
+  const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  return new VaultError(
+    ErrorCode.INTERNAL_ERROR,
+    `${LABEL}: the listener on ${tcpAddress(host, port)} failed (${errno ?? "unknown error"})`,
+    errno === undefined ? undefined : { errno },
+  );
 }
 
 export async function startServer(options: ServerOptions): Promise<ReturnType<typeof serve>> {
-  const { engine, port = 3000, hostname = "127.0.0.1" } = options;
+  const { engine, port = 3000, hostname = "127.0.0.1", onListenerError } = options;
 
   if (engine.getState() === VaultState.SEALED) {
     throw VaultError.vaultLocked();
@@ -34,6 +71,9 @@ export async function startServer(options: ServerOptions): Promise<ReturnType<ty
   // A non-loopback bind is refused without an allowed host (R11/D61) — the
   // former warning was the only notice, and a launcher's log pipe swallowed it.
   assertBindAllowed(hostname, options.allowedHosts ?? []);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw VaultError.invalidInput(`${LABEL}: port ${String(port)} is not 0-65535`);
+  }
   const allowedHostSet = buildAllowedHostSet(hostname, options.allowedHosts ?? []);
 
   const app = createApp(engine, { ...options, allowedHostSet });
@@ -44,10 +84,13 @@ export async function startServer(options: ServerOptions): Promise<ReturnType<ty
   // Without this the process died on an unhandled EADDRINUSE — and the start
   // row had already been written for a listener that never came up.
   const boundPort = await new Promise<number>((resolve, reject) => {
-    server.once("error", reject);
+    const refuse = (err: Error): void => reject(listenRefusal(err, hostname, port));
+    server.once("error", refuse);
     server.once("listening", () => {
-      server.removeListener("error", reject);
-      resolve((server.address() as AddressInfo).port);
+      server.removeListener("error", refuse);
+      const bound = (server.address() as AddressInfo).port;
+      server.on("error", (err: Error) => onListenerError?.(listenerFailure(err, hostname, bound)));
+      resolve(bound);
     });
   });
 

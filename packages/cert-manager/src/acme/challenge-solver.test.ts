@@ -131,15 +131,15 @@ describe("Http01Solver", () => {
     }
   });
 
-  it("removes the start-time error listener once listening, so a later server error cannot corrupt stop() or leak the socket", async () => {
+  it("keeps exactly one error listener once listening: a later server error's emit throws nothing and stop() still closes the server, so a fetch is refused", async () => {
     solver = new Http01Solver();
     const port = await solver.start(TOKEN, KEY_AUTHORIZATION, 0);
     const server = (solver as unknown as { server: Server }).server;
-    expect(server.listenerCount("error")).toBe(0);
-    // With no listener left, EventEmitter throws synchronously from emit()
-    // for an unhandled "error" event; if the start-time handler were still
-    // attached (the bug), this emit would be swallowed instead of throwing.
-    expect(() => server.emit("error", new Error("simulated post-listen error"))).toThrow();
+    expect(server.listenerCount("error")).toBe(1);
+    // A no-op listener stays: without one, emit() throws; were the start-time
+    // handler still attached (the bug), the emit would null the solver's server
+    // and stop() would close nothing.
+    expect(() => server.emit("error", new Error("simulated post-listen error"))).not.toThrow();
     await solver.stop();
     await expect(
       fetch(challengeUrl(port, `/.well-known/acme-challenge/${TOKEN}`)),

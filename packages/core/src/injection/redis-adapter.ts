@@ -35,18 +35,17 @@ export class RedisAdapter implements DbCommandAdapter {
     // actually pinned to a different dial address.
     const pinned = opts.address !== opts.host;
     const servername = opts.servername ?? (pinned ? opts.host : undefined);
-    // `timeoutMs` is documented (constants.ts) as a connect+query budget —
-    // PostgresAdapter mirrors it onto statement_timeout/query_timeout and
-    // MysqlAdapter passes it as the per-query `timeout`, each in addition to
-    // their connect-phase timeout. `connectTimeout` alone only bounds the
-    // handshake: a blocking command (BLPOP key 0, WAIT, XREAD BLOCK 0,
-    // SUBSCRIBE, DEBUG SLEEP — the schema allows any string[] command, no
-    // denylist) would otherwise hang `sendCommand` forever, and the
-    // `finally`/`close()` below would never run. `socketTimeout` closes the
-    // socket once the same budget elapses mid-command, which rejects the
-    // pending `sendCommand` instead. `reconnectStrategy: false`: this client
-    // runs one command and is closed, so a dropped socket has nothing to
-    // reconnect for — node-redis's default strategy would retry forever.
+    // `timeoutMs` is documented (constants.ts) as a connect+query budget.
+    // `connectTimeout` bounds the dial until the socket connects;
+    // `socketTimeout` is an idle bound that every byte resets, so a server
+    // that trickles its `HELLO` or its reply outlives it. One deadline below
+    // bounds the whole use — `connect()`, the handshake and the command. It is
+    // armed after `connect()` starts, so a TCP connect that never completes
+    // keeps the driver's own timeout. The client is `destroy()`ed: `close()`
+    // waits for a pending command, which a silent or trickling server never
+    // answers. `reconnectStrategy: false`: this client runs one command, so a
+    // dropped socket has nothing to reconnect for — node-redis's default
+    // strategy would retry forever.
     const socket =
       opts.tls === false
         ? {
@@ -89,9 +88,16 @@ export class RedisAdapter implements DbCommandAdapter {
     // needs only a listener.
     client.on("error", () => {});
 
-    await client.connect();
+    let deadline: NodeJS.Timeout | undefined;
     try {
-      const reply = await client.sendCommand(command as string[]);
+      const reason = new Error(`command did not complete within ${String(opts.timeoutMs)} ms`);
+      const running = run(client, command as string[]);
+      const expired = new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => {
+          reject(reason);
+        }, opts.timeoutMs);
+      });
+      const reply = await Promise.race([running, expired]);
       return {
         rows: [reply],
         fields: [{ name: "reply" }],
@@ -99,11 +105,16 @@ export class RedisAdapter implements DbCommandAdapter {
         command: undefined,
       };
     } finally {
-      try {
-        await client.close();
-      } catch {
-        // best-effort close
-      }
+      clearTimeout(deadline);
+      client.destroy();
     }
   }
+}
+
+async function run(
+  client: { connect(): Promise<unknown>; sendCommand(args: string[]): Promise<unknown> },
+  command: string[],
+): Promise<unknown> {
+  await client.connect();
+  return client.sendCommand(command);
 }

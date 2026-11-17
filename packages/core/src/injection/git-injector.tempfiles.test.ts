@@ -7,9 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitOperation, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
@@ -43,7 +44,7 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
 // Skipped where git (and, for the SSH transport, the native ssh client) does not resolve.
 const describeGit = describe.skipIf(GIT === null);

@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +20,7 @@ import { AgentSocketServer } from "./agent-socket-server.js";
 import type { AgentSocketEngine, AgentSocketServerOptions } from "./agent-socket-server.js";
 import { loadPrivateKey } from "./key-loader.js";
 import { SshReader, writeByte, writeUint32 } from "./ssh-wire.js";
+import { prepareUnixSocketPath } from "./unix-socket.js";
 import { agentSocketAccepts } from "../__fixtures__/agent-socket.js";
 import {
   bindSession,
@@ -25,7 +34,7 @@ import {
 import type { AgentClient } from "../__fixtures__/agent-client.js";
 import { restrictWindowsPipeToAccount } from "../../session/owner-only.js";
 import { system32Path } from "../../win32-paths.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 // A spy around the real DACL step: the Windows rows observe it and make it fail once.
 vi.mock("../../session/owner-only.js", async (importOriginal) => {
@@ -35,6 +44,19 @@ vi.mock("../../session/owner-only.js", async (importOriginal) => {
     restrictWindowsPipeToAccount: vi.fn(actual.restrictWindowsPipeToAccount),
   };
 });
+
+vi.mock("./unix-socket.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./unix-socket.js")>();
+  return { ...actual, prepareUnixSocketPath: vi.fn(actual.prepareUnixSocketPath) };
+});
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, chmodSync: vi.fn(actual.chmodSync), rmSync: vi.fn(actual.rmSync) };
+});
+
+const REAL_PLATFORM = process.platform;
+const RM_ERROR_TEXT = "EACCES: permission denied, rm of the socket file";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const blobOf = (name: string): Buffer =>
@@ -107,6 +129,24 @@ async function connect(path: string): Promise<AgentClient> {
   const client = await connectAgent(path);
   clients.push(client);
   return client;
+}
+
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
+
+function failNextModeChange(path: string): void {
+  vi.mocked(chmodSync).mockImplementationOnce(() => {
+    throw Object.assign(new Error(`EPERM: operation not permitted, chmod '${path}'`), {
+      code: "EPERM",
+    });
+  });
+}
+
+function failNextSocketRemoval(): void {
+  vi.mocked(rmSync).mockImplementationOnce(() => {
+    throw Object.assign(new Error(RM_ERROR_TEXT), { code: "EACCES" });
+  });
 }
 
 beforeEach(() => {
@@ -473,6 +513,24 @@ describe("AgentSocketServer: connection bounds", () => {
   });
 });
 
+describe("AgentSocketServer: a thrown value with no code", () => {
+  afterEach(() => {
+    stubPlatform(REAL_PLATFORM);
+    vi.mocked(prepareUnixSocketPath).mockReset();
+  });
+
+  it("a ladder that rejects with null is INVALID_INPUT naming the path (unknown error), and nothing is recorded (the platform stubbed to linux)", async () => {
+    stubPlatform("linux");
+    const socketPath = socketPathFor("consumer");
+    vi.mocked(prepareUnixSocketPath).mockRejectedValueOnce(null);
+
+    const err = await expectVaultError(() => start({ socketPath }), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(`ssh-agent socket: cannot listen on ${socketPath} (unknown error)`);
+    expect(prepareUnixSocketPath).toHaveBeenLastCalledWith(socketPath, "ssh-agent socket");
+    expect(double.auditServerStart).not.toHaveBeenCalled();
+  });
+});
+
 describe.runIf(process.platform === "win32")("AgentSocketServer on Windows", () => {
   it("refuses a path that is not a named pipe before anything binds or is recorded", async () => {
     const err = await expectVaultError(
@@ -603,6 +661,11 @@ describe.runIf(process.platform === "win32")("AgentSocketServer on Windows", () 
 // The Unix-socket ladder (prepareUnixSocketPath, its own suite) and the 0660 mode exist
 // on POSIX only: Windows serves a named pipe, whose access list is B7's (DB-7).
 describe.skipIf(process.platform === "win32")("AgentSocketServer on a Unix socket (POSIX)", () => {
+  afterEach(() => {
+    vi.mocked(chmodSync).mockReset();
+    vi.mocked(rmSync).mockReset();
+  });
+
   it("binds mode 0660 and removes the socket file at stop()", async () => {
     const server = await start();
 
@@ -643,5 +706,41 @@ describe.skipIf(process.platform === "win32")("AgentSocketServer on a Unix socke
     const err = await expectVaultError(() => start({ socketPath }), ErrorCode.INVALID_INPUT);
     expect(err.message).toBe(`ssh-agent socket: cannot listen on ${socketPath} (ENOTDIR)`);
     expect(double.auditServerStart).not.toHaveBeenCalled();
+  });
+
+  it("a failed mode change (chmod refused EPERM) is INVALID_INPUT naming the path and the errno, writes no row, and stops listening", async () => {
+    const socketPath = socketPathFor("consumer");
+    failNextModeChange(socketPath);
+
+    const err = await expectVaultError(() => start({ socketPath }), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(`ssh-agent socket: cannot listen on ${socketPath} (EPERM)`);
+    expect(chmodSync).toHaveBeenCalledWith(socketPath, 0o660);
+    expect(double.auditServerStart).not.toHaveBeenCalled();
+    expect(await agentSocketAccepts(socketPath)).toBe(false);
+  });
+
+  it("a failed mode change whose undo cannot remove the socket file still refuses INVALID_INPUT with the chmod errno, never the removal's error", async () => {
+    const socketPath = socketPathFor("consumer");
+    failNextModeChange(socketPath);
+    failNextSocketRemoval();
+
+    const err = await expectVaultError(() => start({ socketPath }), ErrorCode.INVALID_INPUT);
+    expectAbsent(err.message, RM_ERROR_TEXT);
+    expect(err.message).toBe(`ssh-agent socket: cannot listen on ${socketPath} (EPERM)`);
+    expect(rmSync).toHaveBeenCalledWith(socketPath, { force: true });
+    expect(double.auditServerStart).not.toHaveBeenCalled();
+    expect(await agentSocketAccepts(socketPath)).toBe(false);
+  });
+
+  it("an unwritable start row whose undo cannot remove the socket file still refuses with the row's VAULT_LOCKED", async () => {
+    double.auditServerStart.mockImplementationOnce(() => {
+      throw VaultError.vaultLocked();
+    });
+    const socketPath = socketPathFor("consumer");
+    failNextSocketRemoval();
+
+    await expectVaultError(() => start({ socketPath }), ErrorCode.VAULT_LOCKED);
+    expect(rmSync).toHaveBeenCalledWith(socketPath, { force: true });
+    expect(await agentSocketAccepts(socketPath)).toBe(false);
   });
 });

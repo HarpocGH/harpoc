@@ -17,8 +17,9 @@ import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/share
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -41,7 +42,7 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
 // Skipped where git (and, for the SSH row, the native ssh client) does not resolve.
 const describeGit = describe.skipIf(GIT === null);

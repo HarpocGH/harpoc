@@ -25,8 +25,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -49,9 +50,9 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
-// Skipped where git does not resolve (the command allowlist resolves it before the SSH
+// Skipped where no supported git resolves (the command allowlist resolves it before the SSH
 // transport is entered); blocks 2 and 3 also need the native ssh client to resolve.
 const describeGit = describe.skipIf(GIT === null);
 const describeGitSsh = describe.skipIf(GIT === null || SSH === null);

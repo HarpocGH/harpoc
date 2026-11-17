@@ -1,12 +1,23 @@
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 
+vi.mock("./git-injector-version.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./git-injector-version.js")>();
+  return {
+    ...actual,
+    readGitVersion: vi.fn<typeof actual.readGitVersion>(async () => ({
+      major: 2,
+      minor: 37,
+      patch: 0,
+    })),
+  };
+});
 vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
   return { ...actual, spawnCaptured: vi.fn() };
@@ -27,7 +38,7 @@ vi.mock("./url-validator.js", async (importOriginal) => {
   };
 });
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 
 const OK_RESULT: SpawnCapturedResult = {
   exit_code: 0,

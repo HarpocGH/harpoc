@@ -17,6 +17,7 @@ import {
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { assertTierAvailable, tierRequired } from "./helpers/platform-tiers.js";
+import { resolveSupportedGit } from "./helpers/supported-git.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
 /**
@@ -155,7 +156,7 @@ describe.skipIf(!posixWithIsolation)("network isolation — real kernel (Linux/m
 // mechanism too, while sftp's connect refusal is thrown after the spawn, so its
 // row is the engine's refusal row: the flags, no mechanism, and the error
 // SSH_CONNECT_FAILED either way.
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveExecutable("ssh", controlledPathDirs());
 const SFTP = resolveExecutable("sftp", controlledPathDirs());
 
@@ -232,7 +233,7 @@ describe.skipIf(!posixWithIsolation)(
       // Every leg that exports the ssh-live tier ships the three clients.
       if ((GIT === null || SSH === null || SFTP === null) && tierRequired("ssh-live")) {
         throw new Error(
-          'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but git, ssh or sftp is unresolvable',
+          'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but a supported git, ssh or sftp is unresolvable',
         );
       }
       listener = createTcpServer((socket) => {

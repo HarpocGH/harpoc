@@ -20,12 +20,13 @@ function socketAccepts(path: string): Promise<boolean> {
 /**
  * The POSIX ladder ahead of a Unix-socket bind, shared by the egress proxy's
  * `listenSocket` and `AgentSocketServer` (lifted from the proxy in B3): a path
- * over `platform`'s `maxUnixSocketPathBytes` (107; darwin 103) is refused
- * naming its length, a path that exists and is not a socket is refused and
- * left, a socket something accepts on is refused, and a stale one — nothing
- * accepts — is unlinked so the bind can take its place. Every refusal is
- * `INVALID_INPUT` prefixed by `label`; the caller refuses Windows and sets the
- * mode after its bind.
+ * over `platform`'s `maxUnixSocketPathBytes` (107; 103 on darwin and the BSDs)
+ * is refused naming its length, a path that exists and is not a socket is
+ * refused and left, a socket something accepts on is refused, and a stale one
+ * — nothing accepts — is unlinked so the bind can take its place. Every refusal
+ * is `INVALID_INPUT` prefixed by `label`, and an error of the `lstat`, the probe
+ * or the `unlink` is rethrown for the caller to code; the caller refuses Windows
+ * and sets the mode after its bind.
  */
 export async function prepareUnixSocketPath(
   path: string,

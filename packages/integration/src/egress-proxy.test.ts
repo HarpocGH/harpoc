@@ -16,6 +16,7 @@ import {
   startCliServerOnFreePort,
 } from "./helpers/spawn-cli.js";
 import type { CliServer } from "./helpers/spawn-cli.js";
+import { resolveSupportedGit } from "./helpers/supported-git.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
 /**
@@ -32,7 +33,7 @@ import { expectAbsent } from "@harpoc/test-utils";
  * and audited. The two-UID exposure rows through the proxy are B6's.
  */
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit([2, 31]);
 const CURL = resolveExecutable("curl", controlledPathDirs());
 const PASSWORD = "egress-proxy-master-pw-1";
 const ARGON2_TIMEOUT_MS = 110_000;
@@ -84,17 +85,18 @@ function rawGet(
   });
 }
 
-// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// A leg that exports the ssh-live tier ships git as well (TM-11): where no supported git resolves
 // on such a leg, this guard fails the file instead of letting the suite below skip silently.
 it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
   if (GIT === null && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no supported git resolves',
     );
   }
 });
 
-// Skipped where git does not resolve; the proxy's TCP listener runs on every platform.
+// Skipped where no git 2.31 or later resolves, the proxy recipe's floor for the consumer's git; the
+// proxy's TCP listener runs on every platform.
 describe.skipIf(GIT === null)(
   "egress proxy, rewrite mode, end to end (built CLI, real git)",
   () => {

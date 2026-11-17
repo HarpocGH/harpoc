@@ -16,9 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -45,19 +46,19 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
 // Skipped where git (and, for the SSH transport, the native ssh client) does not resolve.
 const describeGit = describe.skipIf(GIT === null);
 const describeGitSsh = describe.skipIf(GIT === null || SSH === null);
 
-// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// A leg that exports the ssh-live tier ships git as well (TM-11): where no supported git resolves
 // on such a leg, this guard fails the file instead of letting the HTTPS, H6 and isolation
 // suites below skip silently.
 it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
   if (GIT === null && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no supported git resolves',
     );
   }
 });

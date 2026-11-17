@@ -12,7 +12,7 @@ import type { Mock } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -31,8 +31,8 @@ vi.mock("./spawn-captured.js", async (importOriginal) => {
   return { ...actual, spawnCaptured: vi.fn() };
 });
 
-const GIT = resolveExecutable("git", controlledPathDirs());
-// Skipped where git does not resolve: the command allowlist resolves it before ssh.
+const GIT = resolveSupportedGit();
+// Skipped where no supported git resolves: the command allowlist resolves it before ssh.
 const describeGit = describe.skipIf(GIT === null);
 
 const ATTRIBUTION: AuditAttribution = {

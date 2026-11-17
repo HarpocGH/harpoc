@@ -11,7 +11,13 @@
 export const SERVER_TRANSPORTS = ["stdio", "http", "rest", "proxy", "ssh-agent"] as const;
 
 /** Every reason a Harpoc listener stops. */
-export const SERVER_STOP_TRIGGERS = ["SIGINT", "SIGTERM", "transport_closed"] as const;
+export const SERVER_STOP_TRIGGERS = [
+  "SIGINT",
+  "SIGTERM",
+  "transport_closed",
+  "start_failed",
+  "listener_failed",
+] as const;
 
 export type ServerTransport = (typeof SERVER_TRANSPORTS)[number];
 export type ServerStopTrigger = (typeof SERVER_STOP_TRIGGERS)[number];

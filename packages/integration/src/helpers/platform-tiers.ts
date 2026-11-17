@@ -24,8 +24,9 @@
  *    live probe gates the enforcement describe.
  *  - `ssh-live` — every leg; it covers git as well (TM-11, 2026-10): every
  *    leg that exports it ships git, so the integration git suites —
- *    `git-context`, `git-hooks`, `egress-proxy` — fail instead of skipping
- *    where git does not resolve.
+ *    `git-context`, `git-fetch`, `git-hooks`, `git-ls-remote`,
+ *    `network-isolation`, `egress-proxy`, `egress-proxy-connect` — fail
+ *    instead of skipping where no supported git resolves.
  *  - `two-uid` — Linux (the ubuntu legs and the dev container): the users
  *    named by HARPOC_TWO_UID_VAULT_USER / HARPOC_TWO_UID_AGENT_USER exist and
  *    `sudo -n -u` runs the built CLI as each (`two-identity.test.ts`).

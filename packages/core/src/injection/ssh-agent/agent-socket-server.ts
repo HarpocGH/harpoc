@@ -67,7 +67,7 @@ function internalAgentSocketError(): VaultError {
 /** A bind failure as a code, never node's text (hard rule 9). */
 function bindRefusal(err: unknown, path: string): VaultError {
   if (err instanceof VaultError) return err;
-  const code = (err as NodeJS.ErrnoException).code;
+  const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
   if (code === "EADDRINUSE") {
     return VaultError.invalidInput(`${LABEL}: another process is listening on ${path}`);
   }
@@ -131,7 +131,8 @@ export class AgentSocketServer {
       server.once("error", refuse);
       server.listen(socketPath, () => {
         server.removeListener("error", refuse);
-        // An accept error after the bind (EMFILE) drops that connection; the listener stays.
+        // No accept error reaches this listener today; it keeps a later one from ending
+        // the process.
         server.on("error", () => undefined);
         resolve();
       });
@@ -140,14 +141,14 @@ export class AgentSocketServer {
     try {
       if (posix) chmodSync(socketPath, 0o660);
     } catch (err) {
-      await instance.stop();
+      await instance.stop().catch(() => undefined);
       throw bindRefusal(err, socketPath);
     }
     if (!posix && options.win32ConsumerSid !== undefined) {
       try {
         await restrictWindowsPipeToAccount(socketPath, options.win32ConsumerSid);
       } catch {
-        await instance.stop();
+        await instance.stop().catch(() => undefined);
         throw VaultError.invalidInput(
           `${LABEL}: the access list of ${socketPath} could not be set to the consumer's account`,
         );
@@ -156,7 +157,7 @@ export class AgentSocketServer {
     try {
       engine.auditServerStart({ transport: "ssh-agent", tokenless: true, consumer });
     } catch (err) {
-      await instance.stop();
+      await instance.stop().catch(() => undefined);
       throw err;
     }
     instance.release(provider, idleTimeoutMs);

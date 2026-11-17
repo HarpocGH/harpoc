@@ -2,8 +2,9 @@ import { delimiter } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { system32Path } from "../win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -22,9 +23,9 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
-// Skipped where git does not resolve; the SSH case below also needs the native ssh client.
+// Skipped where no supported git resolves; the SSH case below also needs the native ssh client.
 const describeGit = describe.skipIf(GIT === null);
 
 const SECRET = new Uint8Array(Buffer.from("ghp_testtoken"));

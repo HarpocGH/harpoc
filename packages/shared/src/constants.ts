@@ -133,8 +133,8 @@ export const VAULT_AUDIT_ENABLED = true;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000; // 30 seconds
 export const MAX_HTTP_RESPONSE_BYTES = 4_194_304; // 4 MiB — equals core's MAX_STRUCTURAL_CHARS, so a capped body never skips the structural redaction pass
 export const MAX_REQUEST_BODY_BYTES = 4_194_304; // 4 MiB — the REST and MCP listeners' request-body cap (P1F-7, 2026-09-23)
-export const MAX_UNIX_SOCKET_PATH_BYTES = 107; // unix(7): Linux's sun_path is 108 bytes, the terminating NUL included — maxUnixSocketPathBytes's bound for every platform string but darwin (RA-6, X-3)
-export const MAX_UNIX_SOCKET_PATH_BYTES_DARWIN = 103; // unix(4) on darwin: sun_path is 104 bytes, the terminating NUL included
+export const MAX_UNIX_SOCKET_PATH_BYTES = 107; // unix(7): Linux's sun_path is 108 bytes, the terminating NUL included — maxUnixSocketPathBytes's bound for every platform string but darwin and the three BSDs (RA-6, X-3)
+export const MAX_UNIX_SOCKET_PATH_BYTES_DARWIN = 103; // unix(4) on darwin, FreeBSD, OpenBSD and NetBSD: sun_path is 104 bytes, the terminating NUL included
 
 // -- Process execution / use_secret defaults ---------------------------------
 

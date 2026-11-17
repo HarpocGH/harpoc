@@ -11,7 +11,7 @@ import {
   VAULT_DIR_NAME,
   SESSION_FILE_NAME,
 } from "@harpoc/shared";
-import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
+import type { ServerStopTrigger, ServerTransport, VaultError } from "@harpoc/shared";
 import { createBridgeServer, restClientFromTokenFile } from "./bridge.js";
 import {
   DEFAULT_MCP_HTTP_PORT,
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
 
   // The stop row mirrors the start row (R4/D67). A sealed vault cannot take
   // it, and a stop that cannot be recorded must not block the stop.
-  const shutdown = async (trigger: ServerStopTrigger): Promise<void> => {
+  const shutdown = async (trigger: ServerStopTrigger, code = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
@@ -249,9 +249,20 @@ async function main(): Promise<void> {
     } catch {
       // Best-effort on the sealed path.
     }
-    await close();
-    await engine.destroy();
-    process.exit(0);
+    if (code === 0) {
+      await close();
+      await engine.destroy();
+    } else {
+      await close().catch(() => undefined);
+      await engine.destroy().catch(() => undefined);
+    }
+    process.exit(code);
+  };
+
+  const failStop = (err: VaultError): void => {
+    if (shuttingDown) return;
+    process.stderr.write(`Fatal: ${err.message}\n`);
+    void shutdown("listener_failed", 1);
   };
 
   if (values.http) {
@@ -260,6 +271,7 @@ async function main(): Promise<void> {
       port,
       host,
       allowedHosts: parsedHosts.hosts,
+      onListenerError: failStop,
     });
     close = httpServer.close;
     transport = "http";

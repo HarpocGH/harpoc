@@ -1,3 +1,4 @@
+import { ErrorCode, VaultError } from "@harpoc/shared";
 import { describe, expect, it } from "vitest";
 import { isConnectionRefused, isIpv6BindUnavailable } from "./skip-reasons.js";
 
@@ -42,6 +43,24 @@ describe("isIpv6BindUnavailable (D7)", () => {
 
   it("is true for a wrapped bind failure whose cause carries EADDRNOTAVAIL", () => {
     expect(isIpv6BindUnavailable(wrapped(errno("EADDRNOTAVAIL")))).toBe(true);
+  });
+
+  it("is true for a coded refusal whose `details.errno` is `EADDRNOTAVAIL`", () => {
+    const refusal = new VaultError(
+      ErrorCode.INVALID_INPUT,
+      "MCP Streamable HTTP: cannot listen on [::]:0 (EADDRNOTAVAIL)",
+      { errno: "EADDRNOTAVAIL" },
+    );
+    expect(isIpv6BindUnavailable(refusal)).toBe(true);
+  });
+
+  it("false for `details.errno` `EADDRINUSE`", () => {
+    const refusal = new VaultError(
+      ErrorCode.INVALID_INPUT,
+      "MCP Streamable HTTP: another process is listening on [::]:0 (EADDRINUSE)",
+      { errno: "EADDRINUSE" },
+    );
+    expect(isIpv6BindUnavailable(refusal)).toBe(false);
   });
 
   it("is true for an AggregateError carrying EAFNOSUPPORT beside another code", () => {

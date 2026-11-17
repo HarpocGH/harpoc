@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import type { GitAction, GitOperation } from "@harpoc/shared";
-import { controlledPathDirs, resolveExecutable } from "@harpoc/core";
 import { DirectClient } from "@harpoc/sdk";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
 import type { TestVault } from "./helpers/engine-factory.js";
 import { tierRequired } from "./helpers/platform-tiers.js";
+import { resolveSupportedGit } from "./helpers/supported-git.js";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
@@ -24,16 +24,16 @@ import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 const PASSWORD = "integration-test-pw";
 const GIT_SECRET = "x-access-token:ghp_git-secret-abcd";
 const TOKEN_FRAGMENT = "ghp_git-secret";
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 
 const describeGit = describe.skipIf(GIT === null);
 
-// A leg that exports the ssh-live tier ships git as well (TM-11): where git does not resolve
+// A leg that exports the ssh-live tier ships git as well (TM-11): where no supported git resolves
 // on such a leg, this guard fails the file instead of letting the suite below skip silently.
 it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
   if (GIT === null && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no supported git resolves',
     );
   }
 });

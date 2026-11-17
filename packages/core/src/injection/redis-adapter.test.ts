@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import type { DbConnectOptions } from "./db-adapters.js";
 import { RedisAdapter } from "./redis-adapter.js";
@@ -11,37 +12,65 @@ import { RedisAdapter } from "./redis-adapter.js";
 interface FakeClientBehavior {
   sendCommandResult?: unknown;
   sendCommandError?: Error;
+  sendCommandHangs?: boolean;
   connectError?: Error;
-  closeError?: Error;
+  connectHangs?: boolean;
+  connectTimeoutError?: Error;
 }
 
 interface FakeClient {
-  on: ReturnType<typeof vi.fn>;
-  connect: ReturnType<typeof vi.fn>;
-  sendCommand: ReturnType<typeof vi.fn>;
-  close: ReturnType<typeof vi.fn>;
+  on: Mock;
+  connect: Mock;
+  sendCommand: Mock;
+  close: Mock;
+  destroy: Mock;
 }
 
 const createClientCalls: unknown[] = [];
 let behavior: FakeClientBehavior = {};
 let lastClient: FakeClient | undefined;
+let connectIssued: () => void = () => undefined;
+let commandIssued: () => void = () => undefined;
 
 vi.mock("redis", () => ({
   createClient: vi.fn((cfg: unknown) => {
     createClientCalls.push(cfg);
+    let pending = false;
     const client: FakeClient = {
       on: vi.fn(() => client),
-      connect: vi.fn(() =>
-        behavior.connectError ? Promise.reject(behavior.connectError) : Promise.resolve(client),
-      ),
-      sendCommand: vi.fn(() =>
-        behavior.sendCommandError
+      connect: vi.fn(() => {
+        connectIssued();
+        if (behavior.connectHangs) {
+          pending = true;
+          return new Promise(() => undefined);
+        }
+        const timedOut = behavior.connectTimeoutError;
+        if (timedOut) {
+          return new Promise((_resolve, reject) => {
+            setTimeout(
+              () => {
+                reject(timedOut);
+              },
+              (cfg as RedisClientConfig).socket.connectTimeout,
+            );
+          });
+        }
+        return behavior.connectError
+          ? Promise.reject(behavior.connectError)
+          : Promise.resolve(client);
+      }),
+      sendCommand: vi.fn(() => {
+        commandIssued();
+        if (behavior.sendCommandHangs) {
+          pending = true;
+          return new Promise(() => undefined);
+        }
+        return behavior.sendCommandError
           ? Promise.reject(behavior.sendCommandError)
-          : Promise.resolve(behavior.sendCommandResult ?? "PONG"),
-      ),
-      close: vi.fn(() =>
-        behavior.closeError ? Promise.reject(behavior.closeError) : Promise.resolve(undefined),
-      ),
+          : Promise.resolve(behavior.sendCommandResult ?? "PONG");
+      }),
+      close: vi.fn(() => (pending ? new Promise(() => undefined) : Promise.resolve(undefined))),
+      destroy: vi.fn(),
     };
     lastClient = client;
     return client;
@@ -82,10 +111,34 @@ function opts(overrides: Partial<DbConnectOptions> = {}): DbConnectOptions {
   };
 }
 
+function flushed(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+function nextConnect(): Promise<void> {
+  return new Promise((resolve) => {
+    connectIssued = resolve;
+  });
+}
+
+function nextCommand(): Promise<void> {
+  return new Promise((resolve) => {
+    commandIssued = resolve;
+  });
+}
+
 beforeEach(() => {
   createClientCalls.length = 0;
   behavior = {};
   lastClient = undefined;
+  connectIssued = () => undefined;
+  commandIssued = () => undefined;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("RedisAdapter connection config (SSRF pinning + TLS identity, spec §10.2)", () => {
@@ -102,14 +155,11 @@ describe("RedisAdapter connection config (SSRF pinning + TLS identity, spec §10
     expect(cfg.socket.socketTimeout).toBe(1000);
   });
 
-  // Review finding (Important): timeoutMs is documented (constants.ts) as a
-  // connect+query budget, mirroring PostgresAdapter's statement_timeout and
-  // MysqlAdapter's per-query timeout. Without socketTimeout, a blocking
-  // command (BLPOP key 0, WAIT, XREAD BLOCK 0, SUBSCRIBE, DEBUG SLEEP — the
-  // schema allows any string[] command, no denylist) hangs sendCommand
-  // forever and the finally/close() is never reached: an agent-triggerable
-  // hang of the vault process.
-  it("bounds command execution with socketTimeout, not just the connect handshake", async () => {
+  // timeoutMs is documented (constants.ts) as a connect+query budget. One
+  // deadline bounds the whole use (the deadline rows below); connectTimeout,
+  // the dial's bound, and socketTimeout, the idle bound, stay at the same
+  // budget beside it.
+  it("keeps connectTimeout, the dial's bound, and socketTimeout, the idle bound, at the budget beside the deadline", async () => {
     await new RedisAdapter().execute(opts({ timeoutMs: 4242 }), ["BLPOP", "key", "0"]);
     const cfg = createClientCalls[0] as RedisClientConfig;
     expect(cfg.socket.connectTimeout).toBe(4242);
@@ -235,15 +285,15 @@ describe("RedisAdapter command execution", () => {
     expect(res.rowCount).toBe(1);
   });
 
-  it("closes the client after a successful command", async () => {
+  it("destroys the client after a successful command", async () => {
     await new RedisAdapter().execute(opts(), ["PING"]);
-    expect(lastClient?.close).toHaveBeenCalledTimes(1);
+    expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
   });
 
-  it("closes the client even when the command rejects, and propagates the error", async () => {
+  it("destroys the client even when the command rejects, and propagates the error", async () => {
     behavior.sendCommandError = new Error("boom");
     await expect(new RedisAdapter().execute(opts(), ["PING"])).rejects.toThrow("boom");
-    expect(lastClient?.close).toHaveBeenCalledTimes(1);
+    expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("propagates a connect failure without ever calling sendCommand", async () => {
@@ -252,25 +302,132 @@ describe("RedisAdapter command execution", () => {
     expect(lastClient?.sendCommand).not.toHaveBeenCalled();
   });
 
-  it("a close failure does not mask the original command error", async () => {
-    behavior.sendCommandError = new Error("boom");
-    behavior.closeError = new Error("close failed");
-    await expect(new RedisAdapter().execute(opts(), ["PING"])).rejects.toThrow("boom");
-  });
-
-  // socketTimeout firing mid-command (e.g. a blocking BLPOP that outlives
-  // opts.timeoutMs) surfaces to node-redis callers as a sendCommand
-  // rejection, not a hang — the fake models that contract directly since a
-  // fake socket cannot fire a real timer. What matters is that execute()
-  // rejects (mapped to DB_QUERY_FAILED by the injector) and close() still
-  // runs, rather than sendCommand's promise staying pending forever.
-  it("a socket-timeout rejection from sendCommand still closes the client and propagates", async () => {
+  // A sendCommand rejection — here node-redis's SocketTimeoutError, raised
+  // when an idle read outlives socketTimeout — propagates as it is (mapped to
+  // DB_QUERY_FAILED by the injector) and the client is still destroyed; the
+  // fake models the rejection directly since a fake socket cannot fire a
+  // real timer.
+  it("a socket-timeout rejection from sendCommand still destroys the client and propagates", async () => {
     const timeoutError = new Error("Socket timeout");
     timeoutError.name = "SocketTimeoutError";
     behavior.sendCommandError = timeoutError;
     await expect(
       new RedisAdapter().execute(opts({ timeoutMs: 50 }), ["BLPOP", "key", "0"]),
     ).rejects.toThrow("Socket timeout");
-    expect(lastClient?.close).toHaveBeenCalledTimes(1);
+    expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("RedisAdapter one deadline over the whole use, the client destroyed", () => {
+  let unhandled = 0;
+  const countUnhandled = (): void => {
+    unhandled += 1;
+  };
+
+  beforeEach(() => {
+    unhandled = 0;
+  });
+
+  afterEach(() => {
+    process.off("unhandledRejection", countUnhandled);
+  });
+
+  it("a connect that never settles ends at the budget with the deadline's text, no command sent, the client destroyed once, no unhandled rejection", async () => {
+    process.on("unhandledRejection", countUnhandled);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.connectHangs = true;
+    const connecting = nextConnect();
+    let outcome: unknown = "pending";
+    void new RedisAdapter().execute(opts({ timeoutMs: 1500 }), ["PING"]).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await connecting;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(unhandled).toBe(0);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+    expect(lastClient?.sendCommand).not.toHaveBeenCalled();
+    expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a command that never settles ends at the budget with the deadline's text, the client destroyed once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.sendCommandHangs = true;
+    const issued = nextCommand();
+    let outcome: unknown = "pending";
+    void new RedisAdapter().execute(opts({ timeoutMs: 1500 }), ["BLPOP", "key", "0"]).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+    expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the deadline leaves no timer behind when the command settles in time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await new RedisAdapter().execute(opts({ timeoutMs: 1500 }), ["PING"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("every path destroys the client once and never closes it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const paths: FakeClientBehavior[] = [
+      {},
+      { sendCommandError: new Error("boom") },
+      { connectError: new Error("ECONNREFUSED") },
+      { connectTimeoutError: new Error("Connection timeout") },
+      { connectHangs: true },
+      { sendCommandHangs: true },
+    ];
+    for (const path of paths) {
+      behavior = path;
+      const connecting = nextConnect();
+      void new RedisAdapter().execute(opts({ timeoutMs: 1500 }), ["PING"]).catch(() => undefined);
+      await connecting;
+      await vi.advanceTimersByTimeAsync(1500);
+      await flushed();
+      expect(lastClient?.destroy).toHaveBeenCalledTimes(1);
+      expect(lastClient?.close).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a connect the driver times out at its own connect timer keeps the driver's cause, not the deadline's text", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cause = new Error("Connection timeout");
+    behavior.connectTimeoutError = cause;
+    const connecting = nextConnect();
+    let outcome: unknown = "pending";
+    void new RedisAdapter().execute(opts({ timeoutMs: 1500 }), ["PING"]).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await connecting;
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushed();
+    expect(outcome).toBe(cause);
   });
 });

@@ -77,6 +77,8 @@ export interface McpHttpServerOptions {
   allowedHosts?: readonly string[];
   endpoint?: string;
   sessionLimits?: McpHttpSessionLimits;
+  /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
+  onListenerError?: (err: VaultError) => void;
 }
 
 export interface McpHttpServer {
@@ -86,6 +88,35 @@ export interface McpHttpServer {
   /** Run the session-reclamation sweep now; the interval keeps its own cadence. */
   sweepSessions(): void;
   close(): Promise<void>;
+}
+
+const LABEL = "MCP Streamable HTTP";
+
+function tcpAddress(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${String(port)}` : `${host}:${String(port)}`;
+}
+
+function listenRefusal(err: unknown, host: string, port: number): VaultError {
+  const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  const address = tcpAddress(host, port);
+  const message =
+    errno === "EADDRINUSE"
+      ? `${LABEL}: another process is listening on ${address} (EADDRINUSE)`
+      : `${LABEL}: cannot listen on ${address} (${errno ?? "unknown error"})`;
+  return new VaultError(
+    ErrorCode.INVALID_INPUT,
+    message,
+    errno === undefined ? undefined : { errno },
+  );
+}
+
+function listenerFailure(err: unknown, host: string, port: number): VaultError {
+  const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  return new VaultError(
+    ErrorCode.INTERNAL_ERROR,
+    `${LABEL}: the listener on ${tcpAddress(host, port)} failed (${errno ?? "unknown error"})`,
+    errno === undefined ? undefined : { errno },
+  );
 }
 
 interface McpHttpSession {
@@ -122,10 +153,14 @@ interface McpHttpSession {
  * Mcp-Session-Id); the 2025-11-25 session path above is unchanged (design R1).
  */
 export async function startMcpHttpServer(options: McpHttpServerOptions): Promise<McpHttpServer> {
-  const { engine } = options;
+  const { engine, onListenerError } = options;
   const host = options.host ?? DEFAULT_HOST;
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+  const port = options.port ?? DEFAULT_MCP_HTTP_PORT;
   assertBindAllowed(host, options.allowedHosts ?? []);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw VaultError.invalidInput(`${LABEL}: port ${String(port)} is not 0-65535`);
+  }
   const allowedHosts = buildAllowedHostSet(host, options.allowedHosts ?? []);
 
   const sessions = new Map<string, McpHttpSession>();
@@ -213,9 +248,6 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     dropSession(oldestId, session);
     return true;
   }
-
-  const sweepTimer = setInterval(sweepSessions, sweepIntervalMs);
-  if (sweepTimer.unref) sweepTimer.unref();
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // The listener's host allowlist answers first (R11/D61): a DNS-rebinding
@@ -400,15 +432,23 @@ export async function startMcpHttpServer(options: McpHttpServerOptions): Promise
     });
   });
 
+  let boundPort = port;
   await new Promise<void>((resolve, reject) => {
-    httpServer.once("error", reject);
-    httpServer.listen(options.port ?? DEFAULT_MCP_HTTP_PORT, host, () => {
-      httpServer.removeListener("error", reject);
+    const refuse = (err: Error): void => reject(listenRefusal(err, host, port));
+    httpServer.once("error", refuse);
+    httpServer.listen(port, host, () => {
+      httpServer.removeListener("error", refuse);
+      httpServer.on("error", (err: Error) =>
+        onListenerError?.(listenerFailure(err, host, boundPort)),
+      );
       resolve();
     });
   });
 
-  const boundPort = (httpServer.address() as AddressInfo).port;
+  boundPort = (httpServer.address() as AddressInfo).port;
+
+  const sweepTimer = setInterval(sweepSessions, sweepIntervalMs);
+  if (sweepTimer.unref) sweepTimer.unref();
 
   try {
     // One row per listener (R4/B22), after the bind so it carries the bound

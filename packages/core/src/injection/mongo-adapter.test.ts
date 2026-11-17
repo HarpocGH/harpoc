@@ -23,7 +23,10 @@ interface FakeCommandCall {
 
 interface FakeBehavior {
   connectError?: Error;
+  connectHangs?: boolean;
   closeError?: Error;
+  closeHangs?: boolean;
+  closeThrows?: boolean;
   commandResult?: unknown;
   commandError?: Error;
   /** The command settles only when its `signal` aborts, as the driver's does. */
@@ -38,6 +41,8 @@ const commandCalls: FakeCommandCall[] = [];
 let closeCallCount = 0;
 let behavior: FakeBehavior = {};
 let commandIssued: () => void = () => undefined;
+let connectIssued: () => void = () => undefined;
+let releaseConnect: () => void = () => undefined;
 
 interface MongoClientOptionsShape {
   directConnection?: boolean;
@@ -67,10 +72,18 @@ vi.mock("mongodb", () => {
       mongoClientCalls.push({ uri, options });
     }
     connect(): Promise<this> {
+      connectIssued();
+      if (behavior.connectHangs) {
+        return new Promise((resolve) => {
+          releaseConnect = () => resolve(this);
+        });
+      }
       return behavior.connectError ? Promise.reject(behavior.connectError) : Promise.resolve(this);
     }
     close(): Promise<void> {
       closeCallCount += 1;
+      if (behavior.closeThrows) throw new Error("close threw");
+      if (behavior.closeHangs) return new Promise(() => undefined);
       return behavior.closeError ? Promise.reject(behavior.closeError) : Promise.resolve(undefined);
     }
     db(name: string): {
@@ -115,6 +128,12 @@ function nextCommand(): Promise<void> {
   });
 }
 
+function nextConnect(): Promise<void> {
+  return new Promise((resolve) => {
+    connectIssued = resolve;
+  });
+}
+
 function opts(overrides: Partial<DbConnectOptions> = {}): DbConnectOptions {
   return {
     host: "mongo.example.com",
@@ -136,6 +155,8 @@ beforeEach(() => {
   closeCallCount = 0;
   behavior = {};
   commandIssued = () => undefined;
+  connectIssued = () => undefined;
+  releaseConnect = () => undefined;
 });
 
 afterEach(() => {
@@ -369,6 +390,150 @@ describe("MongoAdapter command-phase bound (mongodb 7.8+ ignores timeoutMS)", ()
   });
 });
 
+describe("MongoAdapter one budget from client construction to the command's end, the close raced against the grace", () => {
+  let unhandled = 0;
+  const countUnhandled = (): void => {
+    unhandled += 1;
+  };
+
+  beforeEach(() => {
+    unhandled = 0;
+  });
+
+  afterEach(() => {
+    process.off("unhandledRejection", countUnhandled);
+  });
+
+  it("a connect that never settles ends at the budget with the network-class reason, no command issued, the client closed once, no unhandled rejection", async () => {
+    process.on("unhandledRejection", countUnhandled);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.connectHangs = true;
+    const connecting = nextConnect();
+    let outcome: unknown = "pending";
+    void new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { find: "c" }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await connecting;
+    await vi.advanceTimersByTimeAsync(1499);
+    await flushed();
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(unhandled).toBe(0);
+    expect(outcome).toBeInstanceOf(MongoNetworkError);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+    expect(commandCalls).toHaveLength(0);
+    expect(closeCallCount).toBe(1);
+  });
+
+  it("a connect that settles after the deadline issues no command", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.connectHangs = true;
+    const connecting = nextConnect();
+    void new MongoAdapter()
+      .execute(opts({ timeoutMs: 1500 }), { find: "c" })
+      .catch(() => undefined);
+    await connecting;
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushed();
+    releaseConnect();
+    await flushed();
+    expect(commandCalls).toHaveLength(0);
+  });
+
+  it("a close that never settles after an answered command returns the result at the grace, no unhandled rejection", async () => {
+    process.on("unhandledRejection", countUnhandled);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.closeHangs = true;
+    behavior.commandResult = { n: 42, ok: 1 };
+    const issued = nextCommand();
+    let outcome: unknown = "pending";
+    void new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { count: "c" }).then(
+      (result) => {
+        outcome = result;
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await issued;
+    await flushed();
+    await vi.advanceTimersByTimeAsync(999);
+    await flushed();
+    expect(outcome).toBe("pending");
+    expect(closeCallCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(unhandled).toBe(0);
+    expect(outcome).toEqual({
+      rows: [{ n: 42, ok: 1 }],
+      fields: [{ name: "result" }],
+      rowCount: 1,
+    });
+  });
+
+  it("a close that never settles after the deadline ends the call at budget + grace with the deadline's reason, no unhandled rejection", async () => {
+    process.on("unhandledRejection", countUnhandled);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.commandHangs = true;
+    behavior.closeHangs = true;
+    const issued = nextCommand();
+    let outcome: unknown = "pending";
+    void new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { find: "c" }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (err: unknown) => {
+        outcome = err;
+      },
+    );
+    await issued;
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushed();
+    expect(outcome).toBe("pending");
+    expect(closeCallCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(999);
+    await flushed();
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await flushed();
+    expect(unhandled).toBe(0);
+    expect(outcome).toBeInstanceOf(MongoNetworkError);
+    expect((outcome as Error).message).toBe("command did not complete within 1500 ms");
+  });
+
+  it("a close that settles in time leaves no grace timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await new MongoAdapter().execute(opts({ timeoutMs: 1500 }), { ping: 1 });
+    expect(closeCallCount).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a close that throws synchronously after an answered command returns the result and leaves no timer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    behavior.closeThrows = true;
+    behavior.commandResult = { n: 42, ok: 1 };
+    const outcome = await new MongoAdapter()
+      .execute(opts({ timeoutMs: 1500 }), { count: "c" })
+      .then(
+        (result) => result,
+        (err: unknown) => err,
+      );
+    expect(outcome).toEqual({
+      rows: [{ n: 42, ok: 1 }],
+      fields: [{ name: "result" }],
+      rowCount: 1,
+    });
+    expect(closeCallCount).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("MongoAdapter command execution + result normalization (spec §10.7)", () => {
   it("runs the command document via db.command() on the named database", async () => {
     await new MongoAdapter().execute(opts({ database: "app_db" }), { ping: 1 });
@@ -424,11 +589,12 @@ describe("MongoAdapter command execution + result normalization (spec §10.7)", 
     expect(closeCallCount).toBe(1);
   });
 
-  it("propagates a connect failure without ever calling db()/command()", async () => {
+  it("propagates a connect failure without ever calling db()/command(), the client closed once", async () => {
     behavior.connectError = new Error("ECONNREFUSED");
     await expect(new MongoAdapter().execute(opts(), { ping: 1 })).rejects.toThrow("ECONNREFUSED");
     expect(dbCalls).toHaveLength(0);
     expect(commandCalls).toHaveLength(0);
+    expect(closeCallCount).toBe(1);
   });
 
   it("a close failure does not mask the original command error", async () => {

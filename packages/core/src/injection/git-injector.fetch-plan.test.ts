@@ -13,8 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector, fetchRefspecPlan, parseFetchRefspec } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -37,9 +38,9 @@ if (process.platform === "win32") {
   ].join(delimiter);
 }
 
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
-// Skipped where git does not resolve: the working-tree probes run real git; the
+// Skipped where no supported git resolves: the working-tree probes run real git; the
 // SSH row also needs the native ssh client.
 const describeGit = describe.skipIf(GIT === null);
 const describeGitSsh = describe.skipIf(GIT === null || SSH === null);

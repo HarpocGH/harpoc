@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { VaultEngine } from "@harpoc/core";
 import type { DecryptedAuditEvent } from "@harpoc/core";
 import { createMcpServer } from "@harpoc/mcp-server";
@@ -47,6 +47,51 @@ silenceAuditLines();
 
 const PASSWORD = "audit-lifecycle-pw";
 const VALUE = new Uint8Array(Buffer.from("lifecycle-value"));
+
+const ACCEPT_ERROR_PRELOAD = `const net = require("node:net");
+const listen = net.Server.prototype.listen;
+net.Server.prototype.listen = function (...args) {
+  this.once("listening", () => {
+    setTimeout(() => {
+      this.emit("error", Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" }));
+    }, 400);
+  });
+  return listen.apply(this, args);
+};
+`;
+const LISTENER_FAILURE_BOUND_MS = 15_000;
+const LISTENER_FAILED = /^(?:Error|Fatal): .* failed \(ENOBUFS\)/m;
+
+function failureLines(stderr: string): string[] {
+  return stderr.split(/\r?\n/).filter((line) => /^(?:Error|Fatal):/.test(line));
+}
+
+function acceptErrorEnv(): NodeJS.ProcessEnv {
+  const dir = mkdtempSync(join(tmpdir(), "harpoc-accept-error-"));
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const preload = join(dir, "accept-error-preload.cjs");
+  writeFileSync(preload, ACCEPT_ERROR_PRELOAD);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_OPTIONS: `--require "${preload.replace(/[\\"]/g, "\\$&")}"`,
+  };
+  delete env.HARPOC_TOKEN;
+  return env;
+}
+
+function serverRowsOf(
+  engine: VaultEngine,
+  transport: string,
+  port: number,
+): Array<[string, Record<string, unknown> | null]> {
+  return [AuditEventType.SERVER_START, AuditEventType.SERVER_STOP]
+    .flatMap((eventType) => engine.queryAudit({ eventType }))
+    .filter((row) => row.detail?.transport === transport && row.detail?.port === port)
+    .sort((a, b) => a.id - b.id)
+    .map((row) => [row.event_type, row.detail]);
+}
 
 // R4/D67 and E75i through the real binary: the CLI process writes the rows,
 // an in-process engine on the same vault reads them back.
@@ -174,7 +219,7 @@ describe("server lifecycle rows through the spawned CLI", () => {
   // D9/R26: the start row is written after the bind now, so a bind that fails
   // leaves nothing behind and the operator gets the error instead of an
   // unhandled 'error' event killing the process mid-start.
-  it("a REST start on an occupied port leaves no start row and reports the bind error", async () => {
+  it("a REST start on an occupied port exits 1 with the one line Error: [INVALID_INPUT] REST API: another process is listening on 127.0.0.1:<port> (EADDRINUSE) and leaves no start row", async () => {
     const port = await freePort();
     const blocker = createServer();
     await new Promise<void>((resolve) => blocker.listen(port, "127.0.0.1", () => resolve()));
@@ -183,8 +228,10 @@ describe("server lifecycle rows through the spawned CLI", () => {
     });
     try {
       const { code } = await server.closed();
-      expect(code).not.toBe(0);
-      expect(server.stderrSoFar()).toMatch(/EADDRINUSE/);
+      expect(code).toBe(1);
+      expect(failureLines(server.stderrSoFar())).toEqual([
+        `Error: [INVALID_INPUT] REST API: another process is listening on 127.0.0.1:${String(port)} (EADDRINUSE)`,
+      ]);
     } finally {
       await server.stop();
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
@@ -194,6 +241,110 @@ describe("server lifecycle rows through the spawned CLI", () => {
       .queryAudit({ eventType: AuditEventType.SERVER_START })
       .filter((r) => r.detail?.port === port);
     expect(starts).toHaveLength(0);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
+  }, 60_000);
+
+  // win32 serves no proxy.sock (the proxy listens on TCP alone there), so no consumer socket can
+  // fail after the proxy came up.
+  it.skipIf(process.platform === "win32")(
+    "a start that fails after the proxy came up (a regular file at bob/proxy.sock) exits 1 with the one line Error: [INVALID_INPUT] Egress proxy socket: <runtime-dir>/bob/proxy.sock exists and is not a socket, leaves no alice/proxy.sock and pairs the proxy's server.start with a server.stop whose trigger is start_failed",
+    async () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), "harpoc-start-failed-"));
+      onTestFinished(() => {
+        rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      });
+      for (const consumer of ["alice", "bob"]) {
+        mkdirSync(join(runtimeDir, consumer), { mode: 0o750 });
+        chmodSync(join(runtimeDir, consumer), 0o750);
+      }
+      const regularFile = join(runtimeDir, "bob", "proxy.sock");
+      writeFileSync(regularFile, "");
+
+      const { server, port: proxyPort } = await startCliServerOnFreePort(
+        (p) => [
+          "server",
+          "start",
+          "--session",
+          "memory",
+          "--proxy",
+          "--proxy-port",
+          String(p),
+          "--runtime-dir",
+          runtimeDir,
+        ],
+        {
+          vaultDir,
+          ready: (child) =>
+            child.waitForStderr(/exists and is not a socket/, LISTENER_FAILURE_BOUND_MS),
+        },
+      );
+      onTestFinished(() => server.stop());
+      const { code } = await server.closed(LISTENER_FAILURE_BOUND_MS);
+
+      expect(code).toBe(1);
+      expect(failureLines(server.stderrSoFar())).toEqual([
+        `Error: [INVALID_INPUT] Egress proxy socket: ${regularFile} exists and is not a socket`,
+      ]);
+      expect(existsSync(join(runtimeDir, "alice", "proxy.sock"))).toBe(false);
+      expect(serverRowsOf(engine as VaultEngine, "proxy", proxyPort)).toEqual([
+        [
+          AuditEventType.SERVER_START,
+          {
+            transport: "proxy",
+            tokenless: false,
+            tty_prompt: false,
+            port: proxyPort,
+            host: "127.0.0.1",
+          },
+        ],
+        [
+          AuditEventType.SERVER_STOP,
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: proxyPort,
+            uptime_ms: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+      ]);
+      expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
+    },
+    60_000,
+  );
+
+  it("a REST listener that fails after its bind (an accept ENOBUFS) exits 1 with the one line Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:<port> failed (ENOBUFS) and pairs the rest server.start with a server.stop whose trigger is listener_failed", async () => {
+    const { server, port } = await startCliServerOnFreePort(
+      (p) => ["server", "start", "--rest", "--port", String(p)],
+      {
+        vaultDir,
+        env: acceptErrorEnv(),
+        ready: (child) => child.waitForStderr(LISTENER_FAILED, LISTENER_FAILURE_BOUND_MS),
+      },
+    );
+    onTestFinished(() => server.stop());
+    const { code } = await server.closed(LISTENER_FAILURE_BOUND_MS);
+
+    expect(code).toBe(1);
+    expect(failureLines(server.stderrSoFar())).toEqual([
+      `Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:${String(port)} failed (ENOBUFS)`,
+    ]);
+    expect(serverRowsOf(engine as VaultEngine, "rest", port)).toEqual([
+      [
+        AuditEventType.SERVER_START,
+        { transport: "rest", tokenless: false, tty_prompt: false, port, host: "127.0.0.1" },
+      ],
+      [
+        AuditEventType.SERVER_STOP,
+        {
+          transport: "rest",
+          tokenless: false,
+          port,
+          uptime_ms: expect.any(Number),
+          trigger: "listener_failed",
+        },
+      ],
+    ]);
     expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
   }, 60_000);
 });
@@ -388,6 +539,26 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
     await mcp.waitForStderr(/Harpoc MCP server running on stdio/, 30_000);
   }
 
+  async function failingHttpOnFreePort(
+    env: NodeJS.ProcessEnv,
+  ): Promise<{ mcp: CliServer; port: number }> {
+    for (let attempt = 1; ; attempt++) {
+      const port = await freePort();
+      const mcp = startNode(
+        [MCP_ENTRY, "--vault-dir", vaultDir, "--http", "--port", String(port)],
+        { env },
+      );
+      onTestFinished(() => mcp.stop());
+      try {
+        await mcp.waitForStderr(LISTENER_FAILED, LISTENER_FAILURE_BOUND_MS);
+        return { mcp, port };
+      } catch (err) {
+        const collided = mcp.exited() && /\(EADDRINUSE\)/.test(mcp.stderrSoFar());
+        if (attempt === 3 || !collided) throw err;
+      }
+    }
+  }
+
   beforeAll(async () => {
     vaultDir = mkdtempSync(join(tmpdir(), "harpoc-mcp-lifecycle-"));
     const init = new VaultEngine({
@@ -475,6 +646,33 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
     },
     60_000,
   );
+
+  it("a Streamable HTTP listener that fails after its bind (an accept ENOBUFS) exits 1 with the one line Fatal: MCP Streamable HTTP: the listener on 127.0.0.1:<port> failed (ENOBUFS) and pairs the http server.start with a server.stop whose trigger is listener_failed", async () => {
+    const { mcp, port } = await failingHttpOnFreePort(acceptErrorEnv());
+    const { code } = await mcp.closed(LISTENER_FAILURE_BOUND_MS);
+
+    expect(code).toBe(1);
+    expect(failureLines(mcp.stderrSoFar())).toEqual([
+      `Fatal: MCP Streamable HTTP: the listener on 127.0.0.1:${String(port)} failed (ENOBUFS)`,
+    ]);
+    expect(serverRowsOf(engine as VaultEngine, "http", port)).toEqual([
+      [
+        AuditEventType.SERVER_START,
+        { transport: "http", tokenless: false, tty_prompt: false, port, host: "127.0.0.1" },
+      ],
+      [
+        AuditEventType.SERVER_STOP,
+        {
+          transport: "http",
+          tokenless: false,
+          port,
+          uptime_ms: expect.any(Number),
+          trigger: "listener_failed",
+        },
+      ],
+    ]);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
+  }, 60_000);
 });
 
 interface SqliteHandle {

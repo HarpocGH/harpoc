@@ -13,7 +13,7 @@ import type {
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { DatabaseInjector } from "./database-injector.js";
 import type { DbEngineAdapter } from "./db-adapters.js";
 import { GitInjector } from "./git-injector.js";
@@ -170,7 +170,7 @@ describe("GitInjector attribution", () => {
   });
 
   // The target allowlists are checked after git resolves through the command allowlist.
-  const GIT = resolveExecutable("git", controlledPathDirs());
+  const GIT = resolveSupportedGit();
   const allowGit = (overrides: Partial<InjectionPolicy> = {}): InjectionPolicy => ({
     ...EMPTY_POLICY,
     command_allowlist: [GIT as string],
@@ -178,7 +178,7 @@ describe("GitInjector attribution", () => {
   });
 
   it.skipIf(GIT === null)(
-    "audits the URL-allowlist refusal (URL_NOT_ALLOWED; skipped where git does not resolve)",
+    "audits the URL-allowlist refusal (URL_NOT_ALLOWED; skipped where no supported git resolves)",
     async () => {
       const { log, logger } = captureLogger();
       const injector = new GitInjector(logger);
@@ -202,7 +202,7 @@ describe("GitInjector attribution", () => {
   );
 
   it.skipIf(GIT === null)(
-    "audits the host-allowlist refusal (HOST_NOT_ALLOWED; skipped where git does not resolve)",
+    "audits the host-allowlist refusal (HOST_NOT_ALLOWED; skipped where no supported git resolves)",
     async () => {
       const { log, logger } = captureLogger();
       const injector = new GitInjector(logger);
@@ -226,7 +226,7 @@ describe("GitInjector attribution", () => {
   );
 
   it.skipIf(GIT === null)(
-    "audits the plaintext-remote refusal (URL_HTTPS_REQUIRED; skipped where git does not resolve)",
+    "audits the plaintext-remote refusal (URL_HTTPS_REQUIRED; skipped where no supported git resolves)",
     async () => {
       const { log, logger } = captureLogger();
       const injector = new GitInjector(logger);

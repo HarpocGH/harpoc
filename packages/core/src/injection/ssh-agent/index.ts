@@ -46,8 +46,9 @@ export class EphemeralSshAgent {
   /**
    * Starts the agent: a named pipe on a win32 host, else a Unix socket in a new temporary
    * directory. `platform` (`process.platform` by default) is the platform whose
-   * `maxUnixSocketPathBytes` (107; darwin 103) bounds the socket path, and nothing else: a path
-   * over it is refused `SSH_AGENT_FAILED` naming its length before anything is created.
+   * `maxUnixSocketPathBytes` (107; 103 on darwin and the BSDs) bounds the socket path, and
+   * nothing else: a path over it is refused `SSH_AGENT_FAILED` naming its length before anything
+   * is created.
    */
   static start(
     privateKeyPem: string,
@@ -106,7 +107,7 @@ export class EphemeralSshAgent {
         });
       });
 
-      server.on("error", (err) => {
+      const refuse = (err: Error): void => {
         if (tempDir) {
           try {
             rmSync(tempDir, { recursive: true, force: true });
@@ -114,10 +115,17 @@ export class EphemeralSshAgent {
             /* best effort */
           }
         }
-        reject(VaultError.sshAgentFailed(err.message));
-      });
+        reject(
+          VaultError.sshAgentFailed(
+            `the agent's socket could not be bound (${(err as NodeJS.ErrnoException | null | undefined)?.code ?? "unknown error"})`,
+          ),
+        );
+      };
+      server.once("error", refuse);
 
       server.listen(authSock, () => {
+        server.removeListener("error", refuse);
+        server.on("error", () => undefined);
         resolvePromise(
           new EphemeralSshAgent(
             authSock,

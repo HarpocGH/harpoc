@@ -72,6 +72,8 @@ export interface EgressProxyOptions {
   bodyIdleTimeoutMs?: number;
   /** Every refusal and failure, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. */
   onError?: (err: VaultError) => void;
+  /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
+  onListenerError?: (err: VaultError) => void;
   /** The CA a CONNECT tunnel's TLS is terminated with (`secret://harpoc-ca`); without one CONNECT answers 501. */
   ca?: ProxyCaOptions;
 }
@@ -108,6 +110,7 @@ function internalProxyError(): VaultError {
   return new VaultError(ErrorCode.INTERNAL_ERROR, "Internal proxy error");
 }
 
+const TCP_LABEL = "Egress proxy";
 const SOCKET_LABEL = "Egress proxy socket";
 
 /** The agent socket's `bindRefusal` (core), mirrored: a ladder, bind or mode errno as a code, never node's text. */
@@ -119,6 +122,25 @@ function socketRefusal(err: unknown, path: string): VaultError {
   }
   return VaultError.invalidInput(
     `${SOCKET_LABEL}: cannot listen on ${path} (${code ?? "unknown error"})`,
+  );
+}
+
+function tcpAddress(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${String(port)}` : `${host}:${String(port)}`;
+}
+
+function tcpRefusal(err: unknown, host: string, port: number): VaultError {
+  if (err instanceof VaultError) return err;
+  const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  const address = tcpAddress(host, port);
+  const message =
+    errno === "EADDRINUSE"
+      ? `${TCP_LABEL}: another process is listening on ${address} (EADDRINUSE)`
+      : `${TCP_LABEL}: cannot listen on ${address} (${errno ?? "unknown error"})`;
+  return new VaultError(
+    ErrorCode.INVALID_INPUT,
+    message,
+    errno === undefined ? undefined : { errno },
   );
 }
 
@@ -162,11 +184,14 @@ function basicToken(credentials: string): string | null {
   return /^\S+$/.test(token) ? token : null;
 }
 
-function listen(server: Server, target: { port: number; host: string } | { path: string }) {
+type ListenTarget = { port: number; host: string } | { path: string };
+
+function listen(server: Server, target: ListenTarget, onFailure: (err: unknown) => void) {
   return new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(target, () => {
       server.removeListener("error", reject);
+      server.on("error", onFailure);
       resolve();
     });
   });
@@ -180,7 +205,7 @@ function closeServer(server: Server): Promise<void> {
 }
 
 export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
-  const { engine, onError } = options;
+  const { engine, onError, onListenerError } = options;
   const limiter = options.rateLimiter ?? new RateLimiter();
   const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const bodyIdleTimeoutMs = options.bodyIdleTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
@@ -524,15 +549,27 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     return server;
   }
 
-  async function startListener(
-    server: Server,
-    target: { port: number; host: string } | { path: string },
-  ): Promise<void> {
+  async function startListener(server: Server, target: ListenTarget): Promise<void> {
+    let boundPort = "port" in target ? target.port : 0;
+    const failed = (err: unknown): void => {
+      if (onListenerError === undefined) return;
+      const errno = (err as NodeJS.ErrnoException | null | undefined)?.code;
+      const where =
+        "path" in target
+          ? `${SOCKET_LABEL}: the listener on ${target.path}`
+          : `${TCP_LABEL}: the listener on ${tcpAddress(target.host, boundPort)}`;
+      const failure = new VaultError(
+        ErrorCode.INTERNAL_ERROR,
+        `${where} failed (${errno ?? "unknown error"})`,
+        errno === undefined ? undefined : { errno },
+      );
+      onListenerError(failure);
+    };
     try {
-      await listen(server, target);
+      await listen(server, target, failed);
     } catch (err) {
       servers.delete(server);
-      throw err;
+      throw "path" in target ? err : tcpRefusal(err, target.host, target.port);
     }
     try {
       if ("path" in target) {
@@ -540,12 +577,13 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
         // The sockets ride the TCP listener's row pair (RA-4): no row of their own.
         return;
       }
+      boundPort = (server.address() as AddressInfo).port;
       // The proxy's one server.start row, after the bind (rest-api server.ts);
       // an unwritable row undoes the bind — no record, no listener.
       engine.auditServerStart({
         transport: "proxy",
         tokenless: false,
-        port: (server.address() as AddressInfo).port,
+        port: boundPort,
         host: target.host,
       });
     } catch (err) {

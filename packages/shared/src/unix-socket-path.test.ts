@@ -16,4 +16,11 @@ describe("maxUnixSocketPathBytes", () => {
       expect(maxUnixSocketPathBytes(platform)).toBe(107);
     },
   );
+
+  it.each(["freebsd", "openbsd", "netbsd"])(
+    "%j takes darwin's 103 — its sun_path is 104 bytes too",
+    (platform) => {
+      expect(maxUnixSocketPathBytes(platform)).toBe(103);
+    },
+  );
 });

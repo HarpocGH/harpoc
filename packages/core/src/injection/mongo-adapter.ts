@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
+import type { MongoClient } from "mongodb";
 import type { DbCommandAdapter, DbConnectOptions, DbQueryResult } from "./db-adapters.js";
-import { identityCheckerFor } from "./db-adapters.js";
+import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
 
 /**
  * Mongo command adapter (request-mediated injection, thesis §4.5.5 extension,
@@ -48,20 +49,20 @@ import { identityCheckerFor } from "./db-adapters.js";
  *        which — dialing an IP with no servername in the unpinned
  *        (`opts.host` itself an IP) case — would check the wrong name.
  *
- * Command-phase bound. `connectTimeoutMS`/`serverSelectionTimeoutMS` bound
- * only the connect; mongodb 7.8 made the per-call `timeoutMS` (CSOT) a no-op,
- * so the budget is applied here twice, as the pg adapter applies
+ * The budget. `connectTimeoutMS`/`serverSelectionTimeoutMS` do not bound a
+ * trickled handshake; mongodb 7.8 made the per-call `timeoutMS` (CSOT) a no-op,
+ * so the budget is applied twice, as the pg adapter applies
  * `statement_timeout` and `query_timeout`:
  *   - server side, `maxTimeMS` on a copy of the command document — a caller's
  *     own value is kept only when it is a positive integer below the budget —
  *     so the server aborts the command at the budget (`MaxTimeMSExpired`);
- *   - client side, a deadline at the budget that aborts the command's `signal`
- *     and ends the call even if the driver never settles it. The abort reason
- *     is a `MongoNetworkError`, built before the deadline is armed: a network
- *     error makes the driver mark the server Unknown, so `close()` finds no
- *     selectable server for `endSessions`; with any other reason it sends
- *     `endSessions` over a new connection, which waits seconds on a server that
- *     stopped answering.
+ *   - client side, one deadline at the budget over `connect()` and the command,
+ *     armed after `connect()` starts, so a connect failure the driver reports
+ *     at its server-selection timer keeps its cause; every other expiry
+ *     carries the deadline's reason, a `MongoNetworkError` built first, aborts
+ *     the command's `signal` and ends the call whatever the driver does. That
+ *     class has the driver mark the server Unknown, so `close()` sends no
+ *     `endSessions`; `close()` is raced against `DB_CLOSE_GRACE_MS`.
  * `socketTimeoutMS` stays the connection-level idle-read bound.
  */
 export class MongoAdapter implements DbCommandAdapter {
@@ -98,12 +99,17 @@ export class MongoAdapter implements DbCommandAdapter {
           }),
     });
 
-    await client.connect();
     const abort = new AbortController();
     let deadline: NodeJS.Timeout | undefined;
     try {
       const reason = new MongoNetworkError(
         `command did not complete within ${String(opts.timeoutMs)} ms`,
+      );
+      const running = run(
+        client,
+        opts.database,
+        withMaxTimeMS(command as Record<string, unknown>, opts.timeoutMs),
+        abort.signal,
       );
       const expired = new Promise<never>((_resolve, reject) => {
         deadline = setTimeout(() => {
@@ -111,24 +117,38 @@ export class MongoAdapter implements DbCommandAdapter {
           reject(reason);
         }, opts.timeoutMs);
       });
-      const response = await Promise.race([
-        client
-          .db(opts.database)
-          .command(withMaxTimeMS(command as Record<string, unknown>, opts.timeoutMs), {
-            signal: abort.signal,
-          }),
-        expired,
-      ]);
+      const response = await Promise.race([running, expired]);
       return normalizeMongoResult(response as Record<string, unknown>);
     } finally {
       clearTimeout(deadline);
-      try {
-        await client.close();
-      } catch {
-        // best-effort close
-      }
+      await closeWithin(client, DB_CLOSE_GRACE_MS);
     }
   }
+}
+
+async function run(
+  client: MongoClient,
+  database: string,
+  command: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<unknown> {
+  await client.connect();
+  signal.throwIfAborted();
+  return client.db(database).command(command, { signal });
+}
+
+async function closeWithin(client: MongoClient, graceMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const closing = new Promise<void>((resolve) => {
+    resolve(client.close());
+  }).catch(() => undefined);
+  await Promise.race([
+    closing,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, graceMs);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 function withMaxTimeMS(

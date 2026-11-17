@@ -149,6 +149,10 @@ export function registerServerCommand(program: Command): void {
       ) => {
         let engine: Awaited<ReturnType<typeof loadUnlockedEngine>> | undefined;
         let proxyCa: ProxyCaWiring | undefined;
+        let shuttingDown = false;
+        let starting = true;
+        let listenerFailure: VaultError | undefined;
+        let stopStarted: ((trigger: ServerStopTrigger) => Promise<void>) | undefined;
         try {
           // Commander takes the next flag as the path (`--token-file
           // --allow-tokenless`, `--token-file --mcp`); a dash-led path is given
@@ -487,7 +491,6 @@ export function registerServerCommand(program: Command): void {
           let egressProxy: { close(): Promise<void> } | undefined;
           let proxyBoundPort: number | undefined;
           const agentSockets: { readonly consumer: string; stop(): Promise<void> }[] = [];
-          let shuttingDown = false;
 
           const startedAt = Date.now();
           let mcpHttpBoundPort: number | undefined;
@@ -517,46 +520,69 @@ export function registerServerCommand(program: Command): void {
             }
           };
 
+          const settle = (step: () => unknown): Promise<unknown> =>
+            Promise.resolve()
+              .then(step)
+              .catch(() => undefined);
+          let stopping: Promise<void> | undefined;
+          const stopAll = (trigger: ServerStopTrigger): Promise<void> =>
+            (stopping ??= (async () => {
+              // First: no token file is written after the stop rows.
+              if (rotationScheduler) await settle(() => rotationScheduler?.stop());
+              // Drain an in-flight refresh tick before the store closes — a
+              // rotated refresh_token arriving on a closed database is lost
+              // permanently (the provider already invalidated the old one).
+              if (refreshScheduler) await settle(() => refreshScheduler?.stop());
+              // Same reasoning for certificate renewal: an order abandoned
+              // between issuance and storage is lost for good.
+              if (renewalScheduler) await settle(() => renewalScheduler?.stop());
+              if (mcpServer && !stdioClosed) {
+                auditStop("stdio", opts.allowTokenless === true, undefined, trigger);
+                await settle(() => mcpServer?.close());
+              }
+              if (mcpHttpServer) {
+                auditStop("http", false, mcpHttpBoundPort, trigger);
+                await settle(() => mcpHttpServer?.close());
+              }
+              if (restServer) {
+                auditStop("rest", false, port, trigger);
+                await settle(() => restServer?.close());
+              }
+              if (egressProxy) {
+                auditStop("proxy", false, proxyBoundPort, trigger);
+                await settle(() => egressProxy?.close());
+              }
+              for (const agentSocket of agentSockets) {
+                auditStop("ssh-agent", true, undefined, trigger, agentSocket.consumer);
+                await settle(() => agentSocket.stop());
+              }
+              // Abort the REST app's pending background OAuth flows before the
+              // store closes: each authorization-code flow pins a loopback
+              // listener and a 5-minute timer, and its completion writes to the
+              // vault. Cancellation is a synchronous abort fan-out — nothing to
+              // drain, unlike the schedulers above.
+              await settle(() => restOAuthManager?.cancelPendingFlows());
+            })());
+          stopStarted = stopAll;
+
           const shutdown = async (trigger: ServerStopTrigger): Promise<void> => {
             if (shuttingDown) return;
             shuttingDown = true;
-            // First: no token file is written after the stop rows.
-            if (rotationScheduler) await rotationScheduler.stop();
-            // Drain an in-flight refresh tick before the store closes — a
-            // rotated refresh_token arriving on a closed database is lost
-            // permanently (the provider already invalidated the old one).
-            if (refreshScheduler) await refreshScheduler.stop();
-            // Same reasoning for certificate renewal: an order abandoned
-            // between issuance and storage is lost for good.
-            if (renewalScheduler) await renewalScheduler.stop();
-            if (mcpServer && !stdioClosed) {
-              auditStop("stdio", opts.allowTokenless === true, undefined, trigger);
-              await mcpServer.close();
-            }
-            if (mcpHttpServer) {
-              auditStop("http", false, mcpHttpBoundPort, trigger);
-              await mcpHttpServer.close();
-            }
-            if (restServer) {
-              auditStop("rest", false, port, trigger);
-              restServer.close();
-            }
-            if (egressProxy) {
-              auditStop("proxy", false, proxyBoundPort, trigger);
-              await egressProxy.close();
-            }
-            for (const agentSocket of agentSockets) {
-              auditStop("ssh-agent", true, undefined, trigger, agentSocket.consumer);
-              await agentSocket.stop();
-            }
-            // Abort the REST app's pending background OAuth flows before the
-            // store closes: each authorization-code flow pins a loopback
-            // listener and a 5-minute timer, and its completion writes to the
-            // vault. Cancellation is a synchronous abort fan-out — nothing to
-            // drain, unlike the schedulers above.
-            restOAuthManager?.cancelPendingFlows();
-            await engine?.destroy();
+            await stopAll(trigger);
+            await settle(() => engine?.destroy());
             process.exit(0);
+          };
+
+          const failStop = (err: VaultError): void => {
+            if (shuttingDown) return;
+            shuttingDown = true;
+            listenerFailure = err;
+            if (starting) return;
+            void (async () => {
+              await stopAll("listener_failed");
+              await settle(() => engine?.destroy());
+              handleError(err);
+            })();
           };
 
           process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -652,7 +678,11 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.mcpHttp) {
             const { startMcpHttpServer } = await import("@harpoc/mcp-server");
-            const server = await startMcpHttpServer({ engine, port: mcpHttpPort });
+            const server = await startMcpHttpServer({
+              engine,
+              port: mcpHttpPort,
+              onListenerError: failStop,
+            });
             mcpHttpServer = server;
             mcpHttpBoundPort = server.port;
             console.error(
@@ -674,6 +704,7 @@ export function registerServerCommand(program: Command): void {
               allowedHosts: opts.allowedHost,
               oauthManager,
               uiDir,
+              onListenerError: failStop,
             });
             if (opts.ui) {
               // Fragment, not query: the token must never appear in a request
@@ -705,7 +736,9 @@ export function registerServerCommand(program: Command): void {
             let proxy: ReturnType<typeof createEgressProxy>;
             try {
               proxy = createEgressProxy(
-                proxyCa === undefined ? { engine } : { engine, ca: proxyCa.options },
+                proxyCa === undefined
+                  ? { engine, onListenerError: failStop }
+                  : { engine, ca: proxyCa.options, onListenerError: failStop },
               );
             } finally {
               proxyCa?.options.keyPem.fill(0);
@@ -798,10 +831,15 @@ export function registerServerCommand(program: Command): void {
               "[harpoc] certificate renewal scheduler running (checks hourly, first check in ~1 h; auto-renew certificates only)",
             );
           }
+          starting = false;
+          if (listenerFailure !== undefined) throw listenerFailure;
         } catch (err: unknown) {
           proxyCa?.options.keyPem.fill(0);
-          await engine?.destroy();
-          handleError(err);
+          if (shuttingDown && listenerFailure === undefined) return;
+          shuttingDown = true;
+          await stopStarted?.(listenerFailure === undefined ? "start_failed" : "listener_failed");
+          await engine?.destroy().catch(() => undefined);
+          handleError(listenerFailure ?? err);
         }
       },
     );

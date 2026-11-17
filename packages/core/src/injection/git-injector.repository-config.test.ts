@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { GitAction, InjectionPolicy } from "@harpoc/shared";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { startGitSmartHttp, startRecorder } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
@@ -29,8 +29,8 @@ import { expectAbsent } from "@harpoc/test-utils";
  * environment and stdin; a marker holding the token is a leak.
  */
 
-const GIT = resolveExecutable("git", controlledPathDirs());
-// Skipped where git does not resolve.
+const GIT = resolveSupportedGit();
+// Skipped where no supported git resolves.
 const describeGit = describe.skipIf(GIT === null);
 
 const USER = "vaultuser";
@@ -40,7 +40,7 @@ const SECRET = new Uint8Array(Buffer.from(`${USER}:${TOKEN}`));
 it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
   if (GIT === null && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no supported git resolves',
     );
   }
 });

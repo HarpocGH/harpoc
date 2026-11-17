@@ -75,6 +75,8 @@ export type DbSqlEngine = typeof DatabaseEngine.POSTGRESQL | typeof DatabaseEngi
 /** Engines dispatched through `DbCommandAdapter.execute` (v1.3). */
 export type DbCommandEngine = typeof DatabaseEngine.REDIS | typeof DatabaseEngine.MONGODB;
 
+export const DB_CLOSE_GRACE_MS = 1_000;
+
 /**
  * TLS server-identity check bound to the configured TLS identity —
  * `database.servername` when set, else the LOGICAL host — whatever address the
@@ -165,6 +167,7 @@ class MysqlAdapter implements DbEngineAdapter {
     // "anything holding a cert from this CA". mysql2 ignores an
     // ssl.checkServerIdentity of ours (it picks the function itself), hence the
     // socket-side binding in dialPinned.
+    let socket: Socket | undefined;
     const conn = await mysql.createConnection({
       host: opts.servername ?? opts.host,
       port: opts.port,
@@ -180,26 +183,61 @@ class MysqlAdapter implements DbEngineAdapter {
               verifyIdentity: true,
             },
       connectTimeout: opts.timeoutMs,
-      stream: () => dialPinned(opts),
+      stream: () => {
+        socket = dialPinned(opts);
+        return socket;
+      },
     });
+    let interrupted = false;
+    const cut = (): void => {
+      socket?.destroy();
+      conn.destroy();
+    };
     return {
       async query(sql: string, params?: unknown[]): Promise<DbQueryResult> {
-        const [rows, fields] = await conn.query({ sql, timeout: opts.timeoutMs }, params);
-        const rowArray = Array.isArray(rows) ? (rows as unknown[]) : [];
-        const fieldArray = Array.isArray(fields)
-          ? (fields as { name: string }[]).map((f) => ({ name: f.name }))
-          : [];
-        return {
-          rows: rowArray,
-          fields: fieldArray,
-          rowCount: Array.isArray(rows) ? rowArray.length : null,
-        };
+        try {
+          const [rows, fields] = await conn.query({ sql, timeout: opts.timeoutMs }, params);
+          const rowArray = Array.isArray(rows) ? (rows as unknown[]) : [];
+          const fieldArray = Array.isArray(fields)
+            ? (fields as { name: string }[]).map((f) => ({ name: f.name }))
+            : [];
+          return {
+            rows: rowArray,
+            fields: fieldArray,
+            rowCount: Array.isArray(rows) ? rowArray.length : null,
+          };
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === "PROTOCOL_SEQUENCE_TIMEOUT") interrupted = true;
+          throw err;
+        }
       },
       async end(): Promise<void> {
-        await conn.end();
+        const ending = (): Promise<void> =>
+          new Promise<void>((resolve) => {
+            resolve(conn.end());
+          });
+        if (interrupted || !(await settlesWithin(ending(), DB_CLOSE_GRACE_MS))) cut();
       },
     };
   }
+}
+
+function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(false);
+      }, ms);
+    }),
+  ]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 /** Default engine adapters (SQL engines: postgresql, mysql). Callers may substitute a mock adapter in tests. */

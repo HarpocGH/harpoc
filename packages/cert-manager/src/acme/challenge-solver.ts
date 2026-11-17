@@ -41,6 +41,7 @@ export class Http01Solver {
        * codebase. */
       server.listen(port, "0.0.0.0", () => {
         server.removeListener("error", onStartError);
+        server.on("error", () => undefined);
         const address = server.address();
         resolve(typeof address === "object" && address !== null ? address.port : port);
       });

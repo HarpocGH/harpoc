@@ -685,6 +685,7 @@ describe("server start", () => {
           hostname: "127.0.0.1",
           allowedHosts: [],
           oauthManager: mockRestOAuthManager,
+          onListenerError: expect.any(Function),
         });
         expect(spies.exitSpy).not.toHaveBeenCalled();
       },
@@ -760,7 +761,10 @@ describe("server start", () => {
 
       await run(["--session", "memory", "--proxy"]);
 
-      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(createEgressProxy).toHaveBeenCalledWith({
+        engine: mockEngine,
+        onListenerError: expect.any(Function),
+      });
       expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[3128, "127.0.0.1"]]);
       expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
       expect(spies.errorSpy).toHaveBeenCalledWith(
@@ -911,13 +915,17 @@ describe("server start", () => {
 
     it("a rejected proxy bind reaches the fatal path: the error on stderr, exit 1, engine destroyed", async () => {
       mockEgressProxy.listenTcp.mockRejectedValueOnce(
-        new Error("listen EADDRINUSE: address already in use 127.0.0.1:3128"),
+        new VaultError(
+          ErrorCode.INVALID_INPUT,
+          "Egress proxy: another process is listening on 127.0.0.1:3128 (EADDRINUSE)",
+          { errno: "EADDRINUSE" },
+        ),
       );
 
       await expect(run(["--session", "memory", "--proxy"])).rejects.toThrow("process.exit");
       expect(spies.exitSpy).toHaveBeenCalledWith(1);
       expect(spies.errorSpy).toHaveBeenCalledWith(
-        "Error: listen EADDRINUSE: address already in use 127.0.0.1:3128",
+        "Error: [INVALID_INPUT] Egress proxy: another process is listening on 127.0.0.1:3128 (EADDRINUSE)",
       );
       expect(mockEngine.destroy).toHaveBeenCalled();
     });
@@ -1009,6 +1017,310 @@ describe("server start", () => {
 
       onceSpy.mockRestore();
     });
+
+    it("the REST listener's onListenerError after the start stops the daemon: the three stop rows listener_failed in the shutdown's order, each before its close, destroy last, the listener's line alone, exit 1 from the teardown", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const unhandled = vi.fn<(reason: unknown) => void>();
+      process.on("unhandledRejection", unhandled);
+      try {
+        await run(["--session", "memory", "--mcp-http", "--rest", "--proxy"]);
+        const onListenerError = vi.mocked(startServer).mock.calls[0]?.[0].onListenerError;
+        expect(onListenerError).toBeTypeOf("function");
+        onListenerError?.(
+          new VaultError(
+            ErrorCode.INTERNAL_ERROR,
+            "REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)",
+            { errno: "ENOBUFS" },
+          ),
+        );
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalled());
+
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(unhandled.mock.calls.map(([reason]) => reason)).toEqual([new Error("process.exit")]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+          ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+          ["Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)"],
+        ]);
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [
+            {
+              transport: "http",
+              tokenless: false,
+              port: 3001,
+              uptimeMs: expect.any(Number),
+              trigger: "listener_failed",
+            },
+          ],
+          [
+            {
+              transport: "rest",
+              tokenless: false,
+              port: 3000,
+              uptimeMs: expect.any(Number),
+              trigger: "listener_failed",
+            },
+          ],
+          [
+            {
+              transport: "proxy",
+              tokenless: false,
+              port: 3128,
+              uptimeMs: expect.any(Number),
+              trigger: "listener_failed",
+            },
+          ],
+        ]);
+        expect(mockMcpHttpServer.close).toHaveBeenCalledTimes(1);
+        expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+        expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+        const [httpRow, restRow, proxyRow] = mockEngine.auditServerStop.mock
+          .invocationCallOrder as number[];
+        const httpClose = mockMcpHttpServer.close.mock.invocationCallOrder[0] as number;
+        const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+        const proxyClose = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+        const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+        expect(httpRow as number).toBeLessThan(httpClose);
+        expect(httpClose).toBeLessThan(restRow as number);
+        expect(restRow as number).toBeLessThan(restClose);
+        expect(restClose).toBeLessThan(proxyRow as number);
+        expect(proxyRow as number).toBeLessThan(proxyClose);
+        expect(proxyClose).toBeLessThan(destroy);
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it("the REST listener's onListenerError with a destroy that fails in the teardown hides that failure: nothing of it on stderr, the listener's line alone, exit 1 from the teardown, the three stop rows listener_failed, the failing destroy run once", async () => {
+      const marker = "teardown-destroy-failure-marker";
+      const { startServer } = await import("@harpoc/rest-api");
+      const unhandled = vi.fn<(reason: unknown) => void>();
+      process.on("unhandledRejection", unhandled);
+      try {
+        await run(["--session", "memory", "--mcp-http", "--rest", "--proxy"]);
+        const onListenerError = vi.mocked(startServer).mock.calls[0]?.[0].onListenerError;
+        expect(onListenerError).toBeTypeOf("function");
+        mockEngine.destroy.mockRejectedValueOnce(new Error(marker));
+        onListenerError?.(
+          new VaultError(
+            ErrorCode.INTERNAL_ERROR,
+            "REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)",
+            { errno: "ENOBUFS" },
+          ),
+        );
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalled());
+
+        expectAbsent(spies.stderr(), marker);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+          ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+          ["Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)"],
+        ]);
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(unhandled.mock.calls.map(([reason]) => reason)).toEqual([new Error("process.exit")]);
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [expect.objectContaining({ transport: "http", trigger: "listener_failed" })],
+          [expect.objectContaining({ transport: "rest", trigger: "listener_failed" })],
+          [expect.objectContaining({ transport: "proxy", trigger: "listener_failed" })],
+        ]);
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it("the REST listener's onListenerError during a running SIGTERM shutdown is ignored: every stop row SIGTERM, no error line, one destroy, exit 0", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      let releaseClose: () => void = () => undefined;
+      mockMcpHttpServer.close.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        }),
+      );
+
+      await run(["--session", "memory", "--mcp-http", "--rest", "--proxy"]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(mockMcpHttpServer.close).toHaveBeenCalledTimes(1));
+      const onListenerError = vi.mocked(startServer).mock.calls[0]?.[0].onListenerError;
+      expect(onListenerError).toBeTypeOf("function");
+      onListenerError?.(
+        new VaultError(
+          ErrorCode.INTERNAL_ERROR,
+          "REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)",
+          { errno: "ENOBUFS" },
+        ),
+      );
+      releaseClose();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalled());
+
+      expect(spies.exitSpy.mock.calls).toEqual([[0]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+        ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "http", port: 3001, trigger: "SIGTERM" })],
+        [expect.objectContaining({ transport: "rest", port: 3000, trigger: "SIGTERM" })],
+        [expect.objectContaining({ transport: "proxy", port: 3128, trigger: "SIGTERM" })],
+      ]);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+      onSpy.mockRestore();
+    });
+
+    it("the REST listener's onListenerError while the proxy's bind is pending is acted on when the start ends: the proxy's start completes, the rest and proxy rows listener_failed, the proxy closed before destroy, the listener's line alone, exit 1", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      let releaseBind: (bound: { port: number }) => void = () => undefined;
+      mockEgressProxy.listenTcp.mockReturnValueOnce(
+        new Promise<{ port: number }>((resolve) => {
+          releaseBind = resolve;
+        }),
+      );
+
+      const started = run(["--session", "memory", "--rest", "--proxy"]);
+      await vi.waitFor(() => expect(mockEgressProxy.listenTcp).toHaveBeenCalledTimes(1));
+      const onListenerError = vi.mocked(startServer).mock.calls[0]?.[0].onListenerError;
+      expect(onListenerError).toBeTypeOf("function");
+      onListenerError?.(
+        new VaultError(
+          ErrorCode.INTERNAL_ERROR,
+          "REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)",
+          { errno: "ENOBUFS" },
+        ),
+      );
+      releaseBind({ port: 3128 });
+      await expect(started).rejects.toThrow("process.exit");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+        ["Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)"],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "rest",
+            tokenless: false,
+            port: 3000,
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 3128,
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+      ]);
+      expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+      expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      const proxyClose = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(proxyClose).toBeLessThan(destroy);
+    });
+
+    it("the MCP listener's onListenerError during the REST listener's teardown, after its first stop row, is ignored: the first failure's line alone, each stop row once, one destroy, exit 1 from the teardown", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const { startMcpHttpServer } = await import("@harpoc/mcp-server");
+      const unhandled = vi.fn<(reason: unknown) => void>();
+      process.on("unhandledRejection", unhandled);
+      try {
+        await run(["--session", "memory", "--mcp-http", "--rest", "--proxy"]);
+        const restCallback = vi.mocked(startServer).mock.calls[0]?.[0].onListenerError;
+        const mcpCallback = vi.mocked(startMcpHttpServer).mock.calls[0]?.[0].onListenerError;
+        expect(restCallback).toBeTypeOf("function");
+        expect(mcpCallback).toBeTypeOf("function");
+        restCallback?.(
+          new VaultError(
+            ErrorCode.INTERNAL_ERROR,
+            "REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)",
+            { errno: "ENOBUFS" },
+          ),
+        );
+        expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
+        mcpCallback?.(
+          new VaultError(
+            ErrorCode.INTERNAL_ERROR,
+            "MCP Streamable HTTP: the listener on 127.0.0.1:3001 failed (EMFILE)",
+            { errno: "EMFILE" },
+          ),
+        );
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalled());
+
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(unhandled.mock.calls.map(([reason]) => reason)).toEqual([new Error("process.exit")]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+          ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+          ["Error: [INTERNAL_ERROR] REST API: the listener on 127.0.0.1:3000 failed (ENOBUFS)"],
+        ]);
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [expect.objectContaining({ transport: "http", trigger: "listener_failed" })],
+          [expect.objectContaining({ transport: "rest", trigger: "listener_failed" })],
+          [expect.objectContaining({ transport: "proxy", trigger: "listener_failed" })],
+        ]);
+        expect(mockMcpHttpServer.close).toHaveBeenCalledTimes(1);
+        expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+        expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it("SIGTERM during the teardown of the proxy listener's onListenerError, after its first stop row, is ignored: the rest and proxy rows listener_failed, the proxy's line alone, one destroy, exit 1 only", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      const onSpy = vi.spyOn(process, "on");
+      const unhandled = vi.fn<(reason: unknown) => void>();
+      process.on("unhandledRejection", unhandled);
+      try {
+        await run(["--session", "memory", "--rest", "--proxy"]);
+        const onListenerError = vi.mocked(createEgressProxy).mock.calls[0]?.[0].onListenerError;
+        expect(onListenerError).toBeTypeOf("function");
+        onListenerError?.(
+          new VaultError(
+            ErrorCode.INTERNAL_ERROR,
+            "Egress proxy: the listener on 127.0.0.1:3128 failed (ENOBUFS)",
+            { errno: "ENOBUFS" },
+          ),
+        );
+        expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(1);
+        const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+        (sigtermCall?.[1] as () => void)();
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalled());
+
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(unhandled.mock.calls.map(([reason]) => reason)).toEqual([new Error("process.exit")]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          ["[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)"],
+          ["Error: [INTERNAL_ERROR] Egress proxy: the listener on 127.0.0.1:3128 failed (ENOBUFS)"],
+        ]);
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [expect.objectContaining({ transport: "rest", port: 3000, trigger: "listener_failed" })],
+          [expect.objectContaining({ transport: "proxy", port: 3128, trigger: "listener_failed" })],
+        ]);
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      } finally {
+        process.off("unhandledRejection", unhandled);
+        onSpy.mockRestore();
+      }
+    });
   });
 
   // ── --proxy with the Harpoc CA (B8) ─────────────────────────────
@@ -1063,6 +1375,7 @@ describe("server start", () => {
           keyPem: expect.any(Buffer),
           hosts: ["api.github.com", "127.0.0.1"],
         },
+        onListenerError: expect.any(Function),
       });
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] Harpoc CA: no consumer directory, no ca.pem written (harpoc proxy ca export prints the certificate)",
@@ -1145,7 +1458,7 @@ describe("server start", () => {
       },
     );
 
-    it("an expired CA prints the line and starts without CONNECT (createEgressProxy called with { engine }; no ca.pem written)", async () => {
+    it("an expired CA prints the line and starts without CONNECT (createEgressProxy called without ca; no ca.pem written)", async () => {
       const { createEgressProxy } = await import("@harpoc/egress-proxy");
       const { startServer } = await import("@harpoc/rest-api");
       mockEngine.loadProxyCa.mockRejectedValueOnce(
@@ -1176,7 +1489,10 @@ describe("server start", () => {
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] Harpoc CA expired at 2026-11-01T00:00:00.000Z — CONNECT disabled until harpoc proxy ca init --force",
       ]);
-      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(createEgressProxy).toHaveBeenCalledWith({
+        engine: mockEngine,
+        onListenerError: expect.any(Function),
+      });
       expect(existsSync(join(dir, "alice", "ca.pem"))).toBe(false);
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] egress proxy listening on http://127.0.0.1:4000 (TCP only: Windows serves no proxy.sock)",
@@ -1197,7 +1513,10 @@ describe("server start", () => {
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] Harpoc CA expired at <unknown> — CONNECT disabled until harpoc proxy ca init --force",
       ]);
-      expect(createEgressProxy).toHaveBeenCalledWith({ engine: mockEngine });
+      expect(createEgressProxy).toHaveBeenCalledWith({
+        engine: mockEngine,
+        onListenerError: expect.any(Function),
+      });
       expect(spies.exitSpy).not.toHaveBeenCalled();
     });
 
@@ -1326,6 +1645,20 @@ describe("server start", () => {
       vi.mocked(consumerSocketPaths).mockImplementation((_runtimeDir, socketName) =>
         names.map((name) => join(dir, name, socketName)),
       );
+    }
+
+    function serveFirstSocket(second: () => Promise<unknown>): void {
+      mockAgentSocketServer.start.mockImplementationOnce(
+        async (options: { socketPath: string; consumer: string }) => {
+          const server = {
+            ...options,
+            stop: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+          };
+          mockAgentSocketServer.started.push(server);
+          return server;
+        },
+      );
+      mockAgentSocketServer.start.mockImplementationOnce(second);
     }
 
     /** A consumer directory as the recipe leaves it: this user's own, 0750 whatever the umask. */
@@ -1725,6 +2058,451 @@ describe("server start", () => {
       expect(bobStop).not.toHaveBeenCalled();
 
       onSpy.mockRestore();
+    });
+
+    it("a proxy socket refused after the first consumer's stops the started proxy: its start_failed row, then its close, then destroy; the refusal alone, exit 1", async () => {
+      stubConsumers("alice", "bob");
+      const refused = join(dir, "bob", "proxy.sock");
+      mockEgressProxy.listenSocket
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(
+          VaultError.invalidInput(
+            `Egress proxy socket: another process is listening on ${refused}`,
+          ),
+        );
+
+      await expect(run(["--session", "memory", "--proxy", "--runtime-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        [`Error: [INVALID_INPUT] Egress proxy socket: another process is listening on ${refused}`],
+      ]);
+      expect(mockEgressProxy.listenSocket.mock.calls).toEqual([
+        [join(dir, "alice", "proxy.sock")],
+        [refused],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 3128,
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+      ]);
+      expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      const row = mockEngine.auditServerStop.mock.invocationCallOrder[0] as number;
+      const close = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(row).toBeLessThan(close);
+      expect(close).toBeLessThan(destroy);
+    });
+
+    it("a second agent socket refused after REST and the proxy stops what started in the shutdown's order, each start_failed row before its close; nothing for the refused socket", async () => {
+      stubConsumers("alice", "bob");
+      serveFirstSocket(() =>
+        Promise.reject(
+          VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+        ),
+      );
+
+      await expect(
+        run(["--session", "memory", "--rest", "--proxy", "--ssh-agent", "--runtime-dir", dir]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        [
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 2 consumer sockets (<consumer>/proxy.sock)",
+        ],
+        ["Error: [INVALID_INPUT] ssh-agent socket: a live socket answers at the path"],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "rest",
+            tokenless: false,
+            port: 3000,
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 3128,
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+      ]);
+      expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2);
+      const [alice, ...others] = mockAgentSocketServer.started;
+      expect(others).toEqual([]);
+      expect(mockRestServer.close).toHaveBeenCalledTimes(1);
+      expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+      expect(alice?.stop).toHaveBeenCalledTimes(1);
+      expect(mockRestOAuthManager.cancelPendingFlows).toHaveBeenCalledTimes(1);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      const [restRow, proxyRow, aliceRow] = mockEngine.auditServerStop.mock
+        .invocationCallOrder as number[];
+      const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+      const proxyClose = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+      const aliceStop = alice?.stop.mock.invocationCallOrder[0] as number;
+      const cancel = mockRestOAuthManager.cancelPendingFlows.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(restRow as number).toBeLessThan(restClose);
+      expect(restClose).toBeLessThan(proxyRow as number);
+      expect(proxyRow as number).toBeLessThan(proxyClose);
+      expect(proxyClose).toBeLessThan(aliceRow as number);
+      expect(aliceRow as number).toBeLessThan(aliceStop);
+      expect(aliceStop).toBeLessThan(cancel);
+      expect(cancel).toBeLessThan(destroy);
+    });
+
+    it("a close and a destroy that fail in the unwind hide nothing: the refusal alone on stderr, the later row and stop() still run, exit 1", async () => {
+      const marker = "unwind-close-failure-marker";
+      stubConsumers("alice", "bob");
+      serveFirstSocket(() =>
+        Promise.reject(
+          VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+        ),
+      );
+      mockEgressProxy.close.mockRejectedValueOnce(new Error(marker));
+      mockEngine.destroy.mockRejectedValueOnce(new Error(`${marker} (destroy)`));
+
+      await expect(
+        run(["--session", "memory", "--rest", "--proxy", "--ssh-agent", "--runtime-dir", dir]),
+      ).rejects.toThrow("process.exit");
+      expectAbsent(spies.stderr(), marker);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        [
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 2 consumer sockets (<consumer>/proxy.sock)",
+        ],
+        ["Error: [INVALID_INPUT] ssh-agent socket: a live socket answers at the path"],
+      ]);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "rest", trigger: "start_failed" })],
+        [expect.objectContaining({ transport: "proxy", trigger: "start_failed" })],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+      ]);
+      const [alice] = mockAgentSocketServer.started;
+      expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+      expect(alice?.stop).toHaveBeenCalledTimes(1);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      const aliceStop = alice?.stop.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(aliceStop).toBeLessThan(destroy);
+    });
+
+    it("a start refused after SIGTERM's shutdown began keeps the exit at 0: the SIGTERM row alone, no refusal line, one destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice", "bob");
+      let refuseBob: () => void = () => undefined;
+      serveFirstSocket(
+        () =>
+          new Promise((_resolve, reject) => {
+            refuseBob = () =>
+              reject(
+                VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+              );
+          }),
+      );
+
+      const started = run(["--session", "memory", "--ssh-agent", "--runtime-dir", dir]);
+      await vi.waitFor(() => expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      refuseBob();
+      await started;
+
+      expect(spies.exitSpy.mock.calls).toEqual([[0]]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
+      expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+      onSpy.mockRestore();
+    });
+
+    it("SIGTERM while a socket's start is pending, then the MCP listener's onListenerError, then that start's refusal keeps the exit at 0: every stop row SIGTERM, no error line, one destroy", async () => {
+      const { startMcpHttpServer } = await import("@harpoc/mcp-server");
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      stubConsumers("alice", "bob");
+      let refuseBob: () => void = () => undefined;
+      serveFirstSocket(
+        () =>
+          new Promise((_resolve, reject) => {
+            refuseBob = () =>
+              reject(
+                VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+              );
+          }),
+      );
+
+      const started = run([
+        "--session",
+        "memory",
+        "--mcp-http",
+        "--ssh-agent",
+        "--runtime-dir",
+        dir,
+      ]);
+      await vi.waitFor(() => expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      const onListenerError = vi.mocked(startMcpHttpServer).mock.calls[0]?.[0].onListenerError;
+      expect(onListenerError).toBeTypeOf("function");
+      onListenerError?.(
+        new VaultError(
+          ErrorCode.INTERNAL_ERROR,
+          "MCP Streamable HTTP: the listener on 127.0.0.1:3001 failed (ENOBUFS)",
+          { errno: "ENOBUFS" },
+        ),
+      );
+      refuseBob();
+      await started;
+
+      expect(spies.exitSpy.mock.calls).toEqual([[0]]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "http",
+            tokenless: false,
+            port: 3001,
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+      ]);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+      onSpy.mockRestore();
+    });
+
+    it("SIGTERM with a failing proxy close and a failing destroy still stops the socket after the close: its row, its stop(), destroy, exit 0", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      const marker = "unwind-close-failure-marker";
+      stubConsumers("alice");
+      mockEgressProxy.close.mockRejectedValueOnce(new Error(marker));
+      mockEngine.destroy.mockRejectedValueOnce(new Error(`${marker} (destroy)`));
+
+      await run(["--session", "memory", "--proxy", "--ssh-agent", "--runtime-dir", dir]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+      expect(spies.exitSpy.mock.calls).toEqual([[0]]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [expect.objectContaining({ transport: "proxy", port: 3128, trigger: "SIGTERM" })],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
+      const [alice] = mockAgentSocketServer.started;
+      expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+      expect(alice?.stop).toHaveBeenCalledTimes(1);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      const aliceStop = alice?.stop.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(aliceStop).toBeLessThan(destroy);
+
+      onSpy.mockRestore();
+    });
+
+    it("a signal during a failed start's unwind keeps the exit at 1: the refusal alone, the start_failed row alone, one destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      stubConsumers("alice", "bob");
+      const refused = join(dir, "bob", "proxy.sock");
+      mockEgressProxy.listenSocket
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(
+          VaultError.invalidInput(
+            `Egress proxy socket: another process is listening on ${refused}`,
+          ),
+        );
+      let releaseClose: () => void = () => undefined;
+      mockEgressProxy.close.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        }),
+      );
+
+      const started = run(["--session", "memory", "--proxy", "--runtime-dir", dir]);
+      await vi.waitFor(() => expect(mockEgressProxy.close).toHaveBeenCalledTimes(1));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      releaseClose();
+      await expect(started).rejects.toThrow("process.exit");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        [`Error: [INVALID_INPUT] Egress proxy socket: another process is listening on ${refused}`],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 3128,
+            uptimeMs: expect.any(Number),
+            trigger: "start_failed",
+          },
+        ],
+      ]);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+
+      onSpy.mockRestore();
+    });
+
+    it("a socket start refused after the MCP listener's onListenerError keeps the first cause: the listener's line alone, not the refusal, every started listener's row listener_failed, one destroy, exit 1", async () => {
+      const { startMcpHttpServer } = await import("@harpoc/mcp-server");
+      stubConsumers("alice", "bob");
+      let refuseBob: () => void = () => undefined;
+      serveFirstSocket(
+        () =>
+          new Promise((_resolve, reject) => {
+            refuseBob = () =>
+              reject(
+                VaultError.invalidInput("ssh-agent socket: a live socket answers at the path"),
+              );
+          }),
+      );
+
+      const started = run([
+        "--session",
+        "memory",
+        "--mcp-http",
+        "--rest",
+        "--proxy",
+        "--ssh-agent",
+        "--runtime-dir",
+        dir,
+      ]);
+      await vi.waitFor(() => expect(mockAgentSocketServer.start).toHaveBeenCalledTimes(2));
+      const onListenerError = vi.mocked(startMcpHttpServer).mock.calls[0]?.[0].onListenerError;
+      expect(onListenerError).toBeTypeOf("function");
+      onListenerError?.(
+        new VaultError(
+          ErrorCode.INTERNAL_ERROR,
+          "MCP Streamable HTTP: the listener on 127.0.0.1:3001 failed (ENOBUFS)",
+          { errno: "ENOBUFS" },
+        ),
+      );
+      refuseBob();
+      await expect(started).rejects.toThrow("process.exit");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [MEMORY_SESSION],
+        ["[harpoc] MCP server (Streamable HTTP) listening on http://127.0.0.1:3001/mcp"],
+        [
+          "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 2 consumer sockets (<consumer>/proxy.sock)",
+        ],
+        [
+          "Error: [INTERNAL_ERROR] MCP Streamable HTTP: the listener on 127.0.0.1:3001 failed (ENOBUFS)",
+        ],
+      ]);
+      expect(mockEngine.auditServerStop.mock.calls).toEqual([
+        [
+          {
+            transport: "http",
+            tokenless: false,
+            port: 3001,
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+        [
+          {
+            transport: "rest",
+            tokenless: false,
+            port: 3000,
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+        [
+          {
+            transport: "proxy",
+            tokenless: false,
+            port: 3128,
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+        [
+          {
+            transport: "ssh-agent",
+            tokenless: true,
+            consumer: "alice",
+            uptimeMs: expect.any(Number),
+            trigger: "listener_failed",
+          },
+        ],
+      ]);
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
     });
 
     it("redirects console.log to stderr beside the stdio server (--mcp --ssh-agent)", async () => {
@@ -2927,7 +3705,11 @@ describe("server start", () => {
 
     await run(["--mcp-http"]);
 
-    expect(startMcpHttpServer).toHaveBeenCalledWith({ engine: mockEngine, port: 3001 });
+    expect(startMcpHttpServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      port: 3001,
+      onListenerError: expect.any(Function),
+    });
   });
 
   it("starts MCP Streamable HTTP server with custom port", async () => {
@@ -2935,7 +3717,11 @@ describe("server start", () => {
 
     await run(["--mcp-http", "--mcp-http-port", "8090"]);
 
-    expect(startMcpHttpServer).toHaveBeenCalledWith({ engine: mockEngine, port: 8090 });
+    expect(startMcpHttpServer).toHaveBeenCalledWith({
+      engine: mockEngine,
+      port: 8090,
+      onListenerError: expect.any(Function),
+    });
   });
 
   it("starts stdio and Streamable HTTP MCP servers together", async () => {
@@ -2960,6 +3746,7 @@ describe("server start", () => {
       hostname: "127.0.0.1",
       allowedHosts: [],
       oauthManager: mockRestOAuthManager,
+      onListenerError: expect.any(Function),
     });
   });
 
@@ -2974,6 +3761,7 @@ describe("server start", () => {
       hostname: "127.0.0.1",
       allowedHosts: [],
       oauthManager: mockRestOAuthManager,
+      onListenerError: expect.any(Function),
     });
   });
 
@@ -3220,13 +4008,17 @@ describe("server start", () => {
   it("a rejected REST bind reaches the fatal path: the error on stderr, exit 1, engine destroyed", async () => {
     const { startServer } = await import("@harpoc/rest-api");
     (startServer as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new Error("listen EADDRINUSE: address already in use 127.0.0.1:3000"),
+      new VaultError(
+        ErrorCode.INVALID_INPUT,
+        "REST API: another process is listening on 127.0.0.1:3000 (EADDRINUSE)",
+        { errno: "EADDRINUSE" },
+      ),
     );
 
     await expect(run(["--rest"])).rejects.toThrow("process.exit");
     expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(spies.errorSpy).toHaveBeenCalledWith(
-      "Error: listen EADDRINUSE: address already in use 127.0.0.1:3000",
+      "Error: [INVALID_INPUT] REST API: another process is listening on 127.0.0.1:3000 (EADDRINUSE)",
     );
     expect(mockEngine.destroy).toHaveBeenCalled();
   });

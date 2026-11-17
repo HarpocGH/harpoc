@@ -6,15 +6,15 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { GitResult, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
+import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
-const GIT = resolveExecutable("git", controlledPathDirs());
-// Skipped where git does not resolve.
+const GIT = resolveSupportedGit();
+// Skipped where no supported git resolves.
 const describeGit = describe.skipIf(GIT === null);
 
 const USER = "probe_user";
@@ -31,7 +31,7 @@ interface Run {
 it("ssh-live tier: required legs fail instead of skipping when git is unresolvable", () => {
   if (GIT === null && tierRequired("ssh-live")) {
     throw new Error(
-      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no git resolves',
+      'HARPOC_REQUIRE_PLATFORM_TESTS demands the "ssh-live" tier but no supported git resolves',
     );
   }
 });

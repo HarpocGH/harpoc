@@ -7,8 +7,14 @@ describe("server-lifecycle", () => {
     expect([...SERVER_TRANSPORTS]).toEqual(["stdio", "http", "rest", "proxy", "ssh-agent"]);
   });
 
-  it("names exactly the three stop triggers", () => {
-    expect([...SERVER_STOP_TRIGGERS]).toEqual(["SIGINT", "SIGTERM", "transport_closed"]);
+  it("names exactly the five stop triggers", () => {
+    expect([...SERVER_STOP_TRIGGERS]).toEqual([
+      "SIGINT",
+      "SIGTERM",
+      "transport_closed",
+      "start_failed",
+      "listener_failed",
+    ]);
   });
 
   it("derives unions that admit no member the tuples do not carry", () => {

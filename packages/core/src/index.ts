@@ -207,6 +207,12 @@ export { analyzeKeyMaterial, decryptKeyForImport } from "./injection/ssh-agent/k
 export type { KeyMaterialKind } from "./injection/ssh-agent/key-import.js";
 export { GitInjector } from "./injection/git-injector.js";
 export {
+  parseGitVersion,
+  gitVersionAtLeast,
+  GIT_MIN_VERSION,
+  GIT_PIN_MIN_VERSION,
+} from "./injection/git-injector-version.js";
+export {
   matchesUrlAllowlist,
   matchesHostAllowlist,
   matchesHostPortAllowlist,

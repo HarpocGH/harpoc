@@ -10,11 +10,13 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { connect, createServer } from "node:net";
-import type { AddressInfo, Server } from "node:net";
+import { Server, connect, createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
+import { prepareUnixSocketPath } from "@harpoc/core";
 import { ErrorCode, VaultError, maxUnixSocketPathBytes } from "@harpoc/shared";
 import { createEgressProxy } from "./proxy.js";
 import type { EgressProxy } from "./proxy.js";
@@ -29,6 +31,13 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return { ...actual, chmodSync: vi.fn(actual.chmodSync) };
 });
+
+vi.mock("@harpoc/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@harpoc/core")>();
+  return { ...actual, prepareUnixSocketPath: vi.fn(actual.prepareUnixSocketPath) };
+});
+
+const REAL_PLATFORM = process.platform;
 
 let double: EngineDouble;
 let proxy: EgressProxy;
@@ -69,6 +78,17 @@ function socketAccepts(path: string): Promise<boolean> {
   });
 }
 
+function stubPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value, configurable: true });
+}
+
+function failNextBind(listen: MockInstance<Server["listen"]>, err: Error): void {
+  listen.mockImplementationOnce(function (this: Server) {
+    process.nextTick(() => this.emit("error", err));
+    return this;
+  });
+}
+
 describe("listenTcp", () => {
   it.each(["0.0.0.0", "::", "192.168.1.10"])(
     "refuses the non-loopback host %s before anything binds or is recorded",
@@ -95,14 +115,20 @@ describe("listenTcp", () => {
     });
   });
 
-  it("a bind failure rejects as node raised it and writes no row", async () => {
+  it("a taken port is INVALID_INPUT naming the address and EADDRINUSE, never node's text, details.errno, and writes no row", async () => {
     const holder = createServer();
     await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
     const taken = (holder.address() as AddressInfo).port;
     try {
-      await expect(proxy.listenTcp(taken, "127.0.0.1")).rejects.toMatchObject({
-        code: "EADDRINUSE",
-      });
+      const err = await expectVaultError(
+        () => proxy.listenTcp(taken, "127.0.0.1"),
+        ErrorCode.INVALID_INPUT,
+      );
+      expectAbsent(err.message, "address already in use");
+      expect(err.message).toBe(
+        `Egress proxy: another process is listening on 127.0.0.1:${String(taken)} (EADDRINUSE)`,
+      );
+      expect(err.details).toEqual({ errno: "EADDRINUSE" });
       expect(double.auditServerStart).not.toHaveBeenCalled();
     } finally {
       await new Promise<void>((resolve) => holder.close(() => resolve()));
@@ -133,6 +159,146 @@ describe("listenTcp", () => {
     await proxy.close();
 
     expect(await tcpAccepts(port)).toBe(false);
+  });
+
+  describe("through a spy on Server.prototype.listen", () => {
+    let listen: MockInstance<Server["listen"]>;
+    let observed: EgressProxy | undefined;
+
+    beforeEach(() => {
+      listen = vi.spyOn(Server.prototype, "listen");
+    });
+
+    afterEach(async () => {
+      listen.mockRestore();
+      await observed?.close();
+      observed = undefined;
+    });
+
+    it("a bind refused EACCES is INVALID_INPUT naming the address and the errno, never node's text, details.errno, and writes no row", async () => {
+      failNextBind(
+        listen,
+        Object.assign(new Error("listen EACCES: permission denied 127.0.0.1:0"), {
+          code: "EACCES",
+          syscall: "listen",
+        }),
+      );
+
+      const err = await expectVaultError(
+        () => proxy.listenTcp(0, "127.0.0.1"),
+        ErrorCode.INVALID_INPUT,
+      );
+      expectAbsent(err.message, "permission denied");
+      expect(err.message).toBe("Egress proxy: cannot listen on 127.0.0.1:0 (EACCES)");
+      expect(err.details).toEqual({ errno: "EACCES" });
+      expect(double.auditServerStart).not.toHaveBeenCalled();
+    });
+
+    it("a bind refused with no errno is INVALID_INPUT naming the address (unknown error), never node's text, no details, and writes no row", async () => {
+      failNextBind(listen, new Error("listen failed"));
+
+      const err = await expectVaultError(
+        () => proxy.listenTcp(0, "127.0.0.1"),
+        ErrorCode.INVALID_INPUT,
+      );
+      expectAbsent(err.message, "listen failed");
+      expect(err.message).toBe("Egress proxy: cannot listen on 127.0.0.1:0 (unknown error)");
+      expect(err.details).toBeUndefined();
+      expect(double.auditServerStart).not.toHaveBeenCalled();
+    });
+
+    it("a bind refused EACCES on ::1 is INVALID_INPUT naming the address bracketed ([::1]:0) and the errno", async () => {
+      failNextBind(
+        listen,
+        Object.assign(new Error("listen EACCES: permission denied ::1:0"), {
+          code: "EACCES",
+          syscall: "listen",
+        }),
+      );
+
+      const err = await expectVaultError(() => proxy.listenTcp(0, "::1"), ErrorCode.INVALID_INPUT);
+      expect(err.message).toBe("Egress proxy: cannot listen on [::1]:0 (EACCES)");
+    });
+
+    it("an accept error after the bind is handed to onListenerError once, INTERNAL_ERROR naming the bound address and the errno, never node's text, details.errno", async () => {
+      const onListenerError = vi.fn<(err: VaultError) => void>();
+      observed = createEgressProxy({ engine: double.engine, onListenerError });
+      const { port } = await observed.listenTcp(0, "127.0.0.1");
+      expect(listen).toHaveBeenCalledTimes(1);
+      const server = listen.mock.contexts[0] as Server;
+
+      server.emit(
+        "error",
+        Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" }),
+      );
+      expect(onListenerError).toHaveBeenCalledTimes(1);
+      const err = onListenerError.mock.calls[0]?.[0] as VaultError;
+      expectAbsent(err.message, "accept ");
+      expect(err).toBeInstanceOf(VaultError);
+      expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+      expect(err.message).toBe(
+        `Egress proxy: the listener on 127.0.0.1:${String(port)} failed (ENOBUFS)`,
+      );
+      expect(err.details).toEqual({ errno: "ENOBUFS" });
+    });
+
+    it("a listener error without a code is handed to onListenerError once, INTERNAL_ERROR naming the bound address (unknown error), never node's text, no details", async () => {
+      const onListenerError = vi.fn<(err: VaultError) => void>();
+      observed = createEgressProxy({ engine: double.engine, onListenerError });
+      const { port } = await observed.listenTcp(0, "127.0.0.1");
+      expect(listen).toHaveBeenCalledTimes(1);
+      const server = listen.mock.contexts[0] as Server;
+
+      server.emit("error", new Error("accept failed"));
+      expect(onListenerError).toHaveBeenCalledTimes(1);
+      const err = onListenerError.mock.calls[0]?.[0] as VaultError;
+      expectAbsent(err.message, "accept failed");
+      expect(err).toBeInstanceOf(VaultError);
+      expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+      expect(err.message).toBe(
+        `Egress proxy: the listener on 127.0.0.1:${String(port)} failed (unknown error)`,
+      );
+      expect(err.details).toBeUndefined();
+    });
+
+    it("with the bound server's address() throwing after the bind, an accept error's emit throws nothing and onListenerError receives once the message naming the port taken at the bind", async () => {
+      const onListenerError = vi.fn<(err: VaultError) => void>();
+      observed = createEgressProxy({ engine: double.engine, onListenerError });
+      const { port } = await observed.listenTcp(0, "127.0.0.1");
+      expect(listen).toHaveBeenCalledTimes(1);
+      const server = listen.mock.contexts[0] as Server;
+      server.address = () => {
+        throw Object.assign(new Error("getsockname EBADF"), {
+          code: "EBADF",
+          syscall: "getsockname",
+        });
+      };
+
+      expect(() =>
+        server.emit(
+          "error",
+          Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" }),
+        ),
+      ).not.toThrow();
+      expect(onListenerError).toHaveBeenCalledTimes(1);
+      expect((onListenerError.mock.calls[0]?.[0] as VaultError).message).toBe(
+        `Egress proxy: the listener on 127.0.0.1:${String(port)} failed (ENOBUFS)`,
+      );
+    });
+
+    it("without onListenerError the emit throws nothing and the listener still accepts", async () => {
+      const { port } = await proxy.listenTcp(0, "127.0.0.1");
+      expect(listen).toHaveBeenCalledTimes(1);
+      const server = listen.mock.contexts[0] as Server;
+
+      expect(() =>
+        server.emit(
+          "error",
+          Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" }),
+        ),
+      ).not.toThrow();
+      expect(await tcpAccepts(port)).toBe(true);
+    });
   });
 });
 
@@ -321,5 +487,59 @@ describe.skipIf(process.platform === "win32")("listenSocket (POSIX)", () => {
     await proxy.close();
 
     expect(existsSync(path)).toBe(false);
+  });
+
+  describe("through a spy on Server.prototype.listen", () => {
+    let listen: MockInstance<Server["listen"]>;
+    let observed: EgressProxy | undefined;
+
+    beforeEach(() => {
+      listen = vi.spyOn(Server.prototype, "listen");
+    });
+
+    afterEach(async () => {
+      listen.mockRestore();
+      await observed?.close();
+      observed = undefined;
+    });
+
+    it("an accept error after the bind is handed to onListenerError once, INTERNAL_ERROR naming the socket path and the errno, never node's text, details.errno", async () => {
+      const path = join(dir, "proxy.sock");
+      const onListenerError = vi.fn<(err: VaultError) => void>();
+      observed = createEgressProxy({ engine: double.engine, onListenerError });
+      await observed.listenSocket(path);
+      expect(listen).toHaveBeenCalledTimes(1);
+      const server = listen.mock.contexts[0] as Server;
+
+      server.emit(
+        "error",
+        Object.assign(new Error("accept ENOBUFS"), { code: "ENOBUFS", syscall: "accept" }),
+      );
+      expect(onListenerError).toHaveBeenCalledTimes(1);
+      const err = onListenerError.mock.calls[0]?.[0] as VaultError;
+      expectAbsent(err.message, "accept ");
+      expect(err).toBeInstanceOf(VaultError);
+      expect(err.code).toBe(ErrorCode.INTERNAL_ERROR);
+      expect(err.message).toBe(`Egress proxy socket: the listener on ${path} failed (ENOBUFS)`);
+      expect(err.details).toEqual({ errno: "ENOBUFS" });
+    });
+  });
+});
+
+describe("listenSocket: a thrown value with no code", () => {
+  afterEach(() => {
+    stubPlatform(REAL_PLATFORM);
+    vi.mocked(prepareUnixSocketPath).mockReset();
+  });
+
+  it("a ladder that rejects with null is INVALID_INPUT naming the path (unknown error), the ladder called with the path and the label, and nothing is recorded (the platform stubbed to linux)", async () => {
+    stubPlatform("linux");
+    const path = "/run/harpoc/agent/proxy.sock";
+    vi.mocked(prepareUnixSocketPath).mockRejectedValueOnce(null);
+
+    const err = await expectVaultError(() => proxy.listenSocket(path), ErrorCode.INVALID_INPUT);
+    expect(err.message).toBe(`Egress proxy socket: cannot listen on ${path} (unknown error)`);
+    expect(prepareUnixSocketPath).toHaveBeenLastCalledWith(path, "Egress proxy socket");
+    expect(double.auditServerStart).not.toHaveBeenCalled();
   });
 });

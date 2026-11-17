@@ -7,6 +7,7 @@ import { AuditEventType, ErrorCode } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import { controlledPathDirs, resolveExecutable } from "./injection/allowlist.js";
 import { resolveNativeSshClient } from "./injection/__fixtures__/native-ssh-client.js";
+import { resolveSupportedGit } from "./injection/__fixtures__/supported-git.js";
 import { forceJobWrapperUnavailableForTests } from "./injection/win32-job-wrapper.js";
 import { system32Path } from "./win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -27,7 +28,7 @@ if (process.platform === "win32") {
 
 // The refusal comes after allowlist resolution, so each context needs its binary;
 // a host without one skips that context's case.
-const GIT = resolveExecutable("git", controlledPathDirs());
+const GIT = resolveSupportedGit();
 const SSH = resolveNativeSshClient("ssh");
 const SFTP = resolveNativeSshClient("sftp");
 const DOCKER = resolveExecutable("docker", controlledPathDirs());
