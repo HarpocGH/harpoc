@@ -11,6 +11,8 @@ Thank you for your interest in contributing to Harpoc! This document provides gu
 
 Approval for the two native build scripts (`argon2`, `better-sqlite3`) lives in `pnpm-workspace.yaml`, which carries the pnpm 10 (`onlyBuiltDependencies`) and pnpm 11 (`allowBuilds`) forms side by side. A package added later that ships an install script needs a verdict in `allowBuilds`, or pnpm 11 fails the install with `ERR_PNPM_IGNORED_BUILDS`.
 
+The same file carries one patched dependency: `patchedDependencies` applies `patches/mongodb@7.9.0.patch` (a ceiling on the SCRAM iteration count). Moving `mongodb` to another version fails `pnpm install` with `ERR_PNPM_UNUSED_PATCH` until the patch file and its key are renamed to the new version and the hunk is checked against that version's `lib/cmap/auth/scram.js`; write the block by hand, because `pnpm patch-commit` rewrites `pnpm-workspace.yaml` without its comments.
+
 ## Setup
 
 ```bash

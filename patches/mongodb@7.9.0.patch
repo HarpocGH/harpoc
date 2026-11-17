@@ -1,0 +1,14 @@
+diff --git a/lib/cmap/auth/scram.js b/lib/cmap/auth/scram.js
+index faea461378a927c715eff2d3c92eafc11b254901..8674aa71fcb49d4d4ba5b98333143b2249a871c9 100644
+--- a/lib/cmap/auth/scram.js
++++ b/lib/cmap/auth/scram.js
+@@ -101,6 +101,9 @@ async function continueScramConversation(cryptoMethod, response, authContext) {
+         // TODO(NODE-3483)
+         throw new error_1.MongoRuntimeError(`Server returned an invalid iteration count ${iterations}`);
+     }
++    if (iterations > 100000) {
++        throw new error_1.MongoRuntimeError(`Server returned an iteration count ${iterations} above the ceiling of 100000`);
++    }
+     const salt = dict.s;
+     const rnonce = dict.r;
+     if (rnonce.startsWith('nonce')) {

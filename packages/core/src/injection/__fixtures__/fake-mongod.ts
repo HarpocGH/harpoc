@@ -15,6 +15,7 @@ export interface FakeMongodOptions {
   ) => FakeMongodAnswer;
   reply?: (command: Record<string, unknown>) => Record<string, unknown>;
   trickleMs?: number;
+  iterations?: number;
 }
 
 export interface FakeMongod {
@@ -162,9 +163,10 @@ export async function startFakeMongod(options: FakeMongodOptions): Promise<FakeM
   const plan = options.plan ?? (() => "answer");
   const reply = options.reply ?? (() => ({ ok: 1 }));
   const trickleMs = options.trickleMs ?? 200;
+  const iterations = options.iterations ?? ITERATIONS;
   const saslUser = options.user.replace(/=/g, "=3D").replace(/,/g, "=2C");
   const salt = randomBytes(16);
-  const salted = pbkdf2Sync(options.password, salt, ITERATIONS, 32, "sha256");
+  const salted = pbkdf2Sync(options.password, salt, iterations, 32, "sha256");
   const storedKey = sha256(hmac(salted, "Client Key"));
   const serverKey = hmac(salted, "Server Key");
   const received: { stage: string; connection: number; maxTimeMS?: number }[] = [];
@@ -182,7 +184,7 @@ export async function startFakeMongod(options: FakeMongodOptions): Promise<FakeM
     const fields = scramFields(conn.clientFirstBare);
     conn.user = fields.n;
     conn.nonce = `${fields.r ?? ""}${randomBytes(18).toString("base64")}`;
-    conn.serverFirst = `r=${conn.nonce},s=${salt.toString("base64")},i=${String(ITERATIONS)}`;
+    conn.serverFirst = `r=${conn.nonce},s=${salt.toString("base64")},i=${String(iterations)}`;
     return {
       conversationId: 1,
       done: false,

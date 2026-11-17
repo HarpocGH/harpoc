@@ -233,6 +233,11 @@ async function main(): Promise<void> {
   let banner: string;
   let shuttingDown = false;
 
+  const settle = (step: () => unknown): Promise<unknown> =>
+    Promise.resolve()
+      .then(step)
+      .catch(() => undefined);
+
   // The stop row mirrors the start row (R4/D67). A sealed vault cannot take
   // it, and a stop that cannot be recorded must not block the stop.
   const shutdown = async (trigger: ServerStopTrigger, code = 0): Promise<void> => {
@@ -249,13 +254,8 @@ async function main(): Promise<void> {
     } catch {
       // Best-effort on the sealed path.
     }
-    if (code === 0) {
-      await close();
-      await engine.destroy();
-    } else {
-      await close().catch(() => undefined);
-      await engine.destroy().catch(() => undefined);
-    }
+    await settle(() => close());
+    await settle(() => engine.destroy());
     process.exit(code);
   };
 

@@ -28,3 +28,13 @@ allowBuilds:
 # stands here until they move to 11 (then this block goes).
 overrides:
   minimatch: ^11.0.1
+
+# mongodb 7.9.0 derives the SCRAM key with whatever iteration count the server announces (floor 4096,
+# no ceiling; the nightly of 2026-11-17 the same), on a worker thread that cannot be cancelled. The patch
+# refuses a count above 100000 before the derivation, as pg does by default (scramMaxIterations). The key
+# names the version: a mongodb version move fails the install (ERR_PNPM_UNUSED_PATCH) until the patch file
+# and this key are renamed and the hunk checked against the new lib/cmap/auth/scram.js. Write this block
+# by hand - `pnpm patch-commit` rewrites the file without its comments. It goes when the driver ships a
+# ceiling of its own.
+patchedDependencies:
+  mongodb@7.9.0: patches/mongodb@7.9.0.patch

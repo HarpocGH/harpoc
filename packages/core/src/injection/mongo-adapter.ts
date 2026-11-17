@@ -64,6 +64,10 @@ import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
  *     class has the driver mark the server Unknown, so `close()` sends no
  *     `endSessions`; `close()` is raced against `DB_CLOSE_GRACE_MS`.
  * `socketTimeoutMS` stays the connection-level idle-read bound.
+ * The SCRAM key derivation is outside every bound above: it runs on a worker
+ * thread and cannot be cancelled. The driver is therefore patched
+ * (`patches/mongodb@7.9.0.patch`) to refuse an iteration count above 100 000
+ * before it derives.
  */
 export class MongoAdapter implements DbCommandAdapter {
   async execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult> {

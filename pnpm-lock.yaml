@@ -7,6 +7,11 @@ settings:
 overrides:
   minimatch: ^11.0.1
 
+patchedDependencies:
+  mongodb@7.9.0:
+    hash: a9b66d7ed2951fede497ce0167b063ee616775e014e2487242d4e5efe984ee4b
+    path: patches/mongodb@7.9.0.patch
+
 importers:
 
   .:
@@ -120,7 +125,7 @@ importers:
         version: 13.1.1
       mongodb:
         specifier: ^7.9.0
-        version: 7.9.0
+        version: 7.9.0(patch_hash=a9b66d7ed2951fede497ce0167b063ee616775e014e2487242d4e5efe984ee4b)
       mysql2:
         specifier: ^3.23.1
         version: 3.24.6(@types/node@26.6.6)
@@ -3580,7 +3585,7 @@ snapshots:
       '@types/whatwg-url': 13.0.0
       whatwg-url: 14.2.0
 
-  mongodb@7.9.0:
+  mongodb@7.9.0(patch_hash=a9b66d7ed2951fede497ce0167b063ee616775e014e2487242d4e5efe984ee4b):
     dependencies:
       '@mongodb-js/saslprep': 1.5.0
       bson: 7.3.2

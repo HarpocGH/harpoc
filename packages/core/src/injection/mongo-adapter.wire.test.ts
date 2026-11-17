@@ -1,3 +1,4 @@
+import { webcrypto } from "node:crypto";
 import { MongoNetworkError } from "mongodb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbConnectOptions } from "./db-adapters.js";
@@ -22,6 +23,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   process.off("unhandledRejection", countUnhandled);
   await fake?.close();
   fake = undefined;
@@ -30,6 +32,7 @@ afterEach(async () => {
 async function standIn(
   plan: FakeMongodOptions["plan"],
   reply?: FakeMongodOptions["reply"],
+  iterations?: number,
 ): Promise<FakeMongod> {
   fake = await startFakeMongod({
     user: USER_NAME,
@@ -37,6 +40,7 @@ async function standIn(
     trickleMs: TRICKLE_MS,
     plan,
     reply,
+    iterations,
   });
   return fake;
 }
@@ -155,5 +159,33 @@ describe("MongoAdapter against the wire stand-in (the real mongodb driver)", () 
       },
       { timeout: GUARD_MS, interval: 10 },
     );
+  });
+
+  it("a server that announces a SCRAM iteration count of 100001 is refused before the key is derived: the driver's MongoRuntimeError naming the count and the ceiling, not the deadline's reason, no saslContinue sent, no unhandled rejection", async () => {
+    const derive = vi.spyOn(webcrypto.subtle, "deriveBits");
+    process.on("unhandledRejection", countUnhandled);
+    const server = await standIn(undefined, undefined, 100_001);
+    const outcome = await execute(server.port, 3_000);
+    await flushed();
+    expect(unhandled).toBe(0);
+    expect((outcome as Error).name).toBe("MongoRuntimeError");
+    expect((outcome as Error).message).toBe(
+      "Server returned an iteration count 100001 above the ceiling of 100000",
+    );
+    expect(server.received().some((entry) => entry.stage === "saslContinue")).toBe(false);
+    expect(derive).not.toHaveBeenCalled();
+  });
+
+  it("a server that announces exactly 100000 is served: the key is derived, the command resolves and a saslContinue was sent", async () => {
+    const derive = vi.spyOn(webcrypto.subtle, "deriveBits");
+    const server = await standIn(
+      undefined,
+      () => ({ cursor: { id: 0, ns: "app_db.c", firstBatch: [{ _id: 1 }] }, ok: 1 }),
+      100_000,
+    );
+    const outcome = await execute(server.port, 3_000);
+    expect(outcome).toEqual({ rows: [{ _id: 1 }], fields: [{ name: "_id" }], rowCount: 1 });
+    expect(server.received().some((entry) => entry.stage === "saslContinue")).toBe(true);
+    expect(derive).toHaveBeenCalled();
   });
 });

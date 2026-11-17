@@ -61,24 +61,63 @@ net.Server.prototype.listen = function (...args) {
 `;
 const LISTENER_FAILURE_BOUND_MS = 15_000;
 const LISTENER_FAILED = /^(?:Error|Fatal): .* failed \(ENOBUFS\)/m;
+const STORE_CLOSE_MARKER = "preload: the store's close threw";
+const STORE_CLOSE_ERROR_PRELOAD = `const Module = require("node:module");
+const path = require("node:path");
+const load = Module._load;
+Module._load = function (request, ...rest) {
+  const loaded = load.call(this, request, ...rest);
+  const file = String(request);
+  const isStore =
+    file === "better-sqlite3" ||
+    (path.basename(file) === "index.js" &&
+      path.basename(path.dirname(path.dirname(file))) === "better-sqlite3");
+  if (isStore && typeof loaded === "function" && !loaded.prototype.harpocTestClose) {
+    const close = loaded.prototype.close;
+    loaded.prototype.harpocTestClose = close;
+    loaded.prototype.close = function () {
+      close.call(this);
+      console.error("preload: the store's close threw");
+      throw Object.assign(new Error("store close failed"), { code: "SQLITE_IOERR" });
+    };
+  }
+  return loaded;
+};
+`;
+const LISTENER_CLOSE_MARKER = "preload: the listener's close reported an error";
+const LISTENER_CLOSE_ERROR_PRELOAD = `const net = require("node:net");
+const close = net.Server.prototype.close;
+net.Server.prototype.close = function (callback) {
+  if (typeof callback !== "function") return close.call(this, callback);
+  return close.call(this, () => {
+    console.error("preload: the listener's close reported an error");
+    callback(Object.assign(new Error("listener close failed"), { code: "EIO" }));
+  });
+};
+`;
+const HTTP_READY = /Harpoc MCP server listening on http:\/\/127\.0\.0\.1:\d+/;
 
 function failureLines(stderr: string): string[] {
   return stderr.split(/\r?\n/).filter((line) => /^(?:Error|Fatal):/.test(line));
 }
 
-function acceptErrorEnv(): NodeJS.ProcessEnv {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-accept-error-"));
+function preloadEnv(fileName: string, source: string): NodeJS.ProcessEnv {
+  const dir = mkdtempSync(join(tmpdir(), "harpoc-preload-"));
   onTestFinished(() => {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  const preload = join(dir, "accept-error-preload.cjs");
-  writeFileSync(preload, ACCEPT_ERROR_PRELOAD);
+  const preload = join(dir, fileName);
+  writeFileSync(preload, source);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_OPTIONS: `--require "${preload.replace(/[\\"]/g, "\\$&")}"`,
   };
   delete env.HARPOC_TOKEN;
   return env;
+}
+
+function acceptErrorEnv(): NodeJS.ProcessEnv {
+  return preloadEnv("accept-error-preload.cjs", ACCEPT_ERROR_PRELOAD);
 }
 
 function serverRowsOf(
@@ -526,8 +565,8 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
   // stdout blocks the child once the pipe buffer fills and `close` then never
   // fires — the twin would hang to its timeout instead of failing. The bytes
   // are kept: a shutdown twin sends no request, so its stdout must stay empty.
-  function spawnMcp(): CliServer {
-    const env = { ...process.env };
+  function spawnMcp(base: NodeJS.ProcessEnv = process.env): CliServer {
+    const env = { ...base };
     delete env.HARPOC_TOKEN;
     return startNode([MCP_ENTRY, "--vault-dir", vaultDir, "--token-file", tokenFile], {
       stdin: "pipe",
@@ -539,8 +578,16 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
     await mcp.waitForStderr(/Harpoc MCP server running on stdio/, 30_000);
   }
 
-  async function failingHttpOnFreePort(
+  function failingHttpOnFreePort(
     env: NodeJS.ProcessEnv,
+  ): Promise<{ mcp: CliServer; port: number }> {
+    return httpOnFreePort(env, LISTENER_FAILED, LISTENER_FAILURE_BOUND_MS);
+  }
+
+  async function httpOnFreePort(
+    env: NodeJS.ProcessEnv,
+    ready: RegExp,
+    boundMs: number,
   ): Promise<{ mcp: CliServer; port: number }> {
     for (let attempt = 1; ; attempt++) {
       const port = await freePort();
@@ -550,7 +597,7 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
       );
       onTestFinished(() => mcp.stop());
       try {
-        await mcp.waitForStderr(LISTENER_FAILED, LISTENER_FAILURE_BOUND_MS);
+        await mcp.waitForStderr(ready, boundMs);
         return { mcp, port };
       } catch (err) {
         const collided = mcp.exited() && /\(EADDRINUSE\)/.test(mcp.stderrSoFar());
@@ -643,6 +690,66 @@ describe("server lifecycle rows through the spawned harpoc-mcp binary", () => {
       const sigterm = stops.find((r) => r.detail?.trigger === "SIGTERM");
       expect(sigterm?.detail).toMatchObject({ transport: "stdio", tokenless: false });
       expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
+    },
+    60_000,
+  );
+
+  it("stdin EOF is a graceful stop when the store's close throws inside the engine's destroy: exit 0, the failure not printed, one more transport_closed row", async () => {
+    const closedStops = (): number =>
+      (engine as VaultEngine)
+        .queryAudit({ eventType: AuditEventType.SERVER_STOP })
+        .filter((r) => r.detail?.trigger === "transport_closed").length;
+    const before = closedStops();
+    const mcp = spawnMcp(preloadEnv("store-close-error-preload.cjs", STORE_CLOSE_ERROR_PRELOAD));
+    try {
+      await awaitBanner(mcp);
+      mcp.child.stdin?.end();
+      const { code } = await mcp.closed();
+      expect(mcp.stderrSoFar()).toContain(STORE_CLOSE_MARKER);
+      expect(code).toBe(0);
+    } finally {
+      await mcp.stop();
+    }
+    expect(mcp.stderrSoFar()).not.toContain("store close failed");
+    expect(closedStops()).toBe(before + 1);
+    expect((engine as VaultEngine).verifyAuditChain().valid).toBe(true);
+  }, 60_000);
+
+  // win32 delivers no signal to a handler (the SIGTERM row above).
+  it.runIf(process.platform !== "win32")(
+    "SIGTERM is a graceful stop of the Streamable HTTP listener when its close reports an error and the store's close throws inside the engine's destroy: both steps run, exit 0, neither failure printed, the http start paired with a SIGTERM stop",
+    async () => {
+      const { mcp, port } = await httpOnFreePort(
+        preloadEnv(
+          "stop-steps-error-preload.cjs",
+          `${LISTENER_CLOSE_ERROR_PRELOAD}${STORE_CLOSE_ERROR_PRELOAD}`,
+        ),
+        HTTP_READY,
+        30_000,
+      );
+      mcp.child.kill("SIGTERM");
+      const { code } = await mcp.closed();
+      expect(mcp.stderrSoFar()).toContain(LISTENER_CLOSE_MARKER);
+      expect(mcp.stderrSoFar()).toContain(STORE_CLOSE_MARKER);
+      expect(code).toBe(0);
+      expect(mcp.stderrSoFar()).not.toContain("listener close failed");
+      expect(mcp.stderrSoFar()).not.toContain("store close failed");
+      expect(serverRowsOf(engine as VaultEngine, "http", port)).toEqual([
+        [
+          AuditEventType.SERVER_START,
+          { transport: "http", tokenless: false, tty_prompt: false, port, host: "127.0.0.1" },
+        ],
+        [
+          AuditEventType.SERVER_STOP,
+          {
+            transport: "http",
+            tokenless: false,
+            port,
+            uptime_ms: expect.any(Number),
+            trigger: "SIGTERM",
+          },
+        ],
+      ]);
     },
     60_000,
   );
