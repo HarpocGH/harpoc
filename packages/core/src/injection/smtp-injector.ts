@@ -96,7 +96,7 @@ export function buildSmtpAuditDetails(
   return {
     ...(typeof action.host === "string" ? { host: action.host } : {}),
     from: action.from,
-    recipients: collectRecipients(action),
+    recipients: auditRecipients(action),
     attachment_paths: attachments.map((a) => a.path),
     attachment_total_bytes: attachments.reduce((sum, a) => sum + a.bytes, 0),
   };
@@ -299,7 +299,7 @@ export class SmtpInjector {
 
     return {
       result: { type: ActionType.SMTP, accepted, message_id: assembled.messageId },
-      auditDetails: buildSmtpAuditDetails(action, resolved),
+      auditDetails: { ...buildSmtpAuditDetails(action, resolved), recipients },
     };
   }
 
@@ -365,6 +365,12 @@ export async function executeSmtpAction(
 /** The deduplicated to ∪ cc ∪ bcc recipient union, in envelope order. */
 function collectRecipients(action: SmtpAction): string[] {
   return [...new Set([...action.to, ...(action.cc ?? []), ...(action.bcc ?? [])])];
+}
+
+function auditRecipients(action: SmtpAction): string[] {
+  const fields: unknown[] = [action.to, action.cc, action.bcc];
+  const members = fields.flatMap((field) => (Array.isArray(field) ? (field as unknown[]) : []));
+  return [...new Set(members.filter((member): member is string => typeof member === "string"))];
 }
 
 /**

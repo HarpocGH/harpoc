@@ -61,7 +61,7 @@ export type ImapOperationFields =
 export interface ImapAuditDetails {
   host?: string;
   mailbox: string;
-  operation: string;
+  operation?: string;
   uid_count: number;
   /** XOAUTH2 identity from the action's `account` — present on the OAuth arm only. */
   auth_account?: string;
@@ -135,10 +135,15 @@ export function buildImapAuditDetails(
   action: ImapAction,
   result: ImapOperationFields,
 ): ImapAuditDetails {
+  const operation: unknown = action.operation;
+  const kind: unknown =
+    typeof operation === "object" && operation !== null
+      ? (operation as { kind?: unknown }).kind
+      : undefined;
   return {
     ...(typeof action.host === "string" ? { host: action.host } : {}),
     mailbox: action.mailbox,
-    operation: action.operation.kind,
+    ...(typeof kind === "string" ? { operation: kind } : {}),
     uid_count: resultUidCount(result),
     ...(action.account !== undefined ? { auth_account: action.account } : {}),
   };

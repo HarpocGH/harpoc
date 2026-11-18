@@ -25,7 +25,7 @@ export interface AsUserOptions {
  * The `sudo` argv that runs `argv` as `user`: `-n` (never prompt), `--`, then
  * each variable as a `NAME=value` argument of `/usr/bin/env` — never a shell
  * string, and never `--preserve-env`, which needs the variable in the runner's
- * own environment and a sudoers SETENV grant (`deployment-models.md` Rules).
+ * own environment and a sudoers SETENV grant.
  * No value handed here may be a secret: `sudo`'s argv stays world-readable in
  * `/proc/<pid>/cmdline` for as long as the command runs.
  */

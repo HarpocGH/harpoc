@@ -1,6 +1,5 @@
 /**
- * The vault's win32 lifecycle wrapper (thesis §4.5.3 layer 4; D1–D5 of
- * docs/implementation-plan-win32-job-wrapper-2026-09-10.md).
+ * The vault's win32 lifecycle wrapper (thesis §4.5.3 layer 4).
  *
  * `taskkill /T` snapshots a process tree once, so a grandchild created between
  * the snapshot and the kill escapes with the inherited environment — the

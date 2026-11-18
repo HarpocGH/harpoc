@@ -161,9 +161,8 @@ jobs:
       # probe step had run before the gate; probe P (run 34862717372, 2026-09-14)
       # isolated the call: the bare host's legs at 1412 / 1332 ms (attempt 2;
       # 3334 ms on attempt 1's Node 22 leg) against the standing legs' 8387 /
-      # 19128 ms (decisions.md § "Concurrency, warm-up and register tranche
-      # (2026-09-14, third) — rulings", D2/D3). The call's own duration is
-      # printed for the record; nothing is asserted.
+      # 19128 ms. The call's own duration is printed for the record; nothing is
+      # asserted.
       - name: Warm-up before the gate (Windows)
         if: runner.os == 'Windows'
         run: node .github/scripts/pregate-warmup.mjs
@@ -176,8 +175,7 @@ jobs:
       # The three CI series lines (the listing warm-up, the two DPAPI cases)
       # reach the job summary and this file; the summary renders only for a
       # signed-in browser and no API returns it, so the file is uploaded and
-      # harvested with `gh run download` (decisions.md § "Listing probe and
-      # series artifact tranche (2026-09-09) — rulings", D5).
+      # harvested with `gh run download`.
       - name: Upload the CI series lines (Windows)
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v7

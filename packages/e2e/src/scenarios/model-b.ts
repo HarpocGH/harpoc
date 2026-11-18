@@ -69,7 +69,7 @@ export function captureCalls(...credentials: string[]): CallCapture {
  * One model-B row (RD-B6-1): a Harpoc arm with no variant — B's comparison is
  * model A against model B, so A's control is its own scenario id. `observe`
  * returns the outcome it saw, and throws "arm is not discriminating" where a
- * held outcome lacks its proof (`e2e-benchmarks.md` Rules).
+ * held outcome lacks its proof.
  */
 export interface ModelBScenario {
   scenario: string;

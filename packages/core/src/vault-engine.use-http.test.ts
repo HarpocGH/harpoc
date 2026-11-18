@@ -270,7 +270,7 @@ describe("URL allowlist enforcement (HTTP)", () => {
 });
 
 describe("use_secret action dispatch", () => {
-  it("rejects an unknown action type at runtime (never-typed default arm)", async () => {
+  it("rejects an unknown action type at runtime (the door)", async () => {
     await engine.initVault("password");
     await engine.createSecret({
       name: "dispatch",

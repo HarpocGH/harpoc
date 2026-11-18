@@ -3,7 +3,7 @@
  * two DPAPI cases run under budgets a loaded windows-latest runner has
  * exceeded (45 s tripped three times, 2026-09-02 → 07), so each protect and
  * unprotect is measured and printed — durations and outcomes only, never key
- * material — and the series in `decisions.md` decides whether a budget moves.
+ * material — and the series decides whether a budget moves.
  * Typed structurally so this package never imports `@harpoc/core`.
  */
 

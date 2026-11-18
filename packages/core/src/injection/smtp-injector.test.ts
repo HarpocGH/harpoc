@@ -506,6 +506,25 @@ describe("buildSmtpAuditDetails", () => {
     expect(auditDetails.attachment_paths).toEqual(["/a.txt", "/b.txt"]);
     expect(auditDetails.attachment_total_bytes).toBe(350);
   });
+
+  it("the success row names the envelope the send used, also for a recipient field that is no array", async () => {
+    const { fn, calls } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+    const action = {
+      ...baseAction(),
+      bcc: new Set(["hidden@example.com"]),
+    } as unknown as SmtpAction;
+    const { auditDetails } = await injector.run(
+      action,
+      SECRET,
+      basePolicy({}),
+      undefined,
+      undefined,
+    );
+    const envelope = firstCall(calls).envelope.recipients;
+    expect(envelope).toContain("hidden@example.com");
+    expect(auditDetails.recipients).toStrictEqual(envelope);
+  });
 });
 
 describe("executeSmtpAction (free function, default deps)", () => {
@@ -579,6 +598,24 @@ describe("SmtpInjector — a non-string host is refused before the allowlist", (
       });
     },
   );
+
+  it("buildSmtpAuditDetails names only the string members of recipient fields that are arrays", () => {
+    const base = baseAction({});
+    const action = {
+      ...base,
+      to: ["dev@example.com", 5, "dev@example.com"],
+      cc: "cc@example.com",
+      bcc: ["audit@example.com", null],
+    } as unknown as SmtpAction;
+    expect(buildSmtpAuditDetails(action, []).recipients).toStrictEqual([
+      "dev@example.com",
+      "audit@example.com",
+    ]);
+    for (const to of [undefined, null, 5, "dev@example.com", {}]) {
+      const bare = { ...base, to, cc: 5, bcc: {} } as unknown as SmtpAction;
+      expect(buildSmtpAuditDetails(bare, []).recipients).toStrictEqual([]);
+    }
+  });
 
   it("control: a string host outside the allowlist keeps today's outcome and message", async () => {
     const { fn, calls } = makeFakeSend();

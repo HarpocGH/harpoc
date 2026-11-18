@@ -1,9 +1,8 @@
 /**
  * DDL constants for the vault database — the v1.5 baseline at schema 12 and
  * the steps past it. The 1.0–1.4 line's migrations 001–012 were collapsed into
- * the baseline on 2026-08-30 (compromise audit R2); their history lives in the
- * docs repo's implementation-history.md. Every table is a SQLite STRICT table;
- * every timestamp is milliseconds.
+ * the baseline on 2026-08-30 (compromise audit R2). Every table is a SQLite
+ * STRICT table; every timestamp is milliseconds.
  */
 
 /**

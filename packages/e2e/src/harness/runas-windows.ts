@@ -201,8 +201,8 @@ export function assertLauncherCommandLine(spec: Pick<LauncherSpec, "file" | "arg
 /**
  * The environment the child gets: the system's names from `base`, the
  * account's `USERNAME`, `TEMP` and `TMP`, then `extra` — never the runner's own
- * variables. `extra` holds paths and placeholders only (`deployment-models.md`
- * Rules: a command line or an environment is readable beyond its owner).
+ * variables. `extra` holds paths and placeholders only: a command line or an
+ * environment is readable beyond its owner.
  */
 export function childEnvironment(
   user: string,

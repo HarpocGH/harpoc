@@ -39,7 +39,7 @@ export interface InventoryJudged {
  * The inventory command: the standard cmdlet, no P/Invoke, no handle opened by
  * this code. `Win32_Process.CommandLine` is filled for processes the caller may
  * query and `null` for the others (measured against `lsass.exe` and
- * `winlogon.exe` from a standard token; `research-evidence.md` § E2) — the
+ * `winlogon.exe` from a standard token) — the
  * row's claim is what the listing shows, not an access the harness exercises.
  * `-InputObject @(...)` keeps one process an array. Every non-ASCII character
  * leaves as a `\uXXXX` escape, so the bytes on the pipe are ASCII whatever the

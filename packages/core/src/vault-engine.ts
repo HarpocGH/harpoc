@@ -129,6 +129,7 @@ import {
 } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
+import { actionShapeRefusal, imapOperationRefusal } from "./injection/action-shape.js";
 import { actionTimeoutRefusal } from "./injection/action-timeout.js";
 import {
   controlledPathDirs,
@@ -496,7 +497,13 @@ function computeOAuthRefreshStatus(row: OAuthTokenRow): OAuthTokenStatus["refres
  * failure may have come before the first read or after some were read.
  */
 function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
-  return (action.attachments ?? []).map((spec) => ({ path: spec.path, bytes: 0 }));
+  const attachments: unknown = action.attachments;
+  if (!Array.isArray(attachments)) return [];
+  return (attachments as unknown[]).flatMap((spec) => {
+    const path: unknown =
+      typeof spec === "object" && spec !== null ? (spec as { path?: unknown }).path : undefined;
+    return typeof path === "string" ? [{ path, bytes: 0 }] : [];
+  });
 }
 
 /**
@@ -528,6 +535,11 @@ function mapSmtpThrow(err: unknown): VaultError {
 function toVaultError(err: unknown): VaultError {
   if (err instanceof VaultError) return err;
   return VaultError.internalError("the injection context failed unexpectedly");
+}
+
+function toUseError(err: unknown): VaultError {
+  if (err instanceof VaultError) return err;
+  return VaultError.internalError("the use failed unexpectedly");
 }
 
 /** RFC 9110 § 5.6.2 `token`: a method the audit row can record as it stands. */
@@ -1435,139 +1447,164 @@ export class VaultEngine {
     caller?: CallerContext,
   ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
+    const shapeRefusal = actionShapeRefusal(action);
+    if (shapeRefusal !== undefined) throw VaultError.invalidInput(shapeRefusal);
 
-    let secret: Secret;
-    try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_USE,
-        err,
-        { handle, context: action.type },
-        undefined,
-        caller,
-      );
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
-
-    // Per-secret policy enforcement (thesis §4.6) — before the injection
-    // policy is read, any OAuth refresh runs, or the value is decrypted. A
-    // refusal also ends this secret's live downstream child (E73): the grant
-    // it was spawned under no longer covers the caller, so the credential in
-    // its environment must not outlive the refusal.
-    try {
-      this.checkResolvedCallerPolicy(
-        s,
-        secret.id,
-        caller,
-        "use",
-        AuditEventType.SECRET_USE,
-        { handle, context: action.type },
-        handle,
-      );
-    } catch (err) {
-      await s.mcpRegistry.terminate(
-        secret.id,
-        "use_denied",
-        attributionFromCaller(caller, this.sessionId),
-      );
-      throw err;
-    }
-
-    // Attribution for the injector-written audit rows ("by whom" / "through
-    // which interface", thesis §4.3.4) — per invocation, never injector state.
-    const attribution = attributionFromCaller(caller, this.sessionId);
-
-    const policy = this.loadInjectionPolicy(s, secret.id);
-
-    // Status before the architectural guards below (B21): an expired, revoked
-    // or pending secret reports its own status — and the lazy EXPIRED
-    // transition runs — instead of the INVALID_INPUT a guard would raise
-    // first. Same failure semantics as the value block: the denial row, then
-    // the registry backstop. The vault-managed-certificate refusal keeps its
-    // place ahead of the status ladder — as it has on both value paths — because
-    // the renewal census keys on the persisted status, so letting the lazy
-    // transition run here would drop the expired certificate out of the very
-    // set `server start --cert-renew` retries.
-    try {
-      if (isVaultManagedCertificate(s.store, secret)) {
-        throw VaultError.certValueUnsupported(handle);
-      }
-
-      s.secretManager.assertUsable(secret, handle, {
-        pending:
-          secret.type === SecretType.OAUTH_TOKEN
-            ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
-            : undefined,
-      });
-    } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_USE,
-        err,
-        { handle, context: action.type },
-        secret.id,
-        caller,
-      );
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
-      throw err;
-    }
-
-    // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
-    // before any spawn, and before the credential is even decrypted. The
-    // spawned `docker` CLI is a thin client: the daemon the vault never
-    // spawned performs the registry egress and writes the layers, and its Unix
-    // socket survives `unshare -rn`, so wrapping the CLI would isolate the
-    // messenger, not the actor. Documenting-and-allowing would make the audit
-    // row assert an isolation that was never enforced. Same fail-closed answer
-    // an isolation-incapable host gives, and network keeps precedence on the
-    // terminate reason there too — though the composer answers with the
-    // filesystem code when both flags are demanded; here the network code
-    // keeps precedence, matching that terminate reason.
-    this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
-
-    // SMTP STARTTLS × the mail TLS opt-out — the same pre-dispatch,
-    // pre-credential placement: the opt-out cannot be honored on this leg, so
-    // producing the credential for it is pure exposure.
-    this.assertSmtpUsageAllowed(s, action, secret, attribution);
-
-    // IMAP × (mail TLS opt-out | OAuth secret) — the same pre-dispatch,
-    // pre-credential placement, for the same reason: both are architectural
-    // refusals that no credential can satisfy, so producing the credential
-    // first is pure exposure. An OAuth-typed secret would otherwise run a live
-    // token refresh (a refresh_token POST plus a persisted rotation) for a use
-    // that is refused a few lines later, and a `tls: false` secret would be
-    // decrypted for it. The loaded connection config is handed back so the
-    // imap arm reads it once; every other action type returns without touching
-    // the config store.
-    const imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
-
-    this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
-
+    let secret: Secret | undefined;
+    let attribution: AuditAttribution | undefined;
+    let policy: InjectionPolicy;
+    let imapConnection: ConnectionConfig | undefined;
     let value: Uint8Array;
     try {
-      if (secret.type === SecretType.OAUTH_TOKEN) {
-        const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
-        value = new Uint8Array(Buffer.from(accessToken, "utf8"));
-      } else {
-        value = await s.secretManager.getSecretValue(handle);
+      try {
+        secret = await s.secretManager.resolveHandle(handle);
+      } catch (err) {
+        this.auditDenied(
+          s,
+          AuditEventType.SECRET_USE,
+          err,
+          { handle, context: action.type },
+          undefined,
+          caller,
+        );
+        throw toUseError(await this.concealHandleError(s, err, handle, caller).catch(toUseError));
+      }
+
+      // Per-secret policy enforcement (thesis §4.6) — before the injection
+      // policy is read, any OAuth refresh runs, or the value is decrypted. A
+      // refusal also ends this secret's live downstream child (E73): the grant
+      // it was spawned under no longer covers the caller, so the credential in
+      // its environment must not outlive the refusal.
+      try {
+        this.checkResolvedCallerPolicy(
+          s,
+          secret.id,
+          caller,
+          "use",
+          AuditEventType.SECRET_USE,
+          { handle, context: action.type },
+          handle,
+        );
+      } catch (err) {
+        await s.mcpRegistry.terminate(
+          secret.id,
+          "use_denied",
+          attributionFromCaller(caller, this.sessionId),
+        );
+        throw err;
+      }
+
+      // Attribution for the injector-written audit rows ("by whom" / "through
+      // which interface", thesis §4.3.4) — per invocation, never injector state.
+      attribution = attributionFromCaller(caller, this.sessionId);
+
+      policy = this.loadInjectionPolicy(s, secret.id);
+
+      // Status before the architectural guards below (B21): an expired, revoked
+      // or pending secret reports its own status — and the lazy EXPIRED
+      // transition runs — instead of the INVALID_INPUT a guard would raise
+      // first. Same failure semantics as the value block: the denial row, then
+      // the registry backstop. The vault-managed-certificate refusal keeps its
+      // place ahead of the status ladder — as it has on both value paths — because
+      // the renewal census keys on the persisted status, so letting the lazy
+      // transition run here would drop the expired certificate out of the very
+      // set `server start --cert-renew` retries.
+      try {
+        if (isVaultManagedCertificate(s.store, secret)) {
+          throw VaultError.certValueUnsupported(handle);
+        }
+
+        s.secretManager.assertUsable(secret, handle, {
+          pending:
+            secret.type === SecretType.OAUTH_TOKEN
+              ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
+              : undefined,
+        });
+      } catch (err) {
+        this.auditDenied(
+          s,
+          AuditEventType.SECRET_USE,
+          err,
+          { handle, context: action.type },
+          secret.id,
+          caller,
+        );
+        await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+        throw toUseError(err);
+      }
+
+      // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
+      // before any spawn, and before the credential is even decrypted. The
+      // spawned `docker` CLI is a thin client: the daemon the vault never
+      // spawned performs the registry egress and writes the layers, and its Unix
+      // socket survives `unshare -rn`, so wrapping the CLI would isolate the
+      // messenger, not the actor. Documenting-and-allowing would make the audit
+      // row assert an isolation that was never enforced. Same fail-closed answer
+      // an isolation-incapable host gives, and network keeps precedence on the
+      // terminate reason there too — though the composer answers with the
+      // filesystem code when both flags are demanded; here the network code
+      // keeps precedence, matching that terminate reason.
+      this.assertDockerIsolationAllowed(s, action, policy, secret.id, caller);
+
+      // SMTP STARTTLS × the mail TLS opt-out — the same pre-dispatch,
+      // pre-credential placement: the opt-out cannot be honored on this leg, so
+      // producing the credential for it is pure exposure.
+      this.assertSmtpUsageAllowed(s, action, secret, attribution);
+
+      // IMAP × (mail TLS opt-out | OAuth secret) — the same pre-dispatch,
+      // pre-credential placement, for the same reason: both are architectural
+      // refusals that no credential can satisfy, so producing the credential
+      // first is pure exposure. An OAuth-typed secret would otherwise run a live
+      // token refresh (a refresh_token POST plus a persisted rotation) for a use
+      // that is refused a few lines later, and a `tls: false` secret would be
+      // decrypted for it. The loaded connection config is handed back so the
+      // imap arm reads it once; every other action type returns without touching
+      // the config store.
+      imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
+
+      this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
+
+      try {
+        if (secret.type === SecretType.OAUTH_TOKEN) {
+          const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
+          value = new Uint8Array(Buffer.from(accessToken, "utf8"));
+        } else {
+          value = await s.secretManager.getSecretValue(handle);
+        }
+      } catch (err) {
+        this.auditDenied(
+          s,
+          AuditEventType.SECRET_USE,
+          err,
+          { handle, context: action.type },
+          secret.id,
+          caller,
+        );
+        // Backstop for the out-of-process case (L2): a CLI `secret revoke`, or a
+        // lazy expiry detected in another process, cannot reach this process's
+        // registry. The credential is no longer usable here, so any downstream
+        // child still holding it is torn down before the refusal returns.
+        await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+        throw toUseError(err);
       }
     } catch (err) {
-      this.auditDenied(
-        s,
-        AuditEventType.SECRET_USE,
-        err,
-        { handle, context: action.type },
-        secret.id,
-        caller,
-      );
-      // Backstop for the out-of-process case (L2): a CLI `secret revoke`, or a
-      // lazy expiry detected in another process, cannot reach this process's
-      // registry. The credential is no longer usable here, so any downstream
-      // child still holding it is torn down before the refusal returns.
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
-      throw err;
+      if (!(err instanceof VaultError)) {
+        try {
+          this.auditDenied(
+            s,
+            AuditEventType.SECRET_USE,
+            err,
+            { handle, context: action.type },
+            secret?.id,
+            caller,
+          );
+        } catch (auditErr) {
+          throw auditErr instanceof VaultError
+            ? auditErr
+            : VaultError.internalError("the audit write failed unexpectedly");
+        }
+      }
+      throw toUseError(err);
     }
 
     try {
@@ -2564,7 +2601,7 @@ export class VaultEngine {
 
   /**
    * Refuse an `imap` action the vault can never serve, and hand the imap arm
-   * the connection config it loaded on the way. Two refusals, in this order:
+   * the connection config it loaded on the way. Three refusals, in this order:
    *
    * - Ruling 3: the IMAP client is implicit-TLS-only (design §4.2), so a mail
    *   `tls: false` opt-out cannot be honored on this leg.
@@ -2574,8 +2611,10 @@ export class VaultEngine {
    *   The mirror image refuses too: `account` on a username:password secret
    *   would be silently dead (that arm's username lives in the value), and
    *   dead config is refused, not dropped (the tls:false precedent above).
+   * - An `operation` that is no object with one of the six kinds
+   *   (`imapOperationRefusal`).
    *
-   * Both are architectural — no credential can satisfy either — so, like
+   * The first two are architectural — no credential can satisfy either — so, like
    * `assertDockerIsolationAllowed`, they belong before the value block rather
    * than inside the dispatch arm. That placement is the point: producing the
    * credential first would run a live token refresh (a refresh_token POST plus
@@ -2648,6 +2687,13 @@ export class VaultEngine {
           "meaningful for an OAuth-type secret: the username:password arm reads its " +
           "username from the secret value. Remove the field or use an OAuth-type secret.",
       );
+      this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
+      throw err;
+    }
+
+    const operationRefusal = imapOperationRefusal(action);
+    if (operationRefusal !== undefined) {
+      const err = VaultError.invalidInput(operationRefusal);
       this.auditUse(s, secret.id, { ...failedDetail, error: err.code }, false, attribution);
       throw err;
     }

@@ -520,6 +520,18 @@ describe("ImapInjector — audit details shape", () => {
     },
   );
 
+  it("buildImapAuditDetails carries no operation key for an operation without a string kind", () => {
+    const base = baseAction({ mailbox: "Work" });
+    for (const operation of [undefined, null, "search", 5, [], {}, { kind: 5 }]) {
+      const action = { ...base, operation } as unknown as ImapAction;
+      expect(buildImapAuditDetails(action, { affected: 0 })).toStrictEqual({
+        host: base.host,
+        mailbox: "Work",
+        uid_count: 0,
+      });
+    }
+  });
+
   it("reports uid_count 0 for a zero-affected mutating result", () => {
     const action = baseAction({ operation: { kind: "expunge" } });
     expect(buildImapAuditDetails(action, { affected: 0 })).toMatchObject({ uid_count: 0 });

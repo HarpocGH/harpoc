@@ -1,21 +1,20 @@
 /**
  * The CI series lines — the DPAPI protect / unprotect durations and the WMI
  * listing warm-up — reach the job log through `console.error` and are
- * harvested by grep (decisions.md § "The WMI listing series", § "The DPAPI
- * protect series"). This helper keeps that line byte-identical and, on a
+ * harvested by grep. This helper keeps that line byte-identical and, on a
  * GitHub Actions runner, also appends it to the job's step summary
  * (`GITHUB_STEP_SUMMARY`) and to the series file the Windows legs upload as
  * an artifact (`HARPOC_SERIES_FILE`, 2026-09-09), marking it when the judged
  * sample crosses the standing trigger — so a fired trigger shows on the run's
  * summary page and in `gh run download`'s file without a harvest or a
- * browser. The rule itself stays in the record: a warm WMI listing
- * over 60 s (2026-08-29) or a DPAPI call over 60 s (D3, 2026-09-08) is
- * discussed, not before; the legs stay green either way. Durations and
- * outcome texts only — never key material, never a listing's rows.
+ * browser. The rule: a DPAPI call over 60 s (D3, 2026-09-08) is discussed,
+ * not before; a warm WMI listing over 60 s is recorded only (2026-09-09); the
+ * legs stay green either way. Durations and outcome texts only — never key
+ * material, never a listing's rows.
  */
 import { appendFileSync } from "node:fs";
 
-/** The standing trigger: a judged sample over this many ms is discussed (decisions.md, 2026-08-29 and D3 2026-09-08). */
+/** The standing trigger: a judged sample over this many ms is marked: discussed for a DPAPI call (D3, 2026-09-08), recorded only for the WMI warm-up (2026-09-09). */
 export const SERIES_TRIGGER_MS = 60_000;
 
 export interface SeriesLineOptions {

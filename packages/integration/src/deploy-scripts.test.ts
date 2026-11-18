@@ -956,7 +956,7 @@ describe("e2e.yml's measuring step (the enrolment recipe's launch, its PowerShel
 /** One argument as the Windows C runtime reads it back (the scripts' ConvertTo-Argument, for paths without quotes). */
 const winArg = (value: string): string => (/\s/.test(value) ? `"${value}"` : value);
 
-/** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest (`decisions.md` § "The WMI listing series"). The budget is 300 s because on a loaded Windows CI leg `register-service.ps1 -DryRun` ran 175 s of the former 180 s, the cost being the first module autoload of a fresh `powershell.exe`. */
+/** A recipe row's spawn budget: a module-loading cmdlet answers in tens of seconds under the full gate on windows-latest. The budget is 300 s because on a loaded Windows CI leg `register-service.ps1 -DryRun` ran 175 s of the former 180 s, the cost being the first module autoload of a fresh `powershell.exe`. */
 const PS1_TIMEOUT_MS = 300_000;
 
 /** The recipe rows' environment: the inherited one with `PSModulePath` narrowed to the in-box modules directory the three scripts import from (Management, Utility, Security, LocalAccounts, ScheduledTasks); Windows PowerShell 5.1 puts `C:\Program Files\WindowsPowerShell\Modules` back ahead of the narrowed path (measured), so the child sees that directory, then the in-box one; a recipe child loads no module through either: each recipe turns auto-loading off and imports a module by its manifest's path under `$PSHOME`. */

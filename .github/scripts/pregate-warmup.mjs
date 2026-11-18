@@ -1,5 +1,4 @@
-// The pre-gate warm-up on the Windows legs (ci.yml "Warm-up before the gate";
-// docs/implementation-plan-concurrency-warmup-register-2026-09-14.md, D3): the
+// The pre-gate warm-up on the Windows legs (ci.yml "Warm-up before the gate"): the
 // call probe P isolated on 2026-09-14 — a PowerShell host that exits.
 // The product's spawn shape; one stdout line, nothing asserted, exit 0
 // whatever the figures.

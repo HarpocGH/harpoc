@@ -181,7 +181,7 @@ const POLL_DEADLINE_MS = 10_000;
 /**
  * At least one retry after a non-empty listing, whatever the clock says: on
  * the windows-latest runners one listing outlasts the whole deadline (warm
- * 19–33 s against 10 s — decisions.md § "The WMI listing series"), so without
+ * 19–33 s against 10 s), so without
  * this floor the poll was a single listing with no retry exactly where the
  * retry matters (2026-09-07).
  */
@@ -274,7 +274,7 @@ describe.runIf(process.platform === "win32")("win32SweepDeps — live helpers", 
 // not certify the CI runner's WMI latency. windows-latest under the full gate
 // answers `Get-CimInstance Win32_Process` in 19–33 s warm and 30–52 s cold,
 // with the cold call at the 60 s bound on four of thirty-one legs between
-// 2026-09-02 and 2026-09-07 (decisions.md § "The WMI listing series"; an idle
+// 2026-09-02 and 2026-09-07 (an idle
 // host: ~250 ms; the same leg's DPAPI round-trips — a fresh powershell.exe
 // each — 0.3–0.7 s, so the cost is the CIM/WMI listing, not PowerShell
 // start-up). The product keeps its 20 s / 30 s bounds and fails open past

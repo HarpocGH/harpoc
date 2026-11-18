@@ -455,8 +455,7 @@ describe("session keystore protection", () => {
   // protector calls plus two Argon2id inits — so a loaded windows-latest runner
   // stretches the case instead of failing it; every call's duration is printed
   // for the CI log — and, on a runner, to the job summary with the 60 s trigger
-  // judged on the slowest call — and extends the DPAPI series in decisions.md
-  // (D3 and D4, 2026-09-08).
+  // judged on the slowest call (D3 and D4, 2026-09-08).
   const DPAPI_PROTECT_BUDGET_MS = 90_000;
   const DPAPI_CASE_BUDGET_MS = 240_000;
 

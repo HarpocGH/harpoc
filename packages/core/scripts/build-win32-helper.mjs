@@ -1,5 +1,5 @@
 // Compiles the win32 job wrapper into dist/win32 after tsc, on Windows hosts
-// only (D3 of docs/implementation-plan-win32-job-wrapper-2026-09-10.md), so
+// only, so
 // every test process and every vault process on this host finds it built. Off
 // Windows, or when the host cannot build it, the runtime compiles on first use
 // or runs the taskkill tier; this step never fails the build.

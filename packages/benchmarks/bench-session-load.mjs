@@ -3,7 +3,7 @@
 // this script is the reproducible artifact behind that figure. Windows-only —
 // elsewhere it skips (§4.6 file-permission fallback, no keystore implemented).
 // Optional --cli: additionally wall-clocks a full CLI command per variant,
-// reproducing the ≈650 vs ≈490 ms end-to-end figures from decisions.md (d2).
+// reproducing the ≈650 vs ≈490 ms end-to-end figures.
 
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";

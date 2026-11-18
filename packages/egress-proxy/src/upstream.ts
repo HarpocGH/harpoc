@@ -225,7 +225,7 @@ export interface UpstreamResponse {
 /**
  * One request upstream over a per-call dispatcher pinned to the validated
  * addresses (`createPinnedLookup`), its connect timer bound to the budget and
- * destroyed — not closed — at the end (use-secret-injection-http.md Rules).
+ * destroyed — not closed — at the end.
  * undici's `request()`, not `fetch`: no `Accept-Encoding` of its own, no
  * decompression, no redirect handling, raw status and duplicate fields.
  */

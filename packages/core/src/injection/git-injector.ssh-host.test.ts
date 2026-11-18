@@ -353,8 +353,8 @@ describeGit("C-14: an SSH user part that is no name is refused before the allowl
   });
 });
 
-// Addresses git reads otherwise than the vault (measured on git 2.39.5 and 2.51.0, research-host.md
-// appendix A; the last row of READ_OTHERWISE_USER on git 2.51.0, where git hands ssh the word
+// Addresses git reads otherwise than the vault (measured on git 2.39.5 and 2.51.0; the last row of
+// READ_OTHERWISE_USER on git 2.51.0, where git hands ssh the word
 // `ssh://x@evil.invalid:2222`): the vault judges `allowed.invalid`; git hands ssh a destination
 // whose host is `evil.invalid`, `fd00::1` (in READ_OTHERWISE_USER) or `allow<TAB>ed.invalid`.
 const READ_OTHERWISE: ReadonlyArray<readonly [string, string]> = [
