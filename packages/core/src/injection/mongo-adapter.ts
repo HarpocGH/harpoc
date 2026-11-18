@@ -17,7 +17,7 @@ import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
  *    passes through this vault's SSRF validation. A malicious or compromised
  *    endpoint can advertise arbitrary internal hosts as "replica set peers"
  *    and have the driver dial them unvalidated. `directConnection: true`
- *    (verified against `MongoClientOptions` in the installed mongodb@7.5.0's
+ *    (verified against `MongoClientOptions` in the installed mongodb@7.9.0's
  *    `mongodb.d.ts`) forces a single, non-discovering topology: the driver
  *    dials exactly the one seed given below and nothing else. This is
  *    mandatory, not optional — the pinned address alone does not close this
@@ -29,9 +29,9 @@ import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
  *    adapters close via a pinned socket/dial). TLS identity is bound to
  *    `database.servername` when configured, else to the *logical*
  *    `opts.host`, regardless of the pinned dial: verified against
- *    mongodb@7.5.0's compiled `lib/cmap/connect.js`,
+ *    mongodb@7.9.0's compiled `lib/cmap/connect.js`,
  *    `LEGAL_TLS_SOCKET_OPTIONS` (`ca`, `cert`, `checkServerIdentity`,
- *    `rejectUnauthorized`, `servername`, ...) is spread directly onto the
+ *    `rejectUnauthorized`, `servername`, ...) is copied name by name onto the
  *    object passed to `node:tls.connect()` with no field remapping — the
  *    same wire shape RedisAdapter documents for node-redis. That means:
  *      - `servername` must be supplied BY US — `database.servername` when

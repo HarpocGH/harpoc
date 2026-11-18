@@ -764,6 +764,7 @@ describe("server start", () => {
       expect(createEgressProxy).toHaveBeenCalledWith({
         engine: mockEngine,
         onListenerError: expect.any(Function),
+        onError: expect.any(Function),
       });
       expect(mockEgressProxy.listenTcp.mock.calls).toEqual([[3128, "127.0.0.1"]]);
       expect(mockEgressProxy.listenSocket).not.toHaveBeenCalled();
@@ -771,6 +772,35 @@ describe("server start", () => {
         "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir)",
       );
       expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("the proxy's onError prints the code alone, nothing for a 407, nothing once shutdown began", async () => {
+      const { createEgressProxy } = await import("@harpoc/egress-proxy");
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+
+      await run(["--session", "memory", "--proxy"]);
+      const onError = vi.mocked(createEgressProxy).mock.calls[0]?.[0].onError as (
+        err: VaultError,
+        status: number,
+      ) => void;
+      spies.errorSpy.mockClear();
+      onError(new VaultError(ErrorCode.URL_NOT_ALLOWED, "a message that names a value"), 403);
+      onError(new VaultError(ErrorCode.INVALID_TOKEN, "Missing Proxy-Authorization header"), 407);
+      onError(new VaultError(ErrorCode.INVALID_TOKEN, "Malformed Proxy-Authorization header"), 401);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["[harpoc] egress proxy: URL_NOT_ALLOWED"],
+        ["[harpoc] egress proxy: INVALID_TOKEN"],
+      ]);
+
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      spies.errorSpy.mockClear();
+      onError(new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"), 503);
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
     });
 
     it("--proxy-port moves the TCP listener", async () => {
@@ -1376,6 +1406,7 @@ describe("server start", () => {
           hosts: ["api.github.com", "127.0.0.1"],
         },
         onListenerError: expect.any(Function),
+        onError: expect.any(Function),
       });
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] Harpoc CA: no consumer directory, no ca.pem written (harpoc proxy ca export prints the certificate)",
@@ -1492,6 +1523,7 @@ describe("server start", () => {
       expect(createEgressProxy).toHaveBeenCalledWith({
         engine: mockEngine,
         onListenerError: expect.any(Function),
+        onError: expect.any(Function),
       });
       expect(existsSync(join(dir, "alice", "ca.pem"))).toBe(false);
       expect(spies.errorSpy.mock.calls).toContainEqual([
@@ -1516,6 +1548,7 @@ describe("server start", () => {
       expect(createEgressProxy).toHaveBeenCalledWith({
         engine: mockEngine,
         onListenerError: expect.any(Function),
+        onError: expect.any(Function),
       });
       expect(spies.exitSpy).not.toHaveBeenCalled();
     });

@@ -1,5 +1,10 @@
 import { Hono } from "hono";
-import { matchesSecretNameScope, HARPOC_VERSION, VaultError } from "@harpoc/shared";
+import {
+  isDecimalInteger,
+  matchesSecretNameScope,
+  HARPOC_VERSION,
+  VaultError,
+} from "@harpoc/shared";
 import type {
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
@@ -37,7 +42,8 @@ export function createExpiringSecretsRoute(): Hono<HarpocEnv> {
     const engine = c.get("engine");
 
     const daysParam = c.req.query("days");
-    const days = daysParam === undefined ? 7 : Number(daysParam);
+    const days =
+      daysParam === undefined ? 7 : isDecimalInteger(daysParam) ? Number(daysParam) : NaN;
     if (!Number.isInteger(days) || days < 1 || days > MAX_EXPIRING_WINDOW_DAYS) {
       throw VaultError.invalidInput(
         `days must be an integer between 1 and ${MAX_EXPIRING_WINDOW_DAYS}`,

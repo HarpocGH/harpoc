@@ -7,7 +7,8 @@ import { callerOf } from "../utils/caller.js";
  * The one REST administration route (deployment model B, design decision 8):
  * an unscoped admin token seals the serving engine. No body is read. The
  * listener keeps serving; every authenticated request then answers
- * `VAULT_LOCKED` (503) until the vault is unlocked again.
+ * `VAULT_LOCKED` (503) until the daemon is started again: nothing in a
+ * serving process opens the vault, and on a session file the lock erases it.
  */
 export function createVaultRoutes(): Hono<HarpocEnv> {
   const router = new Hono<HarpocEnv>();

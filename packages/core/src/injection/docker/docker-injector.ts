@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { DockerRegistryAction, DockerResult, InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, MIN_REDACTABLE_FRAGMENT, VaultError } from "@harpoc/shared";
+import {
+  DEFAULT_DOCKER_TIMEOUT_MS,
+  ErrorCode,
+  MIN_REDACTABLE_FRAGMENT,
+  VaultError,
+} from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "../allowlist.js";
 import { redactErrorMessage } from "../output-sanitizer.js";
 import { spawnCaptured } from "../spawn-captured.js";
@@ -367,7 +372,7 @@ async function runDocker(
 
     const r = await spawnCaptured(dockerPath, [action.operation, action.image], {
       env,
-      timeoutMs: action.timeout_ms,
+      timeoutMs: action.timeout_ms ?? DEFAULT_DOCKER_TIMEOUT_MS,
       redact,
       strictTreeExit: policy.strict_tree_exit === true,
     });

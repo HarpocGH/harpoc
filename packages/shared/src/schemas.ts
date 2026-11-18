@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   AGENT_DESCRIPTION_MAX_LENGTH,
   AGENT_OWNER_MAX_LENGTH,
+  DEFAULT_DOCKER_TIMEOUT_MS,
   DEFAULT_IMAP_PORT,
   DEFAULT_WS_COLLECT_WINDOW_MS,
   MAX_DOCKER_TIMEOUT_MS,
@@ -787,7 +788,13 @@ export const dockerRegistryActionSchema = z.strictObject({
   type: z.literal(ActionType.DOCKER_REGISTRY),
   operation: z.enum(["pull", "push"]),
   image: dockerImageSchema,
-  timeout_ms: z.number().int().positive().max(MAX_DOCKER_TIMEOUT_MS).optional().default(300_000),
+  timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_DOCKER_TIMEOUT_MS)
+    .optional()
+    .default(DEFAULT_DOCKER_TIMEOUT_MS),
 });
 
 export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;

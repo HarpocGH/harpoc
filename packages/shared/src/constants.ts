@@ -254,6 +254,7 @@ export const MAX_WS_COLLECT_MESSAGES = 100;
 export const MAX_WS_COLLECT_WINDOW_MS = 300_000; // 5 minutes
 export const DEFAULT_WS_COLLECT_WINDOW_MS = 30_000; // 30 seconds
 export const MAX_DOCKER_TIMEOUT_MS = 1_800_000; // 30 minutes
+export const DEFAULT_DOCKER_TIMEOUT_MS = 300_000;
 export const DEFAULT_SMTP_TLS_PORT = 465;
 export const DEFAULT_SMTP_STARTTLS_PORT = 587;
 export const DEFAULT_IMAP_PORT = 993;

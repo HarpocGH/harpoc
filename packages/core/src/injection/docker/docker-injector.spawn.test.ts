@@ -325,6 +325,18 @@ describe("executeDockerRegistryAction spawn shape", () => {
     expect(opts.timeoutMs).toBe(1_800_000);
   });
 
+  it("an unparsed caller that omits timeout_ms gets the schema's default at the spawn seam", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { timeout_ms: _omitted, ...unparsed } = {
+      ...PULL_ACTION,
+      timeout_ms: 1,
+    };
+    await executeDockerRegistryAction(unparsed as DockerRegistryAction, SECRET, allowed());
+
+    const [, , opts] = vi.mocked(spawnCaptured).mock.calls[0] as SpawnCall;
+    expect(opts.timeoutMs).toBe(300_000);
+  });
+
   it("writes an executable credential-helper launcher docker can resolve by name", async () => {
     let helperDir = "";
     vi.mocked(spawnCaptured).mockImplementation((_cmd, _args, opts) => {

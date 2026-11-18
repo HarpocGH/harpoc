@@ -70,8 +70,8 @@ export interface EgressProxyOptions {
   timeoutMs?: number;
   /** Upstream idle budget between response body chunks; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
   bodyIdleTimeoutMs?: number;
-  /** Every refusal and failure, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. */
-  onError?: (err: VaultError) => void;
+  /** Every refusal and failure, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. `status` is the HTTP status the refusal answers, or would have answered once the response head was sent — never a relayed one. */
+  onError?: (err: VaultError, status: number) => void;
   /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
   onListenerError?: (err: VaultError) => void;
   /** The CA a CONNECT tunnel's TLS is terminated with (`secret://harpoc-ca`); without one CONNECT answers 501. */
@@ -219,16 +219,16 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   const tunnels = createTunnelHost((req, res) => track(req, res), timeoutMs);
   let closed = false;
 
-  function report(err: VaultError): void {
+  function report(err: VaultError, status: number): void {
     try {
-      onError?.(err);
+      onError?.(err, status);
     } catch {
       /* a throwing hook changes no answer */
     }
   }
 
   function refuse(res: ServerResponse, refusal: Refusal): void {
-    report(refusal.reported ?? refusal.error);
+    report(refusal.reported ?? refusal.error, refusal.status);
     if (res.headersSent) {
       res.destroy();
       return;
@@ -485,7 +485,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   function refuseConnect(socket: Socket, refusal: Refusal): void {
-    report(refusal.reported ?? refusal.error);
+    report(refusal.reported ?? refusal.error, refusal.status);
     const headers: [string, string][] =
       refusal.status === 407 ? CONNECT_CHALLENGES : Object.entries(refusal.headers ?? {});
     socket.end(connectReply(refusal.status, refusal.error, headers));

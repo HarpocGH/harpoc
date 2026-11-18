@@ -5,8 +5,8 @@ import { MongoAdapter } from "./mongo-adapter.js";
 
 // mongodb's `MongoClientOptions` fields relevant to TLS/socket dialing
 // (`ca`, `checkServerIdentity`, `rejectUnauthorized`, `servername`, ...) are
-// spread directly onto the object passed to `node:tls.connect()` with no
-// field remapping — verified against mongodb@7.5.0's compiled
+// copied name by name onto the object passed to `node:tls.connect()` with no
+// field remapping — verified against mongodb@7.9.0's compiled
 // `lib/cmap/connect.js` (`LEGAL_TLS_SOCKET_OPTIONS`). A fake `MongoClient`
 // that records the constructor's `(uri, options)` and the `db().command()`
 // call is therefore enough to assert on the exact wire shape without a live

@@ -331,4 +331,23 @@ describe("health routes", () => {
     const ok = await app.request("/api/v1/health/expiring?days=365", { headers: AUTH });
     expect(ok.status).toBe(200);
   });
+
+  it("GET /api/v1/health/expiring reads days in decimal digits only", async () => {
+    const { app } = createTestApp(VaultState.UNLOCKED, []);
+    const seen: Record<string, number> = {};
+    for (const days of ["0x10", "1e1", "%2B5", "5.0", "%205", "5%20", "", "007"]) {
+      const res = await app.request(`/api/v1/health/expiring?days=${days}`, { headers: AUTH });
+      seen[days] = res.status;
+    }
+    expect(seen).toEqual({
+      "0x10": 400,
+      "1e1": 400,
+      "%2B5": 400,
+      "5.0": 400,
+      "%205": 400,
+      "5%20": 400,
+      "": 400,
+      "007": 200,
+    });
+  });
 });

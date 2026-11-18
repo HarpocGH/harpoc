@@ -68,7 +68,8 @@ export interface DirectClientOptions {
   certManager?: CertManagerT;
   /**
    * Receives OAuth background-flow failures (the deferred browser leg's
-   * exchange, a device-code poll, an abort from {@link DirectClient.close}).
+   * exchange, a device-code poll). A flow that {@link DirectClient.close}
+   * aborts is not reported.
    * Default: a stderr warning, mirroring the REST and MCP hosts — a silent
    * default left direct-mode failures invisible until polled.
    */

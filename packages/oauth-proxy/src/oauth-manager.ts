@@ -15,9 +15,10 @@ export interface OAuthManagerOptions {
   callbackPort?: number;
   callbackTimeoutMs?: number;
   /**
-   * Called when a background device-code flow fails after the initial
-   * response has been returned (the secret stays PENDING). Default: no-op —
-   * the package stays console-free; the host decides how to report.
+   * Called when a background flow fails: an authorization-code flow's wait
+   * for the callback and its exchange, or a device-code poll (the secret
+   * stays PENDING). An aborted or superseded flow is not reported. Default:
+   * no-op — the package stays console-free; the host decides how to report.
    */
   onBackgroundFlowError?: (secretId: string, err: unknown) => void;
   /**
@@ -52,9 +53,10 @@ interface PendingFlow {
 /**
  * Result of starting a device-code flow. `completion` settles when the
  * background poll finishes: resolves once the secret is ACTIVE, rejects on
- * poll failure/timeout/abort. Safe to ignore (rejections are marked handled
- * internally and routed to onBackgroundFlowError). Never serialize this into
- * wire output — the promise serializes as `{}`; hosts build their own shape.
+ * poll failure/timeout/abort. Safe to ignore: rejections are marked handled
+ * internally and, unless the flow was aborted or superseded, routed to
+ * onBackgroundFlowError. Never serialize this into wire output — the promise
+ * serializes as `{}`; hosts build their own shape.
  */
 export interface DeviceCodeFlowResult extends OAuthFlowResult {
   completion: Promise<void>;
@@ -65,8 +67,9 @@ export interface DeviceCodeFlowResult extends OAuthFlowResult {
  * listening and `authUrl` is ready for the user, while `completion` settles
  * when the redirect arrives and the code has been exchanged (resolves once the
  * secret is ACTIVE; rejects on callback timeout/exchange failure/abort). Safe
- * to ignore — rejections are marked handled internally and routed to
- * onBackgroundFlowError. Never serialize this: the promise serializes as `{}`.
+ * to ignore — rejections are marked handled internally and, unless the flow
+ * was aborted or superseded, routed to onBackgroundFlowError. Never serialize
+ * this: the promise serializes as `{}`.
  */
 export interface AuthorizationCodeStart {
   handle: string;

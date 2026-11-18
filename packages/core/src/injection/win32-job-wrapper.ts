@@ -43,7 +43,7 @@ export const JOB_WRAPPER_SOURCE = `// harpoc-job: the vault's win32 lifecycle wr
 // resumes it, waits, and exits with the payload's exit code. Killed by the vault on timeout,
 // its job handle closes and the kernel terminates every process in the job. Under --keep the
 // flag is cleared after a normal exit, so survivors are left as they were before this wrapper
-// existed; --strict leaves it set (the test flip, never passed by the product). Reads no
+// existed; --strict leaves it set (the per-secret strict_tree_exit policy). Reads no
 // environment variable; writes nothing but its own failure line. C# 5: the inbox compiler.
 using System;
 using System.Runtime.InteropServices;

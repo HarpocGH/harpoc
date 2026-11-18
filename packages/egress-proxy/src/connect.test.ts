@@ -480,6 +480,32 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
     expect(errors.map((err) => err.code)).toEqual([ErrorCode.CERT_EXPIRED]);
     expect(double.resolveForProxy).not.toHaveBeenCalled();
   });
+
+  it("onError receives the status a CONNECT refusal answered", async () => {
+    const seen: [string, number][] = [];
+    await proxy.close();
+    await startProxy({
+      onError: (err, answered) => seen.push([err.code, answered]),
+    });
+
+    await openTunnel({
+      port,
+      authority: `127.0.0.1:${upstream.port}`,
+      fields: [],
+      ca: CA.rootPem,
+    });
+    await openTunnel({
+      port,
+      authority: "evil.example:443",
+      fields: fields(),
+      ca: CA.rootPem,
+    });
+
+    expect(seen).toEqual([
+      [ErrorCode.INVALID_TOKEN, 407],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+    ]);
+  });
 });
 
 describe("CONNECT — the TLS side and the lifecycle", () => {

@@ -731,14 +731,19 @@ export function registerServerCommand(program: Command): void {
 
           if (opts.proxy) {
             const { createEgressProxy } = await import("@harpoc/egress-proxy");
+            // The code alone, and no 407: git draws that challenge on every healthy CONNECT and answers it.
+            const onError = (err: VaultError, status: number): void => {
+              if (shuttingDown || status === 407) return;
+              console.error(`[harpoc] egress proxy: ${err.code}`);
+            };
             // The proxy parses the key when it is created (caSigner) and keeps no reference to
             // the bytes: they are zero-filled here, whether the creation succeeds or throws.
             let proxy: ReturnType<typeof createEgressProxy>;
             try {
               proxy = createEgressProxy(
                 proxyCa === undefined
-                  ? { engine, onListenerError: failStop }
-                  : { engine, ca: proxyCa.options, onListenerError: failStop },
+                  ? { engine, onListenerError: failStop, onError }
+                  : { engine, ca: proxyCa.options, onListenerError: failStop, onError },
               );
             } finally {
               proxyCa?.options.keyPem.fill(0);

@@ -129,6 +129,7 @@ import {
 } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
+import { actionTimeoutRefusal } from "./injection/action-timeout.js";
 import {
   controlledPathDirs,
   matchesHostAllowlist,
@@ -1542,6 +1543,8 @@ export class VaultEngine {
     // the config store.
     const imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
 
+    this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
+
     let value: Uint8Array;
     try {
       if (secret.type === SecretType.OAUTH_TOKEN) {
@@ -2650,6 +2653,27 @@ export class VaultEngine {
     }
 
     return connection;
+  }
+
+  private assertTimeoutAllowed(
+    s: UnlockedState,
+    handle: string,
+    action: UseSecretAction,
+    secretId: string,
+    attribution: AuditAttribution | undefined,
+  ): void {
+    const refusal = actionTimeoutRefusal(action);
+    if (refusal === undefined) return;
+
+    const err = VaultError.invalidInput(refusal);
+    this.auditUse(
+      s,
+      secretId,
+      { handle, context: action.type, error: err.code },
+      false,
+      attribution,
+    );
+    throw err;
   }
 
   /**

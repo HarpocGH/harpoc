@@ -776,4 +776,66 @@ describe("the upstream leg", () => {
     expect(reply.status).toBe(407);
     await expect(proxy.close()).resolves.toBeUndefined();
   });
+
+  it.each([
+    ["no Proxy-Authorization", null, 407, ErrorCode.INVALID_TOKEN],
+    ["a header that is no Bearer credential", "Basic dXNlcjpwdw==", 401, ErrorCode.INVALID_TOKEN],
+    ["a sealed vault", `Bearer ${TOKENS.sealed}`, 503, ErrorCode.VAULT_LOCKED],
+  ])(
+    "onError receives the status the refusal answered: %s",
+    async (_title, header, status, code) => {
+      const seen: [string, number][] = [];
+      await proxy.close();
+      await startProxy({
+        onError: (err, answered) => seen.push([err.code, answered]),
+      });
+
+      const reply = await proxyRequest({
+        port,
+        path: `/127.0.0.1:${upstream.port}/user`,
+        headers: header === null ? {} : { "proxy-authorization": header },
+      });
+
+      expect(reply.status).toBe(status);
+      expect(seen).toEqual([[code, status]]);
+    },
+  );
+
+  it("onError receives 500 with the refusal's own code after the lease", async () => {
+    const seen: [string, number][] = [];
+    await proxy.close();
+    await startProxy({
+      onError: (err, answered) => seen.push([err.code, answered]),
+    });
+    double.resolveForProxy.mockResolvedValueOnce(
+      recordingLease(`${SECRET_VALUE}\r\nx-injected: 1`),
+    );
+
+    const reply = await send("/user", { authorization: "Bearer harpoc:gh-pat" });
+
+    expect(reply.status).toBe(500);
+    expect(seen).toEqual([[ErrorCode.INVALID_INJECTION_CONFIG, 500]]);
+  });
+
+  it("onError receives the refusal's 500, not the relayed status, when the head was already sent", async () => {
+    const seen: [string, number][] = [];
+    await proxy.close();
+    await startProxy({
+      onError: (err, answered) => seen.push([err.code, answered]),
+    });
+    upstream.script((_req, res) => {
+      res.writeHead(407, { "content-type": "text/plain" });
+      res.end("upstream challenge");
+    });
+    const lease = recordingLease(SECRET_VALUE);
+    lease.complete.mockImplementationOnce(() => {
+      throw VaultError.vaultLocked();
+    });
+    double.resolveForProxy.mockResolvedValueOnce(lease);
+
+    await send("/user", { authorization: "Bearer harpoc:gh-pat" }).catch(() => undefined);
+
+    expect(lease.complete.mock.calls).toEqual([[{ status: 407, sanitized: false }]]);
+    expect(seen).toEqual([[ErrorCode.VAULT_LOCKED, 500]]);
+  });
 });

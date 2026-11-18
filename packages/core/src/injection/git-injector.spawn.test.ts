@@ -384,6 +384,54 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
     }
   });
 
+  it("T14 on the local steps: every spawn of a pull gets a built environment", async () => {
+    process.env.HARPOC_T14_GIT_AMBIENT = "ambient-value";
+    process.env.HARPOC_T14_GIT_ALLOWED = "allowed-value";
+    const wd = initRepo();
+    relayWithRealProbes();
+    try {
+      await injector.executeWithSecret(
+        {
+          type: "git",
+          operation: "pull",
+          repository: "https://8.8.8.8/org/repo.git",
+          working_directory: wd,
+        },
+        new Uint8Array(Buffer.from(`git-user:${GIT_TOKEN}`)),
+        policy({
+          command_allowlist: [GIT as string],
+          url_allowlist: ["https://8.8.8.8/*"],
+          env_allowlist: ["HARPOC_T14_GIT_ALLOWED"],
+        }),
+        undefined,
+      );
+
+      const calls = spawnMock.mock.calls as SpawnCall[];
+      expect(calls.some(([, , opts]) => opts.env.GIT_ASKPASS === undefined)).toBe(true);
+      const own = new Set([
+        "PATH",
+        "SystemRoot",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_ASKPASS",
+        "GIT_TERMINAL_PROMPT",
+        "HARPOC_GIT_USERNAME",
+        "HARPOC_GIT_PASSWORD",
+        "HARPOC_GIT_ORIGIN",
+        "HARPOC_T14_GIT_ALLOWED",
+      ]);
+      for (const [, , opts] of calls) {
+        expect(opts.env.HARPOC_T14_GIT_AMBIENT).toBeUndefined();
+        expect(opts.env.HARPOC_T14_GIT_ALLOWED).toBe("allowed-value");
+        expect(Object.keys(opts.env).filter((k) => !own.has(k))).toEqual([]);
+      }
+    } finally {
+      delete process.env.HARPOC_T14_GIT_AMBIENT;
+      delete process.env.HARPOC_T14_GIT_ALLOWED;
+      rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
   it("S5: the clone repository rides behind `--`, after every caller argument", async () => {
     const dest = join(tmpdir(), "harpoc-s5-dest");
     await injector.executeWithSecret(
