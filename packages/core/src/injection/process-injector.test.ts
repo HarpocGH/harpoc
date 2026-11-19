@@ -421,6 +421,43 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
     );
   });
 
+  it.each([
+    ["sftp", ["-oProxyCommand=whoami", "host"], /action\.type 'sftp'/],
+    ["docker", ["run", "--rm", "-v", "/:/host", "alpine"], /action\.type 'docker_registry'/],
+  ] as const)(
+    "refuses %s in the process context and audits the denial",
+    async (name, args, hint) => {
+      const stub = join(tmpRoot, process.platform === "win32" ? `${name}.exe` : name);
+      writeFileSync(stub, "");
+      const log = vi.fn();
+      const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+      const err = await expectVaultError(
+        () =>
+          audited.executeWithSecret(
+            { type: "process", command: stub, args: [...args], env_var: "SECRET" },
+            new Uint8Array(Buffer.from(SECRET, "utf8")),
+            { command_allowlist: [stub], env_allowlist: [] },
+            "secret-1",
+          ),
+        ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      );
+      expect(err.statusCode).toBe(403);
+      expect(err.message).toMatch(hint);
+      expect(log).toHaveBeenCalledOnce();
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "secret.use",
+          secretId: "secret-1",
+          success: false,
+          detail: expect.objectContaining({
+            context: "process",
+            error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+          }),
+        }),
+      );
+    },
+  );
+
   it("names the context the caller must use instead", async () => {
     const err = await expectVaultError(
       () =>

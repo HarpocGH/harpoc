@@ -42,6 +42,7 @@ const POLICY: InjectionPolicy = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [],
 };
 
 function action(engine: DbTlsEngine, host: string, port: number): DatabaseAction {

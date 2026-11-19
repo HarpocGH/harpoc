@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -9,10 +10,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { delimiter, join, sep } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, InjectionPolicy, SftpAction } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { controlledPathDirs } from "./allowlist.js";
 import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
@@ -23,6 +25,10 @@ import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 
 vi.mock("./spawn-captured.js", () => ({ spawnCaptured: vi.fn() }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, mkdtempSync: vi.fn(actual.mkdtempSync) };
+});
 
 // On Windows the ephemeral agent listens on a named pipe, which only the native
 // Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
@@ -85,6 +91,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
+    sftp_local_dirs: [],
     ...overrides,
   };
 }
@@ -116,7 +123,6 @@ const UPLOAD_ACTION: SftpAction = {
   user: "deploy",
   operation: "upload",
   remote_path: "/srv/report.pdf",
-  local_path: "/tmp/report.pdf",
 };
 
 const DOWNLOAD_ACTION: SftpAction = {
@@ -125,8 +131,53 @@ const DOWNLOAD_ACTION: SftpAction = {
   user: "deploy",
   operation: "download",
   remote_path: "/srv/report.pdf",
-  local_path: "/tmp/report.pdf",
 };
+
+const ACTION = { upload: UPLOAD_ACTION, download: DOWNLOAD_ACTION } as const;
+
+const TOO_LONG = "sftp paths are too long for one batch command";
+
+let localDir: string;
+let listedDir: string;
+let listedFile: string;
+let outsideFile: string;
+
+beforeAll(() => {
+  // `.native` like the injector's realpath: it expands a win32 short name (C:\Users\RUNNER~1 on CI).
+  localDir = realpathSync.native(mkdtempSync(join(tmpdir(), "harpoc-sftp-local-")));
+  listedDir = join(localDir, "listed");
+  listedFile = join(listedDir, "report.pdf");
+  outsideFile = join(localDir, "outside", "report.pdf");
+  for (const dir of [listedDir, join(listedDir, "sub"), join(localDir, "outside")]) mkdirSync(dir);
+  writeFileSync(listedFile, "report");
+  writeFileSync(outsideFile, "outside");
+});
+
+afterAll(() => {
+  rmSync(localDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+function batchLine(operation: SftpAction["operation"], remote: string): string {
+  switch (operation) {
+    case "upload":
+      return `put "${listedFile}" "${remote}"\n`;
+    case "download":
+      return `get "${remote}" "${listedFile}"\n`;
+    case "list":
+      return `ls -l "${remote}"\n`;
+  }
+}
+
+/** A remote path that makes the operation's batch line `bytes` long, its newline included. */
+function remoteForLineOf(operation: SftpAction["operation"], bytes: number): string {
+  return `/${"r".repeat(bytes - Buffer.byteLength(batchLine(operation, "/")))}`;
+}
+
+function actionOn(operation: SftpAction["operation"], remote: string): SftpAction {
+  return operation === "list"
+    ? { ...LIST_ACTION, remote_path: remote }
+    : { ...ACTION[operation], remote_path: remote, local_path: listedFile };
+}
 
 describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
   const spawnMock = vi.mocked(spawnCaptured);
@@ -359,13 +410,31 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       });
 
       await executeSftpAction(
-        UPLOAD_ACTION,
+        { ...UPLOAD_ACTION, local_path: listedFile },
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy(),
+        allowedPolicy({ sftp_local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
-      expect(content).toBe('put "/tmp/report.pdf" "/srv/report.pdf"\n');
+      expect(content).toBe(`put "${listedFile}" "/srv/report.pdf"\n`);
+    });
+
+    it("upload: the batch file names the resolved path, not the caller's spelling", async () => {
+      let content = "";
+      spawnMock.mockImplementation((_cmd, args) => {
+        const batchPath = args[args.indexOf("-b") + 1] as string;
+        content = readFileSync(batchPath, "utf8");
+        return Promise.resolve(OK_RESULT);
+      });
+
+      await executeSftpAction(
+        { ...UPLOAD_ACTION, local_path: `${listedDir}${sep}sub${sep}..${sep}report.pdf` },
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        SFTP_CONFIG,
+      );
+
+      expect(content).toBe(`put "${listedFile}" "/srv/report.pdf"\n`);
     });
 
     it("download: get <remote> <local>, both double-quoted", async () => {
@@ -377,13 +446,13 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       });
 
       await executeSftpAction(
-        DOWNLOAD_ACTION,
+        { ...DOWNLOAD_ACTION, local_path: listedFile },
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy(),
+        allowedPolicy({ sftp_local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
-      expect(content).toBe('get "/srv/report.pdf" "/tmp/report.pdf"\n');
+      expect(content).toBe(`get "/srv/report.pdf" "${listedFile}"\n`);
     });
 
     it("list: ls -l <remote>, double-quoted", async () => {
@@ -401,6 +470,25 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
         SFTP_CONFIG,
       );
 
+      expect(content).toBe('ls -l "/srv/reports"\n');
+    });
+
+    it("list: unchanged with an empty list of directories", async () => {
+      let content = "";
+      spawnMock.mockImplementation((_cmd, args) => {
+        const batchPath = args[args.indexOf("-b") + 1] as string;
+        content = readFileSync(batchPath, "utf8");
+        return Promise.resolve(OK_RESULT);
+      });
+
+      await executeSftpAction(
+        LIST_ACTION,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy({ sftp_local_dirs: [] }),
+        SFTP_CONFIG,
+      );
+
+      expect(spawnMock).toHaveBeenCalledOnce();
       expect(content).toBe('ls -l "/srv/reports"\n');
     });
 
@@ -426,7 +514,8 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     // token that arrived as `"-r"` is an ordinary `-r` option by the time
     // sftp's own flag parser sees it, regardless of the quotes this injector
     // wrapped it in. One test per operation, on the field the option-flag
-    // smuggling is reachable through for that operation.
+    // smuggling is reachable through for that operation; an upload's dash-led
+    // local_path now meets the absolute-path refusal before the batch is built.
     it("upload: refuses a local_path starting with '-' (option-flag smuggling)", async () => {
       await expect(
         executeSftpAction(
@@ -442,9 +531,9 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     it("download: refuses a remote_path starting with '-' (option-flag smuggling)", async () => {
       await expect(
         executeSftpAction(
-          { ...DOWNLOAD_ACTION, remote_path: "-r" },
+          { ...DOWNLOAD_ACTION, remote_path: "-r", local_path: listedFile },
           new Uint8Array(Buffer.from(makeKeyPem())),
-          allowedPolicy(),
+          allowedPolicy({ sftp_local_dirs: [listedDir] }),
           SFTP_CONFIG,
         ),
       ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
@@ -496,6 +585,98 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
         ),
       ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
       expect(spawnMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the local path is judged against sftp_local_dirs", () => {
+    it.each(["upload", "download"] as const)(
+      "%s: refuses a local_path outside the listed directories, nothing spawned",
+      async (operation) => {
+        await expectVaultError(
+          () =>
+            executeSftpAction(
+              { ...ACTION[operation], local_path: outsideFile },
+              new Uint8Array(Buffer.from(makeKeyPem())),
+              allowedPolicy({ sftp_local_dirs: [listedDir] }),
+              SFTP_CONFIG,
+            ),
+          ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+        );
+        expect(spawnMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("the host deny still comes before the local path", async () => {
+      await expectVaultError(
+        () =>
+          executeSftpAction(
+            { ...UPLOAD_ACTION, host: "other.example.com", local_path: outsideFile },
+            new Uint8Array(Buffer.from(makeKeyPem())),
+            allowedPolicy({ sftp_local_dirs: [listedDir] }),
+            SFTP_CONFIG,
+          ),
+        ErrorCode.HOST_NOT_ALLOWED,
+      );
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a batch line is bounded by sftp's line buffer", () => {
+    async function expectTooLong(action: SftpAction): Promise<void> {
+      vi.mocked(mkdtempSync).mockClear();
+      const err = await expectVaultError(
+        () =>
+          executeSftpAction(
+            action,
+            new Uint8Array(Buffer.from(makeKeyPem())),
+            allowedPolicy({ sftp_local_dirs: [listedDir] }),
+            SFTP_CONFIG,
+          ),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(TOO_LONG);
+      expect(mkdtempSync).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+    }
+
+    it.each(["upload", "download", "list"] as const)(
+      "%s: refuses a batch line longer than sftp's line buffer, nothing spawned",
+      async (operation) => {
+        const remote = remoteForLineOf(operation, 2048);
+        expect(Buffer.byteLength(batchLine(operation, remote))).toBe(2048);
+
+        await expectTooLong(actionOn(operation, remote));
+      },
+    );
+
+    it("download: a batch line of exactly 2047 bytes reaches the spawn", async () => {
+      let content = "";
+      spawnMock.mockImplementation((_cmd, args) => {
+        const batchPath = args[args.indexOf("-b") + 1] as string;
+        content = readFileSync(batchPath, "utf8");
+        return Promise.resolve(OK_RESULT);
+      });
+      const remote = remoteForLineOf("download", 2047);
+
+      await executeSftpAction(
+        actionOn("download", remote),
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        SFTP_CONFIG,
+      );
+
+      expect(spawnMock).toHaveBeenCalledOnce();
+      expect(content).toBe(batchLine("download", remote));
+      expect(Buffer.byteLength(content)).toBe(2047);
+    });
+
+    it("download: the bound counts bytes, not characters", async () => {
+      const remote = `/srv/${"ü".repeat(1100)}`;
+      const line = batchLine("download", remote);
+      expect(line.length).toBeLessThan(2047);
+      expect(Buffer.byteLength(line)).toBeGreaterThan(2047);
+
+      await expectTooLong(actionOn("download", remote));
     });
   });
 

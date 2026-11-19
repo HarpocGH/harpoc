@@ -3,7 +3,7 @@ import {
   realpath as nodeRealpath,
   stat as nodeStat,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
+import { basename, dirname, posix, resolve, win32 } from "node:path";
 import type { InjectionPolicy, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
   ActionType,
@@ -18,6 +18,7 @@ import {
   matchesRecipientPattern,
 } from "@harpoc/shared";
 import { matchesHostPortAllowlist } from "./allowlist.js";
+import { isWithin } from "./local-path.js";
 import type { MimeAttachment } from "./mail/mime.js";
 import { assembleMessage } from "./mail/mime.js";
 import type { SmtpAuth, SmtpSendOptions } from "./mail/smtp-client.js";
@@ -337,11 +338,6 @@ export function namesDevice(path: string, platform: NodeJS.Platform): boolean {
 /** Whether an attachment path names a win32 network share (`\\server\share`, `//server/share`, `\\?\UNC\`). */
 export function namesNetworkShare(path: string, platform: NodeJS.Platform): boolean {
   return platform === "win32" && win32.normalize(path).startsWith("\\\\");
-}
-
-function isWithin(dir: string, target: string): boolean {
-  const rel = relative(dir, target);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /**

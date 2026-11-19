@@ -131,6 +131,8 @@ export const EXEC_WRAPPERS: ReadonlySet<string> = new Set([
   "tar",
   "rsync",
   "make",
+  "sshpass",
+  "scp",
   // Windows
   "forfiles",
   "runas",

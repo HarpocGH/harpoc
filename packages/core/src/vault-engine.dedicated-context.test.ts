@@ -11,9 +11,14 @@ vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
 );
 
-// M-P2-19: the refusal classifies the resolved binary, so the ssh case needs an
-// ssh on PATH; a host without one skips it.
+// The refusal classifies the resolved binary, so the ssh, sftp and docker
+// cases need that binary on PATH; a host without one skips its case.
 const SSH_ON_PATH = resolveExecutable("ssh", controlledPathDirs());
+const SFTP_ON_PATH = resolveExecutable("sftp", controlledPathDirs());
+const DOCKER_ON_PATH = resolveExecutable("docker", controlledPathDirs());
+
+const SFTP_KEY = "sftp-deploy-key-material";
+const DOCKER_AUTH = "registry-user:registry-token-value";
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -89,7 +94,7 @@ describe("VaultEngine — dedicated-context refusal (C1)", () => {
     expect(engine.verifyAuditChain().valid).toBe(true);
   });
 
-  // M-P2-19 (test-review-2026-10-09): ssh is the other dedicated-context binary
+  // M-P2-19 (test-review-2026-10-09): ssh is a dedicated-context binary too
   // (getting-started.md:174); the injector half is process-injector.test.ts.
   it.skipIf(SSH_ON_PATH === null)(
     "refuses a process action that re-spawns the SSH context's binary, audited (M-P2-19)",
@@ -121,6 +126,72 @@ describe("VaultEngine — dedicated-context refusal (C1)", () => {
       expect(rows[0]?.detail).toMatchObject({
         context: "process",
         command: "ssh",
+        args_count: 1,
+        error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      });
+    },
+  );
+
+  it.skipIf(SFTP_ON_PATH === null)(
+    "refuses a process action that re-spawns the SFTP context's binary, audited",
+    async () => {
+      await engine.createSecret({
+        name: "sftp-key",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from(SFTP_KEY, "utf8")),
+      });
+      const handle = "secret://sftp-key";
+      await engine.setInjectionPolicy(handle, { command_allowlist: ["sftp"] });
+      const secretId = await engine.resolveSecretId(handle);
+
+      const err = await expectVaultError(
+        () => engine.useSecret(handle, { type: "process", command: "sftp", env_var: "SFTP_KEY" }),
+        ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      );
+
+      expect(err.message).toMatch(/action\.type 'sftp'/);
+      const rows = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toMatchObject({
+        context: "process",
+        command: "sftp",
+        args_count: 0,
+        error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      });
+    },
+  );
+
+  it.skipIf(DOCKER_ON_PATH === null)(
+    "refuses a process action that re-spawns the docker-registry context's binary, audited",
+    async () => {
+      await engine.createSecret({
+        name: "registry-auth",
+        type: SecretType.API_KEY,
+        value: new Uint8Array(Buffer.from(DOCKER_AUTH, "utf8")),
+      });
+      const handle = "secret://registry-auth";
+      await engine.setInjectionPolicy(handle, { command_allowlist: ["docker"] });
+      const secretId = await engine.resolveSecretId(handle);
+
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret(handle, {
+            type: "process",
+            command: "docker",
+            args: ["--version"],
+            env_var: "DOCKER_AUTH",
+          }),
+        ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      );
+
+      expect(err.message).toMatch(/action\.type 'docker_registry'/);
+      const rows = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.success).toBe(false);
+      expect(rows[0]?.detail).toMatchObject({
+        context: "process",
+        command: "docker",
         args_count: 1,
         error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
       });

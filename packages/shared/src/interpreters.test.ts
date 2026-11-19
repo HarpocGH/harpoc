@@ -147,6 +147,9 @@ describe("execWrapperName", () => {
     ["C:\\Program Files\\Git\\usr\\bin\\find.exe", "find"],
     ["Windows\\System32\\find.exe", "find"],
     ["C:\\Windows\\System32\\drivers\\find.exe", "find"],
+    ["sshpass", "sshpass"],
+    ["/usr/bin/scp", "scp"],
+    ["C:\\Windows\\System32\\OpenSSH\\scp.exe", "scp"],
   ] as const)("detects %s", (entry, expected) => {
     expect(execWrapperName(entry)).toBe(expected);
   });

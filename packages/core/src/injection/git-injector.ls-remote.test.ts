@@ -79,6 +79,7 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
+      sftp_local_dirs: [],
     };
   }
 

@@ -292,6 +292,24 @@ describe("CONNECT — the tunnel", () => {
     expect(double.resolveForProxy).not.toHaveBeenCalled();
   });
 
+  it("a two-placeholder request inside a tunnel leaves the row with the tunnel's origin", async () => {
+    const answer = await exchangeInTunnel(
+      await tunnelToUpstream(),
+      `GET /q?token=harpoc:other HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\nAuthorization: Bearer harpoc:gh-pat\r\nConnection: close\r\n\r\n`,
+    );
+
+    expect(answer.startsWith("HTTP/1.1 403 ")).toBe(true);
+    expect(answer).toContain(`"error":"${ErrorCode.PROXY_PLACEHOLDER_DENIED}"`);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+    expect(double.auditProxyRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent-a", interface: "proxy" }),
+      `GET ${upstream.origin}`,
+      ErrorCode.PROXY_PLACEHOLDER_DENIED,
+    );
+    expect(upstream.seen).toHaveLength(0);
+    expect(double.resolveForProxy).not.toHaveBeenCalled();
+  });
+
   it("keeps serving CONNECT after the caller zero-fills the key Buffer it passed (RX-B8-17)", async () => {
     await proxy.close();
     const keyPem = Buffer.from(CA.keyPem, "utf8");
@@ -397,7 +415,7 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
     expect(JSON.parse(answer.body ?? "")).toMatchObject({ error: code });
   });
 
-  it("a host outside the CA's hosts is 403 PROXY_CONNECT_DENIED naming host and port; no leaf, no engine call", async () => {
+  it("a host outside the CA's hosts is 403 PROXY_CONNECT_DENIED naming host and port after one access.denied row; no leaf, no resolution", async () => {
     const answer = await openTunnel({
       port,
       authority: "evil.example:443",
@@ -410,7 +428,81 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
     expect(body.error).toBe(ErrorCode.PROXY_CONNECT_DENIED);
     expect(body.message).toContain("evil.example:443");
     expect(errors.map((err) => err.code)).toEqual([ErrorCode.PROXY_CONNECT_DENIED]);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+    expect(double.auditProxyRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent-a", interface: "proxy" }),
+      "CONNECT evil.example:443",
+      ErrorCode.PROXY_CONNECT_DENIED,
+    );
     expect(double.resolveForProxy).not.toHaveBeenCalled();
+  });
+
+  it("a CONNECT without a token leaves no row", async () => {
+    const answer = await openTunnel({
+      port,
+      authority: "evil.example:443",
+      fields: [],
+      ca: CA.rootPem,
+    });
+
+    expect(answer.established.startsWith("HTTP/1.1 407 ")).toBe(true);
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
+  });
+
+  it("a CONNECT with no CA enrolled leaves no row", async () => {
+    await proxy.close();
+    await startProxy({ ca: undefined });
+
+    const answer = await openTunnel({
+      port,
+      authority: "evil.example:443",
+      fields: fields(),
+      ca: CA.rootPem,
+    });
+
+    expect(answer.established.startsWith("HTTP/1.1 501 ")).toBe(true);
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
+  });
+
+  it("a CONNECT under an expired CA leaves no row", async () => {
+    await proxy.close();
+    const shortLived = createCa({ permittedHosts: HOSTS, validityDays: 1 });
+    await startProxy({
+      ca: { certPem: shortLived.certPem, keyPem: shortLived.keyPem, hosts: HOSTS },
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * 86_400_000);
+
+    const answer = await openTunnel({
+      port,
+      authority: `127.0.0.1:${upstream.port}`,
+      fields: fields(),
+      ca: shortLived.rootPem,
+    });
+
+    expect(answer.established.startsWith("HTTP/1.1 410 ")).toBe(true);
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
+  });
+
+  it("a row that cannot be written answers 503, not 403", async () => {
+    double.auditProxyRefusal.mockImplementation(() => {
+      throw VaultError.vaultLocked();
+    });
+
+    const answer = await openTunnel({
+      port,
+      authority: "evil.example:443",
+      fields: fields(),
+      ca: CA.rootPem,
+    });
+
+    expect(answer.established.startsWith("HTTP/1.1 503 ")).toBe(true);
+    expect(JSON.parse(answer.body ?? "")).toEqual({
+      error: ErrorCode.VAULT_LOCKED,
+      message: "Vault is locked",
+    });
+    expect(errors.map((err) => err.code)).toEqual([ErrorCode.VAULT_LOCKED]);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
   });
 
   it.each(["127.0.0.1", "127.0.0.1:0", "127.0.0.1:443/x"])(
@@ -505,6 +597,12 @@ describe("CONNECT — refusals before the 200, each closing the connection, none
       [ErrorCode.INVALID_TOKEN, 407],
       [ErrorCode.PROXY_CONNECT_DENIED, 403],
     ]);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+    expect(double.auditProxyRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent-a", interface: "proxy" }),
+      "CONNECT evil.example:443",
+      ErrorCode.PROXY_CONNECT_DENIED,
+    );
   });
 });
 

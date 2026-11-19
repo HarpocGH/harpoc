@@ -494,6 +494,7 @@ describe("PolicyEditor", () => {
         strict_tree_exit: false,
         proxy: false,
         ssh_agent_socket: false,
+        sftp_local_dirs: [],
       },
     ]);
   });
@@ -546,6 +547,7 @@ describe("PolicyEditor", () => {
         strict_tree_exit: false,
         proxy: false,
         ssh_agent_socket: false,
+        sftp_local_dirs: [],
       },
     ]);
   });
@@ -565,6 +567,66 @@ describe("PolicyEditor", () => {
     fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
     await waitFor(() => expect(put).toHaveBeenCalled());
     expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["ssh_agent_socket"]).toBe(false);
+  });
+
+  it("a directory that holds a comma is sent whole", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{}}
+        onDone={vi.fn()}
+      />,
+    );
+    const area = screen.getByLabelText(/SFTP local directories/) as HTMLTextAreaElement;
+    expect(area.tagName).toBe("TEXTAREA");
+    fireEvent.input(area, { target: { value: "/srv/a,b\n\n/srv/c\n" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["sftp_local_dirs"]).toEqual([
+      "/srv/a,b",
+      "/srv/c",
+    ]);
+  });
+
+  it("a directory typed with surrounding whitespace is sent trimmed", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{}}
+        onDone={vi.fn()}
+      />,
+    );
+    const area = screen.getByLabelText(/SFTP local directories/) as HTMLTextAreaElement;
+    fireEvent.input(area, { target: { value: "  /srv/out \r\n\t/srv/in\t\n \n/srv/last\r" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["sftp_local_dirs"]).toEqual([
+      "/srv/out",
+      "/srv/in",
+      "/srv/last",
+    ]);
+  });
+
+  it("an editor that was not touched sends the stored directories back", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ sftp_local_dirs: ["/srv/out", "C:\\data"] }}
+        onDone={vi.fn()}
+      />,
+    );
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["sftp_local_dirs"]).toEqual([
+      "/srv/out",
+      "C:\\data",
+    ]);
   });
 
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {

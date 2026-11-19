@@ -40,6 +40,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
+    sftp_local_dirs: [],
     ...overrides,
   };
 }
@@ -236,13 +237,14 @@ describe("a non-string host or user of an unparsed caller is refused with the ch
 
 const PATH_DASH_MESSAGE = "sftp path must not start with '-' (would be parsed as an sftp option)";
 const LOCAL_PATH_REQUIRED = "local_path is required for upload";
+const LOCAL_PATH_MUST_BE_ABSOLUTE = "sftp local path must be absolute";
 
 const NON_STRING_LOCAL_PATHS: ReadonlyArray<readonly [string, unknown, string]> = [
-  ["a number", 5, PATH_DASH_MESSAGE],
+  ["a number", 5, LOCAL_PATH_MUST_BE_ABSOLUTE],
   ["undefined", undefined, LOCAL_PATH_REQUIRED],
   ["null", null, LOCAL_PATH_REQUIRED],
-  ["an array", ["-x"], PATH_DASH_MESSAGE],
-  ["an object", {}, PATH_DASH_MESSAGE],
+  ["an array", ["-x"], LOCAL_PATH_MUST_BE_ABSOLUTE],
+  ["an object", {}, LOCAL_PATH_MUST_BE_ABSOLUTE],
 ];
 
 describe("a non-string remote_path or local_path of an unparsed caller is refused like a malformed path", () => {

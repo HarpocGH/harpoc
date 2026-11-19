@@ -3,12 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { createCa } from "@harpoc/cert-manager";
 import { VaultEngine } from "@harpoc/core";
 import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import type { ProxyCaOptions } from "./ca.js";
 import { createEgressProxy } from "./proxy.js";
 import type { EgressProxy, ProxyEngine } from "./proxy.js";
 import { proxyRequest } from "./__fixtures__/proxy-client.js";
 import type { ProxyReply } from "./__fixtures__/proxy-client.js";
+import { openTunnel } from "./__fixtures__/tunnel-client.js";
 import {
   CAN_SET_DEFAULT_CA,
   startUpstream,
@@ -28,10 +31,15 @@ vi.mock("argon2", () => ({
   },
 }));
 
+const CA_HOSTS = ["127.0.0.1"];
+const CA = createCa({ permittedHosts: CA_HOSTS, validityDays: 30 });
+const CA_OPTIONS: ProxyCaOptions = { certPem: CA.certPem, keyPem: CA.keyPem, hosts: CA_HOSTS };
+
 let upstream: UpstreamFixture;
 let tempDir: string;
 let engine: VaultEngine;
 let resolveForProxy: Mock<ProxyEngine["resolveForProxy"]>;
+let proxyEngine: ProxyEngine;
 let proxy: EgressProxy;
 let port: number;
 
@@ -57,12 +65,14 @@ beforeEach(async () => {
   await engine.initVault("password");
   engine.registerAgent({ name: "agent-a" });
   resolveForProxy = vi.fn<ProxyEngine["resolveForProxy"]>();
-  // The real engine behind the four members; resolveForProxy is the engine
+  // The real engine behind the five members; resolveForProxy is the engine
   // lane's, so these rows reach it only to prove they never do.
-  const proxyEngine: ProxyEngine = {
+  proxyEngine = {
     verifyToken: (token) => engine.verifyToken(token),
     auditScopeRefusal: (caller, operation, reason) =>
       engine.auditScopeRefusal(caller, operation, reason),
+    auditProxyRefusal: (caller, operation, code) =>
+      engine.auditProxyRefusal(caller, operation, code),
     auditServerStart: (options) => engine.auditServerStart(options),
     resolveForProxy,
   };
@@ -183,6 +193,41 @@ describe("the proxy against a real engine", () => {
     });
     expect(resolveForProxy).not.toHaveBeenCalled();
     expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("a CONNECT to a host outside the CA's names is 403 after one access.denied row naming the host", async () => {
+    await proxy.close();
+    proxy = createEgressProxy({ engine: proxyEngine, ca: CA_OPTIONS });
+    port = (await proxy.listenTcp(0, "127.0.0.1")).port;
+    const token = engine.createToken("agent-a", ["use"]);
+    const rowsBefore = nonReadAuditCount(engine);
+
+    const answer = await openTunnel({
+      port,
+      authority: "evil.example:443",
+      fields: [`Proxy-Authorization: Bearer ${token}`],
+      ca: CA.rootPem,
+    });
+
+    expect(answer.established.startsWith("HTTP/1.1 403 Forbidden\r\n")).toBe(true);
+    expect(JSON.parse(answer.body ?? "")).toMatchObject({ error: ErrorCode.PROXY_CONNECT_DENIED });
+    expect(nonReadAuditCount(engine)).toBe(rowsBefore + 1);
+    const rows = engine.queryAudit({ eventType: AuditEventType.ACCESS_DENIED });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      secret_id: null,
+      principal_type: "agent",
+      principal_id: "agent-a",
+      ip_address: "127.0.0.1",
+      success: false,
+      detail: {
+        operation: "CONNECT evil.example:443",
+        error: ErrorCode.PROXY_CONNECT_DENIED,
+        reason: "proxy",
+        interface: "proxy",
+      },
+    });
+    expect(resolveForProxy).not.toHaveBeenCalled();
   });
 
   it("listenTcp wrote one server.start row: transport proxy, the bound port, the host", () => {

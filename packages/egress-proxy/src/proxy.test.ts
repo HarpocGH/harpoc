@@ -1,5 +1,6 @@
 import { request } from "node:http";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { validateUrl } from "@harpoc/core";
 import { ErrorCode, RateLimiter, VaultError } from "@harpoc/shared";
 import type { EgressProxy, EgressProxyOptions } from "./proxy.js";
 import { createEgressProxy } from "./proxy.js";
@@ -25,6 +26,11 @@ import {
 } from "./__fixtures__/upstream-server.js";
 import type { UpstreamFixture } from "./__fixtures__/upstream-server.js";
 import { expectAbsent } from "@harpoc/test-utils";
+
+vi.mock("@harpoc/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@harpoc/core")>();
+  return { ...actual, validateUrl: vi.fn(actual.validateUrl) };
+});
 
 const MARKER = "[REDACTED]";
 
@@ -343,7 +349,7 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
 });
 
 describe("refusals before the lease", () => {
-  it("two placeholders are 403 PROXY_PLACEHOLDER_DENIED before any resolution", async () => {
+  it("two placeholders are 403 PROXY_PLACEHOLDER_DENIED after one access.denied row naming the origin, before any resolution", async () => {
     const reply = await send("/q?token=harpoc:other", { authorization: "Bearer harpoc:gh-pat" });
 
     expect(reply.status).toBe(403);
@@ -351,8 +357,30 @@ describe("refusals before the lease", () => {
       error: ErrorCode.PROXY_PLACEHOLDER_DENIED,
       message: `Placeholder refused for ${upstream.origin}: one placeholder per request`,
     });
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+    expect(double.auditProxyRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent-a", interface: "proxy" }),
+      `GET ${upstream.origin}`,
+      ErrorCode.PROXY_PLACEHOLDER_DENIED,
+    );
     expect(double.resolveForProxy).not.toHaveBeenCalled();
     expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("a malformed target leaves no row", async () => {
+    const reply = await proxyRequest({
+      port,
+      path: "/a@b.example/x",
+      headers: {
+        "proxy-authorization": `Bearer ${TOKENS.use}`,
+        authorization: "Bearer harpoc:gh-pat",
+        "x-api-key": "harpoc:other",
+      },
+    });
+
+    expect(reply.status).toBe(400);
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
+    expect(double.auditScopeRefusal).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -458,16 +486,58 @@ describe("the upstream leg", () => {
     expect(upstream.seen).toHaveLength(0);
   });
 
-  it("the SSRF floor refuses a private literal on a pass-through: 403, no engine call", async () => {
+  it("the SSRF floor refuses a private literal on a pass-through: 403 after one access.denied row naming the origin, no resolution", async () => {
     const reply = await proxyRequest({
       port,
-      path: "/10.0.0.1/x",
+      path: "/10.0.0.1/x?q=1",
       headers: { "proxy-authorization": `Bearer ${TOKENS.use}` },
     });
 
     expect(reply.status).toBe(403);
     expect(JSON.parse(reply.body)).toMatchObject({ error: ErrorCode.SSRF_BLOCKED });
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+    expect(double.auditProxyRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({ principal_id: "agent-a", interface: "proxy" }),
+      "GET https://10.0.0.1",
+      ErrorCode.SSRF_BLOCKED,
+    );
     expect(double.resolveForProxy).not.toHaveBeenCalled();
+  });
+
+  it("a pass-through whose name does not resolve leaves no row", async () => {
+    vi.mocked(validateUrl).mockRejectedValueOnce(
+      new VaultError(
+        ErrorCode.DNS_RESOLUTION_FAILED,
+        "DNS resolution failed for unresolvable.invalid: ENOTFOUND",
+      ),
+    );
+    const reply = await proxyRequest({
+      port,
+      path: "/unresolvable.invalid/x",
+      headers: { "proxy-authorization": `Bearer ${TOKENS.use}` },
+    });
+
+    expect(reply.status).toBe(502);
+    expect(JSON.parse(reply.body)).toMatchObject({ error: ErrorCode.DNS_RESOLUTION_FAILED });
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
+    expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("a brokered request the address check refuses leaves the lease's row and no access.denied row", async () => {
+    const reply = await proxyRequest({
+      port,
+      path: "/10.0.0.1/x",
+      headers: {
+        "proxy-authorization": `Bearer ${TOKENS.use}`,
+        authorization: "Bearer harpoc:gh-pat",
+      },
+    });
+
+    expect(reply.status).toBe(403);
+    expect(JSON.parse(reply.body)).toMatchObject({ error: ErrorCode.SSRF_BLOCKED });
+    expect(double.leases[0]?.complete).toHaveBeenCalledTimes(1);
+    expect(double.leases[0]?.complete).toHaveBeenCalledWith({ error: ErrorCode.SSRF_BLOCKED });
+    expect(double.auditProxyRefusal).not.toHaveBeenCalled();
   });
 
   it("the SSRF floor refuses a private literal on a brokered request: 403, the lease completes SSRF_BLOCKED", async () => {

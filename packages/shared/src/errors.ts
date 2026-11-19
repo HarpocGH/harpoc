@@ -122,6 +122,7 @@ export enum ErrorCode {
   IMAP_OPERATION_FAILED = "IMAP_OPERATION_FAILED",
   WEBSOCKET_CONNECT_FAILED = "WEBSOCKET_CONNECT_FAILED",
   SFTP_OPERATION_FAILED = "SFTP_OPERATION_FAILED",
+  LOCAL_PATH_NOT_ALLOWED = "LOCAL_PATH_NOT_ALLOWED",
   DOCKER_OPERATION_FAILED = "DOCKER_OPERATION_FAILED",
 
   // Agent governance (v1.4)
@@ -280,6 +281,7 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.IMAP_OPERATION_FAILED]: 502,
   [ErrorCode.WEBSOCKET_CONNECT_FAILED]: 502,
   [ErrorCode.SFTP_OPERATION_FAILED]: 502,
+  [ErrorCode.LOCAL_PATH_NOT_ALLOWED]: 403,
   [ErrorCode.DOCKER_OPERATION_FAILED]: 502,
 
   // Agent governance (v1.4)
@@ -880,6 +882,13 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.SFTP_OPERATION_FAILED,
       `SFTP operation failed (exit code ${exitCode})`,
+    );
+  }
+
+  static localPathNotAllowed(): VaultError {
+    return new VaultError(
+      ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      "sftp local path is not inside a directory the secret's policy lists",
     );
   }
 

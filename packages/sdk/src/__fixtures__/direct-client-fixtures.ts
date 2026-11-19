@@ -22,6 +22,7 @@ export const FULL_POLICY = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [] as string[],
 };
 
 /** The VaultEngine methods DirectClient calls, each a vitest mock. */

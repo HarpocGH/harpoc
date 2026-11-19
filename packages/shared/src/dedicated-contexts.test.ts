@@ -9,6 +9,14 @@ describe("dedicatedContextForBinary", () => {
     expect(dedicatedContextForBinary("ssh")).toBe("ssh");
   });
 
+  it("maps sftp and docker to their dedicated contexts", () => {
+    expect(dedicatedContextForBinary("sftp")).toBe("sftp");
+    expect(dedicatedContextForBinary("docker")).toBe("docker_registry");
+    expect(dedicatedContextForBinary("/usr/bin/sftp")).toBe("sftp");
+    expect(dedicatedContextForBinary("C:\\Windows\\System32\\OpenSSH\\sftp.exe")).toBe("sftp");
+    expect(dedicatedContextForBinary("DOCKER.EXE")).toBe("docker_registry");
+  });
+
   it("matches absolute paths on both separator styles", () => {
     expect(dedicatedContextForBinary("/usr/bin/git")).toBe("git");
     expect(dedicatedContextForBinary("C:\\Program Files\\Git\\cmd\\git.exe")).toBe("git");
@@ -29,6 +37,11 @@ describe("dedicatedContextForBinary", () => {
       "git-upload-pack",
       "git-receive-pack",
       "gitk",
+      "sftp-server",
+      "docker-compose",
+      "dockerd",
+      "docker-credential-desktop",
+      "scp",
     ]) {
       expect(dedicatedContextForBinary(sibling)).toBeNull();
     }

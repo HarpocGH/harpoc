@@ -622,9 +622,14 @@ describe.skipIf(GIT === null)(
         }
       }, 60_000);
 
-      it("a CONNECT to a host outside the CA's constraints is refused 403 PROXY_CONNECT_DENIED before any contact and writes no row", async () => {
+      it("a CONNECT to a host outside the CA's constraints is refused 403 PROXY_CONNECT_DENIED before any contact and leaves one access.denied row", async () => {
         const before = fixture?.requests.length;
         const rowsBefore = (await auditRows(AuditEventType.SECRET_USE)).length;
+        const proxyRefusals = async (): Promise<AuditRow[]> =>
+          (await auditRows(AuditEventType.ACCESS_DENIED)).filter(
+            (r) => r.detail?.["reason"] === "proxy",
+          );
+        expect(await proxyRefusals()).toHaveLength(0);
         const authority = `${OUTSIDE_HOST}:${fixturePort()}`;
         const answer = await rawConnect(proxyPort, authority, {
           "Proxy-Authorization": `Bearer ${useToken}`,
@@ -638,6 +643,20 @@ describe.skipIf(GIT === null)(
         expect(body.message).toContain(fixturePort());
         expect(fixture?.requests.length).toBe(before);
         expect((await auditRows(AuditEventType.SECRET_USE)).length).toBe(rowsBefore);
+        const refusals = await proxyRefusals();
+        expect(refusals).toHaveLength(1);
+        expect(refusals[0]).toMatchObject({
+          secret_id: null,
+          principal_id: AGENT,
+          ip_address: "127.0.0.1",
+          success: false,
+          detail: {
+            operation: `CONNECT ${authority}`,
+            error: ErrorCode.PROXY_CONNECT_DENIED,
+            reason: "proxy",
+            interface: "proxy",
+          },
+        });
       }, 60_000);
 
       it.skipIf(CURL === null)(

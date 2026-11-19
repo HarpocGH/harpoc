@@ -27,6 +27,7 @@ const FULL_POLICY = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [] as string[],
 };
 
 const HANDLE = "secret://proj/k";
@@ -697,6 +698,20 @@ describe("RestClient", () => {
       });
     });
 
+    it("setInjectionPolicy sends sftp_local_dirs in the whole-policy body (S1)", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        ...FULL_POLICY,
+        sftp_local_dirs: ["/srv/out", "C:\\data"],
+      });
+      const call = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toStrictEqual({
+        ...FULL_POLICY,
+        sftp_local_dirs: ["/srv/out", "C:\\data"],
+        acknowledge_interpreters: false,
+      });
+    });
+
     it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
       mockFetchResponse({ updated: true });
       const full = {
@@ -713,6 +728,7 @@ describe("RestClient", () => {
         strict_tree_exit: false,
         proxy: true,
         ssh_agent_socket: true,
+        sftp_local_dirs: ["/srv/out"],
       };
       await client.setInjectionPolicy("secret://k", full);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];

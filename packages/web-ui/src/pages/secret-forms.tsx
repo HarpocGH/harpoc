@@ -46,6 +46,12 @@ const splitList = (text: string): string[] =>
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
 
+const splitLines = (text: string): string[] =>
+  text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+
 export function CreateSecretForm({ api, onDone }: { api: ApiClient; onDone: () => void }) {
   const [name, setName] = useState("");
   const [project, setProject] = useState("");
@@ -262,6 +268,7 @@ export function PolicyEditor({
   const [urls, setUrls] = useState((initial.url_allowlist ?? []).join(", "));
   const [commands, setCommands] = useState((initial.command_allowlist ?? []).join(", "));
   const [hosts, setHosts] = useState((initial.host_allowlist ?? []).join(", "));
+  const [localDirs, setLocalDirs] = useState((initial.sftp_local_dirs ?? []).join("\n"));
   const [mode, setMode] = useState<ResponseMode>(initial.response_mode ?? "filtered");
   const [networkIsolation, setNetworkIsolation] = useState(initial.network_isolation ?? false);
   const [fsIsolation, setFsIsolation] = useState(initial.fs_isolation ?? false);
@@ -275,6 +282,7 @@ export function PolicyEditor({
       url_allowlist: splitList(urls),
       command_allowlist: splitList(commands),
       host_allowlist: splitList(hosts),
+      sftp_local_dirs: splitLines(localDirs),
       // Not edited here, and a PUT replaces the whole policy — resubmitting
       // them unchanged is the difference between "not edited" and "cleared".
       // Covers env_allowlist, response_header_allowlist, smtp_recipient_allowlist
@@ -336,6 +344,15 @@ export function PolicyEditor({
         autocomplete="off"
         value={hosts}
         onInput={(e) => setHosts(e.currentTarget.value)}
+      />
+      <label for="policy-sftp-local-dirs">
+        SFTP local directories (one absolute path per line)
+      </label>
+      <textarea
+        id="policy-sftp-local-dirs"
+        autocomplete="off"
+        value={localDirs}
+        onInput={(e) => setLocalDirs(e.currentTarget.value)}
       />
       <label for="policy-mode">Response mode</label>
       <select

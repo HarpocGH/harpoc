@@ -36,6 +36,7 @@ const FULL_POLICY = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [],
 };
 
 function createMockEngine() {
@@ -249,6 +250,21 @@ describe("every JSON-body route refuses an unknown key (R10/A5)", () => {
       expect(res.status).toBeLessThan(400);
     },
   );
+});
+
+describe("the injection-policy PUT requires sftp_local_dirs (S1)", () => {
+  it("a PUT without sftp_local_dirs is 400 SCHEMA_VALIDATION_ERROR", async () => {
+    const { app, engine } = build();
+    const partial = Object.fromEntries(
+      Object.entries(FULL_POLICY).filter(([key]) => key !== "sftp_local_dirs"),
+    );
+    const res = await send(app, "PUT", "/api/v1/secrets/k/injection-policy", partial);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; message: string };
+    expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(json.message).toContain("sftp_local_dirs");
+    expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
 });
 
 describe("the body-route inventory is complete", () => {

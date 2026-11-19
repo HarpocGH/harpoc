@@ -8,6 +8,8 @@ import type { ProxyLease, ProxyOutcome, ProxyTarget } from "@harpoc/core";
 import {
   DEFAULT_HTTP_TIMEOUT_MS,
   ErrorCode,
+  RATE_LIMIT_PROXY_REFUSALS,
+  RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS,
   RateLimiter,
   VaultError,
   callerFromToken,
@@ -30,6 +32,7 @@ import type { Tunnel } from "./connect.js";
 import { findPlaceholder } from "./placeholder.js";
 import type { PlaceholderMatch } from "./placeholder.js";
 import { createRedactingTransform } from "./redact.js";
+import { RefusalBudget, refusalBudgetKey } from "./refusal-budget.js";
 import { swapCredential } from "./swap.js";
 import {
   failureClass,
@@ -42,7 +45,7 @@ import {
 import type { ParsedTarget, ProxyHeaders } from "./upstream.js";
 
 /**
- * The engine surface the proxy uses — four members a `VaultEngine` has;
+ * The engine surface the proxy uses — five members a `VaultEngine` has;
  * declared here so the package depends on them, not on the class. The lease
  * types are core's (`resolveForProxy`).
  */
@@ -53,6 +56,7 @@ export interface ProxyEngine {
     operation: string,
     reason: ScopeRefusalReason,
   ): void;
+  auditProxyRefusal(caller: CallerContext | undefined, operation: string, code: ErrorCode): void;
   auditServerStart(options: {
     transport: ServerTransport;
     tokenless: boolean;
@@ -66,6 +70,8 @@ export interface EgressProxyOptions {
   engine: ProxyEngine;
   /** The per-handle bucket of brokered requests; `RATE_LIMIT_USE_SECRET` per minute by default. */
   rateLimiter?: Pick<RateLimiter, "checkSecret">;
+  /** The per-principal budget of refusals that leave a row; `RATE_LIMIT_PROXY_REFUSALS` per `RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS` by default. */
+  refusalBudget?: RefusalBudget;
   /** Upstream connect and response-head budget; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
   timeoutMs?: number;
   /** Upstream idle budget between response body chunks; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
@@ -108,6 +114,17 @@ interface Refusal {
 
 function internalProxyError(): VaultError {
   return new VaultError(ErrorCode.INTERNAL_ERROR, "Internal proxy error");
+}
+
+const BUDGET_OPERATION = "proxy refusal budget";
+
+function refusesConsumer(err: unknown): boolean {
+  return err instanceof VaultError && statusOf(err) < 500 && err.code !== ErrorCode.INVALID_INPUT;
+}
+
+function budgetExceeded(): Refusal {
+  const error = new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Proxy refusal budget exceeded");
+  return { status: error.statusCode, error };
 }
 
 const TCP_LABEL = "Egress proxy";
@@ -207,6 +224,9 @@ function closeServer(server: Server): Promise<void> {
 export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   const { engine, onError, onListenerError } = options;
   const limiter = options.rateLimiter ?? new RateLimiter();
+  const budget =
+    options.refusalBudget ??
+    new RefusalBudget(RATE_LIMIT_PROXY_REFUSALS, RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS);
   const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const bodyIdleTimeoutMs = options.bodyIdleTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const servers = new Set<Server>();
@@ -240,6 +260,23 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       "content-length": Buffer.byteLength(body),
     });
     res.end(body);
+  }
+
+  function charge(caller: CallerContext): void {
+    if (!budget.charge(refusalBudgetKey(caller))) return;
+    engine.auditProxyRefusal(caller, BUDGET_OPERATION, ErrorCode.RATE_LIMIT_EXCEEDED);
+  }
+
+  /** The refusal's `access.denied` row, then its charge; a row that cannot be written answers in its place. */
+  function audited(caller: CallerContext, operation: string, refusal: Refusal): Refusal {
+    try {
+      engine.auditProxyRefusal(caller, operation, refusal.error.code);
+      charge(caller);
+    } catch (err) {
+      if (!(err instanceof VaultError)) throw err;
+      return { status: statusOf(err), error: err };
+    }
+    return refusal;
   }
 
   /**
@@ -291,7 +328,8 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
    * runs through the redactor and every response field is redacted. A brokered
    * request goes upstream to `brokered.url` (the credential in place), while a
    * `Location` is mapped against `target`, the client's own URL. The outcome is
-   * what the lease's `complete` records; a pass-through ignores it.
+   * what the lease's `complete` records; a pass-through ignores it and hands
+   * `refused`, through which its `SSRF_BLOCKED` is answered.
    */
   async function exchange(
     req: IncomingMessage,
@@ -299,6 +337,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     target: ParsedTarget,
     headers: ProxyHeaders,
     brokered: { url: URL; caPem?: string; needles: Uint8Array[] } | null,
+    refused?: (refusal: Refusal) => Refusal,
   ): Promise<ProxyOutcome> {
     const needles = brokered?.needles ?? null;
     const scrub = (err: VaultError): VaultError =>
@@ -311,7 +350,11 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       resolvedAddresses = (await validateUrl(target.url.origin)).resolvedAddresses;
     } catch (err) {
       if (!(err instanceof VaultError)) throw err;
-      refuse(res, { status: statusOf(err), error: scrub(err) });
+      const refusal: Refusal = { status: statusOf(err), error: scrub(err) };
+      refuse(
+        res,
+        refused !== undefined && err.code === ErrorCode.SSRF_BLOCKED ? refused(refusal) : refusal,
+      );
       return { error: err.code };
     }
 
@@ -383,15 +426,21 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     try {
       // Token scope is the interface's (shared.md: "per-secret name scope
       // stays checkTokenScope's"); the refusal's access.denied row first (D2g).
-      checkTokenScope(auth.token, "use", project, name, (reason) =>
+      checkTokenScope(auth.token, "use", project, name, (reason) => {
         engine.auditScopeRefusal(
           auth.caller,
           `${judged.method} ${judged.origin}${judged.path}`,
           reason,
-        ),
-      );
+        );
+        charge(auth.caller);
+      });
       limiter.checkSecret(placeholder.handle, true);
-      lease = await engine.resolveForProxy(placeholder.handle, auth.caller, judged);
+      lease = await engine
+        .resolveForProxy(placeholder.handle, auth.caller, judged)
+        .catch((err: unknown) => {
+          if (refusesConsumer(err)) charge(auth.caller);
+          throw err;
+        });
     } catch (err) {
       if (!(err instanceof VaultError)) throw err;
       refuse(res, { status: statusOf(err), error: err });
@@ -451,23 +500,35 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       if (tunnel !== undefined) res.shouldKeepAlive = false;
       return refuse(res, auth);
     }
+    if (budget.spent(refusalBudgetKey(auth.caller))) return refuse(res, budgetExceeded());
 
     const parsed =
       tunnel === undefined ? parseTarget(req.url ?? "") : tunnelTarget(req.url ?? "", tunnel);
     if (!parsed.ok) {
       return refuse(res, { status: 400, error: VaultError.invalidInput(parsed.message) });
     }
+    const operation = `${req.method ?? "GET"} ${parsed.target.url.origin}`;
     // Lane P's scan reads node's req.headers (never headersDistinct) and skips
     // the fields that never go upstream.
     const scan = findPlaceholder(req.headers, parsed.target.url);
     if (scan.outcome === "multiple") {
       const refusal = VaultError.proxyMultiplePlaceholders(parsed.target.url.origin);
-      return refuse(res, { status: refusal.statusCode, error: refusal });
+      return refuse(
+        res,
+        audited(auth.caller, operation, { status: refusal.statusCode, error: refusal }),
+      );
     }
     if (scan.outcome === "none") {
-      // No placeholder: pass-through — no engine call, no row, the client's own
-      // Accept-Encoding, the SSRF floor still underneath.
-      await exchange(req, res, parsed.target, upstreamRequestHeaders(req.headers), null);
+      // No placeholder: pass-through — no lease, the client's own
+      // Accept-Encoding, the SSRF floor still underneath, its refusal the one row.
+      await exchange(
+        req,
+        res,
+        parsed.target,
+        upstreamRequestHeaders(req.headers),
+        null,
+        (refusal) => audited(auth.caller, operation, refusal),
+      );
       return;
     }
     await broker(req, res, parsed.target, scan.match, auth);
@@ -492,10 +553,11 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   /**
-   * `CONNECT <host>:<port>` (B8): authenticate (Bearer or Basic) → the target →
-   * the CA's hosts → the host's leaf → `200` and the TLS tunnel, whose requests
-   * the ladder serves with the target fixed to the tunnel's origin. Every
-   * refusal precedes the 200, closes the connection and writes no row.
+   * `CONNECT <host>:<port>` (B8): authenticate (Bearer or Basic) → the refusal
+   * budget → the target → the CA's hosts → the host's leaf → `200` and the TLS
+   * tunnel, whose requests the ladder serves with the target fixed to the
+   * tunnel's origin. Every refusal precedes the 200 and closes the connection;
+   * only a refused host writes a row.
    */
   function onConnect(req: IncomingMessage, socket: Socket, head: Buffer): void {
     // The CONNECT socket is detached from the HTTP server: an unhandled reset would end the process.
@@ -513,6 +575,9 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       }
       const auth = authenticate(req, true);
       if ("error" in auth) return refuseConnect(socket, auth);
+      if (budget.spent(refusalBudgetKey(auth.caller))) {
+        return refuseConnect(socket, budgetExceeded());
+      }
       const target = parseConnectTarget(req.url ?? "");
       if (!target.ok) {
         return refuseConnect(socket, {
@@ -522,7 +587,13 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       }
       if (!hostPermitted({ hosts: caHosts }, target.host)) {
         const refusal = VaultError.proxyConnectDenied(target.host, target.port);
-        return refuseConnect(socket, { status: refusal.statusCode, error: refusal });
+        return refuseConnect(
+          socket,
+          audited(auth.caller, `CONNECT ${target.authority}`, {
+            status: refusal.statusCode,
+            error: refusal,
+          }),
+        );
       }
       const context = leaves.contextFor(target.host);
       const tunnel: Tunnel = {

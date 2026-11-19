@@ -144,6 +144,7 @@ describe("injection policy", () => {
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
+      sftp_local_dirs: [],
     });
   });
 
@@ -324,6 +325,57 @@ describe("injection policy", () => {
     expect(loaded.host_allowlist).toEqual(["github.com"]);
     // No rewrite on read: the blob is the twelve-field one until the next set.
     expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
+  it("a policy stored before the field reads an empty list", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const thirteenFields = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["sftp.example.com"],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: true,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(thirteenFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.sftp_local_dirs).toEqual([]);
+    expect(loaded.ssh_agent_socket).toBe(true);
+    expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
+  it("the policy.grant row records the directories as a count", async () => {
+    await engine.setInjectionPolicy("secret://pol", { sftp_local_dirs: ["/srv/out", "/srv/in"] });
+    expect((await engine.getInjectionPolicy("secret://pol")).sftp_local_dirs).toEqual([
+      "/srv/out",
+      "/srv/in",
+    ]);
+    const row = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0];
+    expect(row?.detail?.sftp_local_dir_count).toBe(2);
+    expect(JSON.stringify(row?.detail).includes("/srv/out")).toBe(false);
+    expect(JSON.stringify(row?.detail).includes("/srv/in")).toBe(false);
   });
 
   it("loads an eleven-field blob written before proxy existed as proxy: false — the second post-baseline read default (B2)", async () => {
@@ -711,6 +763,25 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
     expect(refused[0]?.detail?.interpreters).toEqual([]);
     expect(refused[0]?.detail?.exec_wrappers).toEqual(["sudo"]);
   });
+
+  it.each(["sshpass", "scp"])(
+    "refuses the exec wrapper %s without acknowledgement and audits the tier",
+    async (name) => {
+      const err = await expectVaultError(
+        () => engine.setInjectionPolicy("secret://interp", { command_allowlist: [name] }),
+        ErrorCode.INTERPRETER_NOT_ACKNOWLEDGED,
+      );
+      expect(err.message).toContain(`exec wrapper(s): ${name}`);
+      expect((await engine.getInjectionPolicy("secret://interp")).command_allowlist).toEqual([]);
+
+      const refused = engine.queryAudit({
+        eventType: AuditEventType.POLICY_INTERPRETER_REFUSED,
+      });
+      expect(refused).toHaveLength(1);
+      expect(refused[0]?.detail?.interpreters).toEqual([]);
+      expect(refused[0]?.detail?.exec_wrappers).toEqual([name]);
+    },
+  );
 
   it("R6(ii): names both tiers when one write adds an interpreter and a wrapper", async () => {
     const err = await expectVaultError(

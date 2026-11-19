@@ -32,7 +32,12 @@ describe("injectionPolicyInputSchema", () => {
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
+      sftp_local_dirs: [],
     });
+  });
+
+  it("the input schema defaults the field to an empty list", () => {
+    expect(injectionPolicyInputSchema.parse({}).sftp_local_dirs).toEqual([]);
   });
 
   it("ssh_agent_socket defaults to false, round-trips true and refuses a non-boolean (B3)", () => {
@@ -178,6 +183,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
+    sftp_local_dirs: [],
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -218,10 +224,51 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
 
-  it("applies no defaults — an empty object is thirteen misses", () => {
+  it("applies no defaults — an empty object is fourteen misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(13);
+    if (!result.success) expect(result.error.issues).toHaveLength(14);
+  });
+
+  it.each(["/srv/out", "/", "C:\\data", "c:/data/out"])("accepts the local directory %j", (dir) => {
+    expect(injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: [dir] }).success).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    "",
+    "out",
+    "./out",
+    "C:out",
+    "\\\\server\\share",
+    "//server/share",
+    "/\\server/share",
+    "/srv/\u0000x",
+  ])("refuses the local directory %j", (dir) => {
+    expect(injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: [dir] }).success).toBe(
+      false,
+    );
+  });
+
+  it("refuses a local directory longer than 4096 characters", () => {
+    const at4096 = `/${"d".repeat(4095)}`;
+    expect(
+      injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: [at4096] }).success,
+    ).toBe(true);
+    expect(
+      injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: [`${at4096}d`] }).success,
+    ).toBe(false);
+  });
+
+  it("refuses more than 100 local directories", () => {
+    const dirs = Array.from({ length: 101 }, (_, i) => `/srv/out${String(i)}`);
+    expect(
+      injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: dirs.slice(0, 100) }).success,
+    ).toBe(true);
+    expect(injectionPolicySchema.safeParse({ ...complete, sftp_local_dirs: dirs }).success).toBe(
+      false,
+    );
   });
 
   it("shares the field validators with the input schema", () => {
@@ -263,6 +310,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
+    sftp_local_dirs: ["/srv/out"],
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {

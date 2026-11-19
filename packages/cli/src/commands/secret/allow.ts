@@ -32,6 +32,7 @@ export interface AllowOptions {
   proxy?: boolean;
   /** Tri-state: true (--ssh-agent-socket), false (--no-ssh-agent-socket), undefined (keep stored). */
   sshAgentSocket?: boolean;
+  sftpLocalDir?: string[];
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -53,6 +54,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [],
 };
 
 /**
@@ -88,6 +90,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
     strict_tree_exit: options.strictTreeExit ?? base.strict_tree_exit,
     proxy: options.proxy ?? base.proxy,
     ssh_agent_socket: options.sshAgentSocket ?? base.ssh_agent_socket,
+    sftp_local_dirs: options.sftpLocalDir?.length ? options.sftpLocalDir : base.sftp_local_dirs,
   };
 }
 
@@ -107,8 +110,20 @@ function countSetFlags(options: AllowOptions): number {
     (options.strictTreeExit !== undefined ? 1 : 0) +
     (options.proxy !== undefined ? 1 : 0) +
     (options.sshAgentSocket !== undefined ? 1 : 0) +
+    (options.sftpLocalDir?.length ?? 0) +
     (options.clear ? 1 : 0)
   );
+}
+
+function assertSftpLocalDirs(dirs: string[] | undefined): void {
+  for (const dir of dirs ?? []) {
+    if (dir.trim() === "") throw VaultError.invalidInput("--sftp-local-dir: empty path");
+    if (dir.startsWith("-")) {
+      throw VaultError.invalidInput(
+        "--sftp-local-dir: a flag, not a path (give a path that starts with a dash as ./-name)",
+      );
+    }
+  }
 }
 
 /** The merged policy through the input schema; a refusal is `SCHEMA_VALIDATION_ERROR`. */
@@ -224,6 +239,12 @@ export function registerSecretAllowCommand(secret: Command): void {
     )
     .option("--no-ssh-agent-socket", "Remove a stored ssh-agent-socket opt-in")
     .option(
+      "--sftp-local-dir <dir>",
+      "Absolute local directory an sftp transfer may read from or write to (repeatable)",
+      collect,
+      [],
+    )
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -234,6 +255,7 @@ export function registerSecretAllowCommand(secret: Command): void {
     .action(async (handle: string, options: AllowOptions, cmd: Command) => {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        assertSftpLocalDirs(options.sftpLocalDir);
         const rest = restModeOf(cmd);
         if (rest) {
           await runRestMode(rest, async (client) => {

@@ -139,6 +139,7 @@ const STATUS_CASES = [
   [ErrorCode.IMAP_OPERATION_FAILED, 502],
   [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
   [ErrorCode.SFTP_OPERATION_FAILED, 502],
+  [ErrorCode.LOCAL_PATH_NOT_ALLOWED, 403],
   [ErrorCode.DOCKER_OPERATION_FAILED, 502],
   // Agent governance (v1.4)
   [ErrorCode.AGENT_NOT_FOUND, 404],
@@ -932,6 +933,14 @@ describe("factory methods", () => {
       expect(err.details).toEqual({ reason });
     },
   );
+
+  it("localPathNotAllowed() maps to 403 with one fixed message that names no path", () => {
+    const err = VaultError.localPathNotAllowed();
+    expect(err.code).toBe(ErrorCode.LOCAL_PATH_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe("sftp local path is not inside a directory the secret's policy lists");
+    expect(err.details).toBeUndefined();
+  });
 
   it("invalidUnlockKey() maps to 401 like invalidPassword() and carries no detail", () => {
     const err = VaultError.invalidUnlockKey();

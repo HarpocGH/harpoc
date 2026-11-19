@@ -1,9 +1,10 @@
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import type { Server as TcpServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
@@ -162,7 +163,7 @@ const SFTP = resolveExecutable("sftp", controlledPathDirs());
 
 interface IsolationCell {
   context: "git" | "ssh" | "sftp";
-  action: (port: number, dir: string) => UseSecretAction;
+  action: (port: number, dir: string, localDir: string) => UseSecretAction;
   /** The `error` both halves carry: the result's for git and ssh, the refusal's for sftp. */
   error: string | undefined;
   /** The line the client prints when its own connect is refused; null where nothing surfaces it. */
@@ -197,14 +198,14 @@ const CELLS: IsolationCell[] = [
   },
   {
     context: "sftp",
-    action: (port, dir) => ({
+    action: (port, _dir, localDir) => ({
       type: "sftp",
       host: "127.0.0.1",
       port,
       user: "deploy",
       operation: "download",
       remote_path: "/srv/report.txt",
-      local_path: join(dir, "report.txt"),
+      local_path: join(localDir, "report.txt"),
       timeout_ms: 20_000,
     }),
     error: ErrorCode.SSH_CONNECT_FAILED,
@@ -219,8 +220,10 @@ describe.skipIf(!posixWithIsolation)(
     let port: number;
     let connections = 0;
     let available = false;
+    let localDir: string;
 
     beforeAll(async () => {
+      localDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-netiso-sftp-")));
       let probeError: unknown;
       try {
         await requireNetworkIsolation("/bin/true", []);
@@ -252,6 +255,7 @@ describe.skipIf(!posixWithIsolation)(
     afterAll(async () => {
       if (listener !== undefined)
         await new Promise<void>((resolve) => listener.close(() => resolve()));
+      rmSync(localDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
 
     beforeEach(() => {
@@ -279,6 +283,7 @@ describe.skipIf(!posixWithIsolation)(
         command_allowlist: [GIT as string, SSH as string, SFTP as string],
         host_allowlist: ["127.0.0.1"],
         network_isolation: networkIsolation,
+        sftp_local_dirs: [localDir],
       });
       await vault.engine.setConnectionConfig(created.handle, {
         ssh: { known_hosts: ["127.0.0.1 ssh-ed25519 AAAA"] },
@@ -311,7 +316,7 @@ describe.skipIf(!posixWithIsolation)(
           return ctx.skip("isolation unavailable, or git / ssh / sftp unresolvable");
         const { vault, handle, keyLine } = await clientVault(false);
         try {
-          const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir));
+          const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir, localDir));
           expect(connections).toBeGreaterThan(0);
           expect(outcome.error).toBe(cell.error);
           expectAbsent(outcome.stderr, keyLine);
@@ -334,7 +339,7 @@ describe.skipIf(!posixWithIsolation)(
           return ctx.skip("isolation unavailable, or git / ssh / sftp unresolvable");
         const { vault, handle, keyLine } = await clientVault(true);
         try {
-          const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir));
+          const outcome = await attempt(vault, handle, cell.action(port, vault.tmpDir, localDir));
           expect(connections).toBe(0);
           expect(outcome.error).toBe(cell.error);
           expectAbsent(outcome.stderr, keyLine);

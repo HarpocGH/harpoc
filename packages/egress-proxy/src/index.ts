@@ -1,6 +1,7 @@
 // Proxy
 export { createEgressProxy } from "./proxy.js";
 export type { EgressProxy, EgressProxyOptions, ProxyEngine } from "./proxy.js";
+export { RefusalBudget } from "./refusal-budget.js";
 
 // CONNECT mode (B8)
 export { DEFAULT_LEAF_CACHE_SIZE, DEFAULT_LEAF_TTL_MS, createLeafCache } from "./ca.js";

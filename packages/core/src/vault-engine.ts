@@ -77,6 +77,7 @@ import {
   LOCKOUT_DURATIONS_MS,
   LOCKOUT_MAX_ATTEMPTS,
   matchesSecretNameScope,
+  MAX_PROXY_REFUSAL_OPERATION_CHARS,
   MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
   mcpServerConfigSchema,
@@ -1907,7 +1908,9 @@ export class VaultEngine {
 
           let execution: SftpExecution;
           try {
-            execution = await s.sftpExecutor(action, value, policy, config);
+            execution = await s.sftpExecutor(action, value, policy, config, {
+              vaultFiles: [this.options.dbPath, this.options.sessionPath],
+            });
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
@@ -2748,9 +2751,9 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all thirteen fields, so a miss (other
-   * than the post-baseline `strict_tree_exit`, `proxy` and `ssh_agent_socket`,
-   * defaulted below) or an extra key is corruption.
+   * (R2/C43): the writer always emits all fourteen fields, so a miss (other
+   * than the post-baseline `strict_tree_exit`, `proxy`, `ssh_agent_socket` and
+   * `sftp_local_dirs`, defaulted below) or an extra key is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -2769,6 +2772,7 @@ export class VaultEngine {
         strict_tree_exit: false,
         proxy: false,
         ssh_agent_socket: false,
+        sftp_local_dirs: [],
       };
     }
     const bytes = decrypt(
@@ -2784,12 +2788,13 @@ export class VaultEngine {
     } catch {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
     }
-    // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06): blobs
-    // written by the prepared v1.5.0 tree carry the baseline ten, blobs written
-    // before the egress proxy eleven, blobs written before the agent socket
-    // twelve, so these three fields — and only these — default on read; no
+    // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06; S1,
+    // 2026-11-18): blobs written by the prepared v1.5.0 tree carry the baseline
+    // ten, blobs written before the egress proxy eleven, blobs written before
+    // the agent socket twelve, blobs written before the sftp local directories
+    // thirteen, so these four fields — and only these — default on read; no
     // rewrite (policy writes are POLICY_GRANT events). The writer writes all
-    // thirteen; any other miss stays corruption (R2/C43).
+    // fourteen; any other miss stays corruption (R2/C43).
     if (
       typeof raw === "object" &&
       raw !== null &&
@@ -2815,6 +2820,14 @@ export class VaultEngine {
       !Object.hasOwn(raw, "ssh_agent_socket")
     ) {
       (raw as Record<string, unknown>)["ssh_agent_socket"] = false;
+    }
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "sftp_local_dirs")
+    ) {
+      (raw as Record<string, unknown>)["sftp_local_dirs"] = [];
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -2947,6 +2960,7 @@ export class VaultEngine {
           strict_tree_exit: input.strict_tree_exit,
           proxy: input.proxy,
           ssh_agent_socket: input.ssh_agent_socket,
+          sftp_local_dir_count: input.sftp_local_dirs.length,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -4815,6 +4829,26 @@ export class VaultEngine {
         operation,
         error: ErrorCode.ACCESS_DENIED,
         reason,
+        ...callerInterfaceDetail(caller),
+      },
+      success: false,
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  /**
+   * The `access.denied` row a refusal of the egress proxy leaves. A sealed
+   * engine throws `VAULT_LOCKED` from here instead.
+   */
+  auditProxyRefusal(caller: CallerContext | undefined, operation: string, code: ErrorCode): void {
+    const s = this.assertUnlocked();
+    s.auditLogger.log({
+      eventType: AuditEventType.ACCESS_DENIED,
+      ...callerColumns(caller),
+      detail: {
+        operation: operation.slice(0, MAX_PROXY_REFUSAL_OPERATION_CHARS),
+        error: code,
+        reason: "proxy",
         ...callerInterfaceDetail(caller),
       },
       success: false,

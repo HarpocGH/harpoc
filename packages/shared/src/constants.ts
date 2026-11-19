@@ -88,6 +88,9 @@ export const RATE_LIMIT_PER_SECRET = 60; // per minute
 export const RATE_LIMIT_AUTH_ATTEMPTS = 10;
 export const RATE_LIMIT_AUTH_WINDOW_MS = 5 * 60 * 1_000; // 5 minutes
 export const RATE_LIMIT_USE_SECRET = 120; // per minute
+export const RATE_LIMIT_PROXY_REFUSALS = 60; // per window
+export const RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS = 60_000; // 1 minute
+export const MAX_PROXY_REFUSAL_OPERATION_CHARS = 300;
 
 // -- Lockout -----------------------------------------------------------------
 

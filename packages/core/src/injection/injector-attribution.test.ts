@@ -47,6 +47,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
+  sftp_local_dirs: [],
 };
 
 function captureLogger(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {

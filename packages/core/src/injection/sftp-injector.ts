@@ -2,6 +2,7 @@ import type { ConnectionConfig, InjectionPolicy, SftpAction, SftpResult } from "
 import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
+import { resolveSftpLocalPath } from "./local-path.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { spawnCaptured } from "./spawn-captured.js";
@@ -99,6 +100,9 @@ export function buildSftpAuditDetails(
   };
 }
 
+/** sftp's line buffer (`char cmd[2048]`, read with `fgets`): a longer line is cut in two. */
+const MAX_BATCH_COMMAND_BYTES = 2047;
+
 /**
  * Write the single scripted sftp command to a 0600 batch file in a 0700 temp
  * directory (design §6.4) — sftp's own argv carries no path at all beyond the
@@ -132,8 +136,9 @@ function hasBatchControlCharacters(value: string): boolean {
  * ordinary `-r` option by the time sftp's own flag parser sees it, regardless
  * of the quotes wrapped around it here. Refused, in order:
  *  - a leading `-` — would parse as an sftp option (`-r`/`-a`/`-P`/...)
- *    instead of a path (reachable from either the `remote_path` or
- *    `local_path` slot, on either side of `getopt`'s argument permutation);
+ *    instead of a path (reachable from the `remote_path` slot, on either
+ *    side of `getopt`'s argument permutation; the `local_path` slot holds the
+ *    resolved absolute path);
  *  - a trailing `\` — immediately before the closing `"` it escapes that
  *    quote inside the double-quoted token, merging this token with whatever
  *    follows and silently retargeting the transfer;
@@ -177,14 +182,18 @@ function requireLocalPath(action: SftpAction): string {
   return action.local_path;
 }
 
-/** The single scripted sftp command for the action's operation (design §6.4). */
-function buildBatchCommand(action: SftpAction): string {
+/**
+ * The single scripted sftp command for the action's operation (design §6.4);
+ * an upload or download names `resolvedLocal`, the path `resolveSftpLocalPath`
+ * judged, never the caller's spelling.
+ */
+function buildBatchCommand(action: SftpAction, resolvedLocal: string | null): string {
   const remote = quotePath(action.remote_path);
   switch (action.operation) {
     case "upload":
-      return `put ${quotePath(requireLocalPath(action))} ${remote}\n`;
+      return `put ${quotePath(resolvedLocal)} ${remote}\n`;
     case "download":
-      return `get ${remote} ${quotePath(requireLocalPath(action))}\n`;
+      return `get ${remote} ${quotePath(resolvedLocal)}\n`;
     case "list":
       return `ls -l ${remote}\n`;
   }
@@ -255,6 +264,7 @@ export async function executeSftpAction(
   secretValue: Uint8Array,
   policy: InjectionPolicy,
   config: ConnectionConfig | undefined,
+  options?: { vaultFiles?: readonly string[] },
 ): Promise<SftpExecution> {
   // Defense in depth beside the schema's first-character anchor (mirrors the
   // SSH context): host and user reach argv, so a leading dash must never
@@ -285,9 +295,22 @@ export async function executeSftpAction(
   const sftpPath = resolveAndMatchCommand("sftp", policy.command_allowlist, controlledPathDirs());
   assertNativeWin32SshClient(sftpPath);
 
+  const resolvedLocal =
+    action.operation === "upload" || action.operation === "download"
+      ? await resolveSftpLocalPath({
+          localPath: requireLocalPath(action),
+          operation: action.operation,
+          allowedDirs: policy.sftp_local_dirs,
+          vaultFiles: options?.vaultFiles ?? [],
+        })
+      : null;
+
   // The scripted command is built (and its paths validated) before any
   // temp resource is created, so a refused path never leaves a file behind.
-  const batchCommand = buildBatchCommand(action);
+  const batchCommand = buildBatchCommand(action, resolvedLocal);
+  if (Buffer.byteLength(batchCommand) > MAX_BATCH_COMMAND_BYTES) {
+    throw VaultError.invalidInput("sftp paths are too long for one batch command");
+  }
 
   const keyPem = Buffer.from(secretValue).toString("utf8");
   const timeoutMs = action.timeout_ms ?? DEFAULT_SSH_TIMEOUT_MS;
