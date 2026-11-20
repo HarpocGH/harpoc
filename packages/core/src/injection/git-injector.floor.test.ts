@@ -591,17 +591,55 @@ describe.skipIf(GIT === null)(
       ["behind a directory that does not exist yet", "absent/../clone"],
       ["behind two levels that do not exist yet", "absent/deeper/../../clone"],
       ["as the last step, behind a directory that does not exist yet", "absent/clone/.."],
-      ["behind a file", "file/../clone"],
     ])("a clone whose destination holds a `..` %s is refused", async (_label, rest) => {
-      writeFileSync(join(root, "file"), "");
       await expectProtected({
         type: "git",
         operation: "clone",
         repository: HTTPS_REPOSITORY,
         working_directory: `${root}/${rest}`,
       });
-      expect(readdirSync(root).sort()).toEqual(["file", "vault"]);
+      expect(readdirSync(root)).toEqual(["vault"]);
     });
+
+    // Not on win32, which collapses the `..` by text, and not on darwin: Linux's kernel and
+    // its realpath (glibc's and musl's) both answer ENOTDIR for a `..` behind a file, so the
+    // `..` stands behind the last step that resolves. Darwin's realpath takes the `..` off the
+    // file's name: there the spelling names the file's directory, and that directory is judged
+    // and handed to git (local-path.spelled-directory.test.ts scripts it on every platform).
+    it.skipIf(WIN32 || process.platform === "darwin")(
+      "a clone whose destination holds a `..` behind a file is refused",
+      async () => {
+        writeFileSync(join(root, "file"), "");
+        await expectProtected({
+          type: "git",
+          operation: "clone",
+          repository: HTTPS_REPOSITORY,
+          working_directory: `${root}/file/../clone`,
+        });
+        expect(readdirSync(root).sort()).toEqual(["file", "vault"]);
+      },
+    );
+
+    // A symbolic link needs a privilege on win32. Whatever a system's realpath makes of a `..`
+    // behind a file, a link that leads nowhere behind it is not handed to git.
+    it.skipIf(WIN32)(
+      "a clone whose destination is a link into the vault's directory that leads nowhere, spelled behind a file and `..`, is refused, nothing written",
+      async () => {
+        const agent = join(root, "agent");
+        mkdirSync(agent);
+        writeFileSync(join(agent, "file"), "");
+        symlinkSync(join(vaultDir, "new"), join(agent, "link"), "dir");
+        await expectProtected({
+          type: "git",
+          operation: "clone",
+          repository: HTTPS_REPOSITORY,
+          args: ["--bare"],
+          working_directory: `${agent}/file/../link`,
+        });
+        expect(readdirSync(vaultDir)).toEqual(["tree"]);
+        expect(readdirSync(agent).sort()).toEqual(["file", "link"]);
+      },
+    );
 
     it.each([
       ["as it is", "vault-beside/clone"],

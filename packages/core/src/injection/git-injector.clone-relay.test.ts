@@ -313,6 +313,23 @@ describeGit("Git clone through the relay — today's clone semantics on real git
     },
   );
 
+  // A symbolic link needs a privilege on win32. Darwin's realpath takes a `..` off the name of
+  // a file where Linux answers ENOTDIR: on either, the link behind it is not handed to git.
+  it.skipIf(process.platform === "win32")(
+    "a --bare clone whose destination is a link that leads nowhere, spelled behind a file and `..`, is refused, and nothing is made at the link's target",
+    async () => {
+      mkdirSync(join(out, "elsewhere"));
+      writeFileSync(join(out, "file"), "");
+      symlinkSync(join(out, "elsewhere", "planted"), join(out, "link"), "dir");
+      await expectVaultError(
+        () => clone("repo.git", { args: ["--bare"], working_directory: `${out}/file/../link` }),
+        ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      );
+      expect(readdirSync(join(out, "elsewhere"))).toEqual([]);
+      expect(readdirSync(out).sort()).toEqual(["elsewhere", "file", "link"]);
+    },
+  );
+
   // A symbolic link needs a privilege on win32. Off win32 the system refuses to read a
   // spelling at its length limit, 1024 bytes on macOS and 4096 on Linux, the link included.
   it.skipIf(process.platform === "win32").each([1024, 4096])(

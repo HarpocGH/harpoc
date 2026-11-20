@@ -227,22 +227,9 @@ function saysNotThere(err: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
-/**
- * A directory that may not exist yet, resolved as the system resolves the
- * absolute spelling it is handed: links followed, every `..` up to the nearest
- * step that resolves climbing from where the path really is, the steps behind
- * that one joined on. A step is climbed past only where the system says it is
- * not there. Null where the spelling names no one directory: no step resolves;
- * a step fails to resolve for another reason — it exists all the same, a link
- * that leads nowhere, through which git writes a bare clone, or the system
- * refuses to read it, as it refuses a spelling at its length limit, link and
- * all —; or a `..` stands among the steps behind, with no directory to climb
- * from.
- */
-export async function resolveSpelledDirectory(
-  path: string,
-  fs: Pick<FileSystem, "realpath" | "lstat"> = { realpath, lstat },
-): Promise<string | null> {
+type SpelledFileSystem = Pick<FileSystem, "realpath" | "lstat">;
+
+async function resolveSpelledOnce(path: string, fs: SpelledFileSystem): Promise<string | null> {
   const { root } = parse(path);
   if (root === "") return null;
   const steps = path
@@ -266,6 +253,30 @@ export async function resolveSpelledDirectory(
     }
   }
   return null;
+}
+
+/**
+ * A directory that may not exist yet, resolved as the system resolves the
+ * absolute spelling it is handed: links followed, every `..` up to the nearest
+ * step that resolves climbing from where the path really is, the steps behind
+ * that one joined on. A step is climbed past only where the system says it is
+ * not there. Null where the spelling names no one directory: no step resolves;
+ * a step fails to resolve for another reason — it exists all the same, a link
+ * that leads nowhere, through which git writes a bare clone, or the system
+ * refuses to read it, as it refuses a spelling at its length limit, link and
+ * all —; or a `..` stands among the steps behind, with no directory to climb
+ * from. The answer is resolved once more and must be itself: a system's
+ * `realpath` and its kernel can read a spelling differently — Darwin's takes a
+ * `..` off the name of a file, for which its kernel answers that it is no
+ * directory — and the path handed on is the one that both read as it stands.
+ */
+export async function resolveSpelledDirectory(
+  path: string,
+  fs: SpelledFileSystem = { realpath, lstat },
+): Promise<string | null> {
+  const resolved = await resolveSpelledOnce(path, fs);
+  if (resolved === null) return null;
+  return (await resolveSpelledOnce(resolved, fs)) === resolved ? resolved : null;
 }
 
 /** Each path through `nearestResolvedPath` past missing steps; null where one cannot be read. */
