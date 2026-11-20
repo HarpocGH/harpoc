@@ -69,7 +69,7 @@ afterEach(async () => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-async function sftpSecret(sftpLocalDirs: string[]): Promise<string> {
+async function sftpSecret(localDirs: string[]): Promise<string> {
   await engine.createSecret({
     name: "deploy-key",
     type: "api_key",
@@ -79,7 +79,7 @@ async function sftpSecret(sftpLocalDirs: string[]): Promise<string> {
   await engine.setInjectionPolicy(handle, {
     host_allowlist: [HOST],
     command_allowlist: [sftpPath],
-    sftp_local_dirs: sftpLocalDirs,
+    local_dirs: localDirs,
   });
   await engine.setConnectionConfig(handle, {
     ssh: { known_hosts: [`${HOST} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA`] },

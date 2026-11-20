@@ -207,7 +207,7 @@ const STORED_POLICY = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
-  sftp_local_dirs: [],
+  local_dirs: [],
 };
 const MCP_CONFIG = { server_name: "srv", transport: "http", url: "https://mcp.example.com/mcp" };
 /** The config `--name srv --transport http --url …` parses to: the schema adds the default revision. */
@@ -1289,11 +1289,7 @@ describe("secret allow under --url: each of the 15 flag groups alone is a set (T
     { flag: "--strict-tree-exit", args: ["--strict-tree-exit"], set: { strict_tree_exit: true } },
     { flag: "--proxy", args: ["--proxy"], set: { proxy: true } },
     { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
-    {
-      flag: "--sftp-local-dir",
-      args: ["--sftp-local-dir", "/srv/out"],
-      set: { sftp_local_dirs: ["/srv/out"] },
-    },
+    { flag: "--local-dir", args: ["--local-dir", "/srv/out"], set: { local_dirs: ["/srv/out"] } },
     { flag: "--clear", args: ["--clear"], set: {} },
   ])("$flag alone is a set, not a show", async ({ args, set }) => {
     await run([...rest, "secret", "allow", "secret://k", ...args]);
@@ -1570,6 +1566,16 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
     { args: ["init"], message: "init has no REST mode; run it on the vault host", json: false },
     { args: ["unlock"], message: "unlock has no REST mode; run it on the vault host", json: false },
     {
+      args: ["backup", "copy.db"],
+      message: "backup has no REST mode; run it on the vault host",
+      json: false,
+    },
+    {
+      args: ["backup", "copy.db", "--json"],
+      message: "backup has no REST mode; run it on the vault host",
+      json: true,
+    },
+    {
       args: ["server", "start", "--rest"],
       message: "server start has no REST mode; run it on the vault host",
       json: false,
@@ -1803,6 +1809,7 @@ describe("the REST mode's place in the command tree", () => {
   const UNSUPPORTED = [
     "audit anchor",
     "auth token",
+    "backup",
     "cert issue",
     "init",
     "oauth connect",

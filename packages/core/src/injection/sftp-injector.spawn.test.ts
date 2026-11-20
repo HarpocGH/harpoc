@@ -91,7 +91,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
-    sftp_local_dirs: [],
+    local_dirs: [],
     ...overrides,
   };
 }
@@ -136,6 +136,12 @@ const DOWNLOAD_ACTION: SftpAction = {
 const ACTION = { upload: UPLOAD_ACTION, download: DOWNLOAD_ACTION } as const;
 
 const TOO_LONG = "sftp paths are too long for one batch command";
+const NO_BACKSLASH = "sftp remote path must not contain a backslash";
+const TRAILING_BACKSLASH = "sftp path must not end with '\\' (would merge with the closing quote)";
+
+const TRANSFERS = ["upload", "download"] as const;
+const BACKSLASH_REMOTES = ["dir\\file", "a\\\\b"] as const;
+const GLOB_REMOTES = ["/srv/report*.pdf", "/srv/report?.pdf", "/srv/report[1].pdf"] as const;
 
 let localDir: string;
 let listedDir: string;
@@ -412,7 +418,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       await executeSftpAction(
         { ...UPLOAD_ACTION, local_path: listedFile },
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        allowedPolicy({ local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
@@ -430,7 +436,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       await executeSftpAction(
         { ...UPLOAD_ACTION, local_path: `${listedDir}${sep}sub${sep}..${sep}report.pdf` },
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        allowedPolicy({ local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
@@ -448,7 +454,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       await executeSftpAction(
         { ...DOWNLOAD_ACTION, local_path: listedFile },
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        allowedPolicy({ local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
@@ -484,7 +490,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       await executeSftpAction(
         LIST_ACTION,
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy({ sftp_local_dirs: [] }),
+        allowedPolicy({ local_dirs: [] }),
         SFTP_CONFIG,
       );
 
@@ -533,7 +539,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
         executeSftpAction(
           { ...DOWNLOAD_ACTION, remote_path: "-r", local_path: listedFile },
           new Uint8Array(Buffer.from(makeKeyPem())),
-          allowedPolicy({ sftp_local_dirs: [listedDir] }),
+          allowedPolicy({ local_dirs: [listedDir] }),
           SFTP_CONFIG,
         ),
       ).rejects.toMatchObject({ code: ErrorCode.INVALID_INPUT });
@@ -588,7 +594,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
     });
   });
 
-  describe("the local path is judged against sftp_local_dirs", () => {
+  describe("the local path is judged against local_dirs", () => {
     it.each(["upload", "download"] as const)(
       "%s: refuses a local_path outside the listed directories, nothing spawned",
       async (operation) => {
@@ -597,7 +603,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
             executeSftpAction(
               { ...ACTION[operation], local_path: outsideFile },
               new Uint8Array(Buffer.from(makeKeyPem())),
-              allowedPolicy({ sftp_local_dirs: [listedDir] }),
+              allowedPolicy({ local_dirs: [listedDir] }),
               SFTP_CONFIG,
             ),
           ErrorCode.LOCAL_PATH_NOT_ALLOWED,
@@ -612,7 +618,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
           executeSftpAction(
             { ...UPLOAD_ACTION, host: "other.example.com", local_path: outsideFile },
             new Uint8Array(Buffer.from(makeKeyPem())),
-            allowedPolicy({ sftp_local_dirs: [listedDir] }),
+            allowedPolicy({ local_dirs: [listedDir] }),
             SFTP_CONFIG,
           ),
         ErrorCode.HOST_NOT_ALLOWED,
@@ -629,7 +635,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
           executeSftpAction(
             action,
             new Uint8Array(Buffer.from(makeKeyPem())),
-            allowedPolicy({ sftp_local_dirs: [listedDir] }),
+            allowedPolicy({ local_dirs: [listedDir] }),
             SFTP_CONFIG,
           ),
         ErrorCode.INVALID_INPUT,
@@ -661,7 +667,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       await executeSftpAction(
         actionOn("download", remote),
         new Uint8Array(Buffer.from(makeKeyPem())),
-        allowedPolicy({ sftp_local_dirs: [listedDir] }),
+        allowedPolicy({ local_dirs: [listedDir] }),
         SFTP_CONFIG,
       );
 
@@ -678,6 +684,73 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
 
       await expectTooLong(actionOn("download", remote));
     });
+  });
+
+  describe("a backslash or a glob character in the remote path", () => {
+    async function refusedMessage(action: SftpAction): Promise<string> {
+      vi.mocked(mkdtempSync).mockClear();
+      const err = await expectVaultError(
+        () =>
+          executeSftpAction(
+            action,
+            new Uint8Array(Buffer.from(makeKeyPem())),
+            allowedPolicy({ local_dirs: [listedDir] }),
+            SFTP_CONFIG,
+          ),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(mkdtempSync).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+      return err.message;
+    }
+
+    async function batchContent(action: SftpAction): Promise<string> {
+      let content = "";
+      spawnMock.mockImplementation((_cmd, args) => {
+        content = readFileSync(args[args.indexOf("-b") + 1] as string, "utf8");
+        return Promise.resolve(OK_RESULT);
+      });
+      await executeSftpAction(
+        action,
+        new Uint8Array(Buffer.from(makeKeyPem())),
+        allowedPolicy({ local_dirs: [listedDir] }),
+        SFTP_CONFIG,
+      );
+      expect(spawnMock).toHaveBeenCalledOnce();
+      return content;
+    }
+
+    it.each(
+      TRANSFERS.flatMap((operation) => BACKSLASH_REMOTES.map((r) => [operation, r] as const)),
+    )(
+      "upload and download refuse a backslash in the remote path, before any temporary file: %s %s",
+      async (operation, remote) => {
+        expect(await refusedMessage(actionOn(operation, remote))).toBe(NO_BACKSLASH);
+      },
+    );
+
+    it.each(["upload", "download", "list"] as const)(
+      "a trailing backslash keeps its own message: %s",
+      async (operation) => {
+        expect(await refusedMessage(actionOn(operation, "/srv/reports\\"))).toBe(
+          TRAILING_BACKSLASH,
+        );
+      },
+    );
+
+    it.each(["logs/*.txt", "a\\*"])(
+      "list accepts a backslash and a pattern: %s reaches the batch file as sent",
+      async (remote) => {
+        expect(await batchContent(actionOn("list", remote))).toBe(batchLine("list", remote));
+      },
+    );
+
+    it.each(TRANSFERS.flatMap((operation) => GLOB_REMOTES.map((r) => [operation, r] as const)))(
+      "upload and download accept *, ? and [ in the remote path: %s %s",
+      async (operation, remote) => {
+        expect(await batchContent(actionOn(operation, remote))).toBe(batchLine(operation, remote));
+      },
+    );
   });
 
   it("reports sanitized when the spawn seam's redaction changed the captured output", async () => {

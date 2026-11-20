@@ -127,7 +127,7 @@ export class RestClient implements VaultClient {
         strict_tree_exit: policy.strict_tree_exit,
         proxy: policy.proxy,
         ssh_agent_socket: policy.ssh_agent_socket,
-        sftp_local_dirs: policy.sftp_local_dirs,
+        local_dirs: policy.local_dirs,
         acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );

@@ -76,6 +76,10 @@ describe("the systemd unit (deployment model B)", () => {
       "harpoc-unlock",
       "--runtime-dir",
       "/run/harpoc",
+      "--backup-dir",
+      "/var/lib/harpoc/backups",
+      "--backup-interval",
+      "1440",
     ]);
     expect(values(text, "WantedBy")).toEqual(["multi-user.target"]);
   });
@@ -95,6 +99,7 @@ describe("the systemd unit (deployment model B)", () => {
     expect(keys.filter((k) => k.startsWith("RuntimeDirectory"))).toEqual([]);
     expect(keys).not.toContain("MemoryDenyWriteExecute");
     expect(keys).not.toContain("DynamicUser");
+    expect(values(unitText(), "StateDirectory")).toEqual(["harpoc harpoc/backups"]);
     expect(values(unitText(), "StateDirectoryMode")).toEqual(["0700"]);
   });
 

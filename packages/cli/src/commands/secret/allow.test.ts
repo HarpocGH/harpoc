@@ -48,7 +48,7 @@ const STORED_POLICY: InjectionPolicy = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
-  sftp_local_dirs: [],
+  local_dirs: [],
 };
 
 const current: InjectionPolicy = {
@@ -65,7 +65,7 @@ const current: InjectionPolicy = {
   strict_tree_exit: false,
   proxy: false,
   ssh_agent_socket: false,
-  sftp_local_dirs: [],
+  local_dirs: [],
 };
 
 describe("mergePolicy", () => {
@@ -150,7 +150,7 @@ describe("mergePolicy", () => {
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
-      sftp_local_dirs: [],
+      local_dirs: [],
     });
   });
 
@@ -663,20 +663,20 @@ describe("secret allow command — host and env allowlist flags (I25)", () => {
   });
 });
 
-describe("secret allow command — sftp local directories (S1)", () => {
+describe("secret allow command — local directories (S1)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEngine.getInjectionPolicy.mockResolvedValue({
       ...STORED_POLICY,
-      sftp_local_dirs: ["/srv/old"],
+      local_dirs: ["/srv/old"],
     });
   });
 
-  it("repeated --sftp-local-dir replaces sftp_local_dirs in the engine call, nothing else changed", async () => {
-    await run(["secret://k", "--sftp-local-dir", "/srv/out", "--sftp-local-dir", "C:\\data"]);
+  it("repeated --local-dir replaces local_dirs in the engine call, nothing else changed", async () => {
+    await run(["secret://k", "--local-dir", "/srv/out", "--local-dir", "C:\\data"]);
     expect(mockEngine.setInjectionPolicy).toHaveBeenCalledWith(
       "secret://k",
-      { ...STORED_POLICY, sftp_local_dirs: ["/srv/out", "C:\\data"] },
+      { ...STORED_POLICY, local_dirs: ["/srv/out", "C:\\data"] },
       { acknowledge_interpreters: false },
       undefined,
     );
@@ -684,27 +684,33 @@ describe("secret allow command — sftp local directories (S1)", () => {
 
   it("--clear resets it", () => {
     expect(
-      mergePolicy({ ...STORED_POLICY, sftp_local_dirs: ["/srv/old"] }, { clear: true })
-        .sftp_local_dirs,
+      mergePolicy({ ...STORED_POLICY, local_dirs: ["/srv/old"] }, { clear: true }).local_dirs,
     ).toEqual([]);
     expect(
       mergePolicy(
-        { ...STORED_POLICY, sftp_local_dirs: ["/srv/old"] },
-        { clear: true, sftpLocalDir: ["/srv/out"] },
-      ).sftp_local_dirs,
+        { ...STORED_POLICY, local_dirs: ["/srv/old"] },
+        { clear: true, localDir: ["/srv/out"] },
+      ).local_dirs,
     ).toEqual(["/srv/out"]);
   });
 
   it.each([
-    ["", "Error: [INVALID_INPUT] --sftp-local-dir: empty path"],
-    [
-      "-x",
-      "Error: [INVALID_INPUT] --sftp-local-dir: a flag, not a path (give a path that starts with a dash as ./-name)",
-    ],
+    ["", "Error: [INVALID_INPUT] --local-dir: empty path"],
+    ["-x", "Error: [INVALID_INPUT] --local-dir: a flag, not a path"],
   ])("refuses the value %j before the vault is opened", async (value, line) => {
-    await expect(run(["secret://k", "--sftp-local-dir", value])).rejects.toThrow("process.exit");
+    await expect(run(["secret://k", "--local-dir", value])).rejects.toThrow("process.exit");
     expect(spies.errorSpy.mock.calls).toEqual([[line]]);
     expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
+  it("--sftp-local-dir is an unknown option", async () => {
+    await expect(run(["secret://k", "--sftp-local-dir", "/srv/out"])).rejects.toMatchObject({
+      code: "commander.unknownOption",
+      exitCode: 1,
+      message: "error: unknown option '--sftp-local-dir'",
+    });
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
   });
@@ -753,11 +759,7 @@ describe("secret allow command — each of the 15 flag groups alone is a set (T5
     { flag: "--strict-tree-exit", args: ["--strict-tree-exit"], set: { strict_tree_exit: true } },
     { flag: "--proxy", args: ["--proxy"], set: { proxy: true } },
     { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
-    {
-      flag: "--sftp-local-dir",
-      args: ["--sftp-local-dir", "/srv/out"],
-      set: { sftp_local_dirs: ["/srv/out"] },
-    },
+    { flag: "--local-dir", args: ["--local-dir", "/srv/out"], set: { local_dirs: ["/srv/out"] } },
     { flag: "--clear", args: ["--clear"], set: { command_allowlist: [] } },
   ])("$flag alone is a set, not a show", async ({ args, set }) => {
     await run(["secret://k", ...args]);

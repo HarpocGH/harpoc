@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,11 +36,13 @@ const DOCKER = resolveExecutable("docker", controlledPathDirs());
 const REASON = "test: no job wrapper on this host";
 
 let tempDir: string;
+let cloneDir: string;
 let engine: VaultEngine;
 
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-ste-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
+  cloneDir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-ste-clone-")));
   engine = new VaultEngine({
     dbPath: join(tempDir, "test.vault.db"),
     sessionPath: join(tempDir, "session.json"),
@@ -53,6 +55,7 @@ afterEach(async () => {
   forceJobWrapperUnavailableForTests(null);
   await engine.destroy();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  rmSync(cloneDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 type Policy = Parameters<VaultEngine["setInjectionPolicy"]>[1];
@@ -122,7 +125,7 @@ describe.skipIf(process.platform !== "win32")(
         type: "git",
         operation: "clone",
         repository: "https://127.0.0.1:1/harpoc/u3.git",
-        working_directory: join(tempDir, "clone"),
+        working_directory: join(cloneDir, "clone"),
       });
       expect(detail).toMatchObject({
         context: "git",

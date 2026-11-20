@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Option } from "commander";
 import type { Command } from "commander";
 import {
@@ -14,7 +14,17 @@ import type { ServerStopTrigger, ServerTransport } from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine, unlockEngineWithKey } from "../utils/vault-loader.js";
 import { handleError } from "../utils/output.js";
 import { parseIntOption } from "../utils/options.js";
-import { DEFAULT_PROXY_PORT, MAX_PORT, MIN_PORT } from "../utils/option-bounds.js";
+import {
+  DEFAULT_BACKUP_INTERVAL_MINUTES,
+  DEFAULT_BACKUP_KEEP,
+  DEFAULT_PROXY_PORT,
+  MAX_BACKUP_INTERVAL_MINUTES,
+  MAX_BACKUP_KEEP,
+  MAX_PORT,
+  MIN_BACKUP_INTERVAL_MINUTES,
+  MIN_BACKUP_KEEP,
+  MIN_PORT,
+} from "../utils/option-bounds.js";
 import {
   agentSocketPipeName,
   assertRuntimeDir,
@@ -108,7 +118,7 @@ export function registerServerCommand(program: Command): void {
     )
     .option(
       "--session <mode>",
-      "Session mode: file runs the daemon on the vault's session file (sealed after 15 min idle or 24 h); memory keeps the keys from the unlock in this process alone — no session file, no idle seal, locked by POST /api/v1/vault/lock or SIGTERM (required by --issue-token, --unlock-credential, --unlock-key-file, --unlock-key-dpapi, --proxy and --ssh-agent)",
+      "Session mode: file runs the daemon on the vault's session file (sealed after 15 min idle or 24 h); memory keeps the keys from the unlock in this process alone — no session file, no idle seal, locked by POST /api/v1/vault/lock or SIGTERM (required by --issue-token, --unlock-credential, --unlock-key-file, --unlock-key-dpapi, --proxy, --ssh-agent and --backup-dir)",
       "file",
     )
     .option(
@@ -116,6 +126,20 @@ export function registerServerCommand(program: Command): void {
       "Mint a consumer's token into a file and re-mint it at half its TTL (repeatable; requires --session memory): agent=<name>,file=<absolute path>,scope=<permission>[+<permission>…],secrets=<pattern>[+<pattern>…][,ttl=<minutes, 1-1440, default 1440>]",
       collect,
       [],
+    )
+    .option(
+      "--backup-dir <dir>",
+      "Directory for scheduled copies of the vault (this user's own, mode 0700; requires --session memory); checked before the vault opens",
+    )
+    .option(
+      "--backup-interval <minutes>",
+      "Minutes between scheduled copies (requires --backup-dir; 5-10080)",
+      String(DEFAULT_BACKUP_INTERVAL_MINUTES),
+    )
+    .option(
+      "--backup-keep <n>",
+      "Scheduled copies kept in --backup-dir (requires --backup-dir; 1-365)",
+      String(DEFAULT_BACKUP_KEEP),
     )
     .action(
       async (
@@ -144,6 +168,9 @@ export function registerServerCommand(program: Command): void {
           unlockKeyDpapi?: string;
           session: string;
           issueToken: string[];
+          backupDir?: string;
+          backupInterval: string;
+          backupKeep: string;
         },
         cmd: Command,
       ) => {
@@ -157,14 +184,19 @@ export function registerServerCommand(program: Command): void {
           // Commander takes the next flag as the path (`--token-file
           // --allow-tokenless`, `--token-file --mcp`); a dash-led path is given
           // as ./-name (2026-10-22).
-          if (opts.tokenFile?.startsWith("-")) {
-            console.error(
-              "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
-            );
-            process.exit(1);
+          if (opts.tokenFile !== undefined) {
+            if (opts.tokenFile.trim() === "") {
+              throw VaultError.invalidInput("--token-file: empty path");
+            }
+            if (opts.tokenFile.startsWith("-")) {
+              throw VaultError.invalidInput(
+                "--token-file: a flag, not a path (give a path that starts with a dash as ./-name)",
+              );
+            }
           }
-          // The same slip for the unlock key's two sources (`--unlock-key-file --rest`), refused
-          // before the transport check reads the flag it swallowed as missing.
+          // The same slip for the unlock key's three sources and the backup directory
+          // (`--unlock-key-file --rest`), refused before the transport check reads the flag it
+          // swallowed as missing.
           if (opts.unlockKeyFile !== undefined) {
             if (opts.unlockKeyFile.trim() === "") {
               throw VaultError.invalidInput("--unlock-key-file: empty path");
@@ -190,6 +222,16 @@ export function registerServerCommand(program: Command): void {
             if (opts.unlockKeyDpapi.startsWith("-")) {
               throw VaultError.invalidInput(
                 "--unlock-key-dpapi: a flag, not a path (give a path that starts with a dash as ./-name)",
+              );
+            }
+          }
+          if (opts.backupDir !== undefined) {
+            if (opts.backupDir.trim() === "") {
+              throw VaultError.invalidInput("--backup-dir: empty path");
+            }
+            if (opts.backupDir.startsWith("-")) {
+              throw VaultError.invalidInput(
+                "--backup-dir: a flag, not a path (give a path that starts with a dash as ./-name)",
               );
             }
           }
@@ -229,6 +271,7 @@ export function registerServerCommand(program: Command): void {
               ["--unlock-key-dpapi", opts.unlockKeyDpapi !== undefined],
               ["--proxy", opts.proxy === true],
               ["--ssh-agent", opts.sshAgent === true],
+              ["--backup-dir", opts.backupDir !== undefined],
             ] as const) {
               if (present) throw VaultError.sessionModeConflict(flag);
             }
@@ -299,6 +342,16 @@ export function registerServerCommand(program: Command): void {
             process.exit(1);
           }
 
+          if (
+            cmd.getOptionValueSource("backupInterval") === "cli" &&
+            opts.backupDir === undefined
+          ) {
+            throw VaultError.invalidInput("--backup-interval requires --backup-dir");
+          }
+          if (cmd.getOptionValueSource("backupKeep") === "cli" && opts.backupDir === undefined) {
+            throw VaultError.invalidInput("--backup-keep requires --backup-dir");
+          }
+
           // The agent socket has no TCP half: it is served in the consumer directories only.
           if (opts.sshAgent && runtimeDir === undefined) {
             console.error(
@@ -316,6 +369,18 @@ export function registerServerCommand(program: Command): void {
             MAX_PORT,
           );
           const proxyPort = parseIntOption(opts.proxyPort, "proxy port", MIN_PORT, MAX_PORT);
+          const backupIntervalMinutes = parseIntOption(
+            opts.backupInterval,
+            "backup interval",
+            MIN_BACKUP_INTERVAL_MINUTES,
+            MAX_BACKUP_INTERVAL_MINUTES,
+          );
+          const backupKeep = parseIntOption(
+            opts.backupKeep,
+            "backup keep count",
+            MIN_BACKUP_KEEP,
+            MAX_BACKUP_KEEP,
+          );
 
           if (opts.token !== undefined) {
             console.error(
@@ -445,6 +510,21 @@ export function registerServerCommand(program: Command): void {
             );
           }
           for (const { file, agent } of rotationSpecs) assertIssueTokenFile(file, agent);
+          const backupDir = opts.backupDir === undefined ? undefined : resolve(opts.backupDir);
+          if (backupDir !== undefined) {
+            const { assertHeldDir, assertOwnerOnlyDir, assertUnlinkedDir } =
+              await import("@harpoc/core");
+            assertUnlinkedDir(backupDir, "--backup-dir");
+            let held: string;
+            try {
+              held = await assertHeldDir(backupDir, "--backup-dir");
+            } catch (err) {
+              // A refused walk lets the directory's own refusal speak first.
+              assertOwnerOnlyDir(backupDir, "--backup-dir");
+              throw err;
+            }
+            assertOwnerOnlyDir(held, "--backup-dir");
+          }
 
           const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir as string | undefined);
           // The unlock key is read last, after every refusal above — a bad source never costs a
@@ -475,6 +555,24 @@ export function registerServerCommand(program: Command): void {
             unlockKey === undefined
               ? await loadUnlockedEngine(vaultDir, ...engineOptions)
               : await unlockEngineWithKey(vaultDir, unlockKey, ...engineOptions);
+          const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
+          engine.declareDaemon({
+            protectedDirs: [
+              ...(runtimeDir !== undefined ? [resolve(runtimeDir.path)] : []),
+              ...(opts.unlockCredential !== undefined &&
+              credentialsDir !== undefined &&
+              credentialsDir !== ""
+                ? [resolve(credentialsDir)]
+                : []),
+              ...(backupDir !== undefined ? [backupDir] : []),
+            ],
+            protectedFiles: [
+              ...(opts.unlockKeyFile !== undefined ? [resolve(opts.unlockKeyFile)] : []),
+              ...(opts.unlockKeyDpapi !== undefined ? [resolve(opts.unlockKeyDpapi)] : []),
+              ...rotationSpecs.map(({ file }) => resolve(file)),
+              ...(opts.tokenFile !== undefined ? [resolve(opts.tokenFile)] : []),
+            ],
+          });
           if (opts.session === "memory") {
             console.error(
               "[harpoc] memory session: the vault stays unlocked in this process alone (no session file, no idle seal) until POST /api/v1/vault/lock or SIGTERM",
@@ -488,6 +586,7 @@ export function registerServerCommand(program: Command): void {
           let restOAuthManager: { cancelPendingFlows(): void } | undefined;
           let refreshScheduler: { stop(): Promise<void> } | undefined;
           let renewalScheduler: { stop(): Promise<void> } | undefined;
+          let backupScheduler: { stop(): Promise<void> } | undefined;
           let egressProxy: { close(): Promise<void> } | undefined;
           let proxyBoundPort: number | undefined;
           const agentSockets: { readonly consumer: string; stop(): Promise<void> }[] = [];
@@ -536,6 +635,7 @@ export function registerServerCommand(program: Command): void {
               // Same reasoning for certificate renewal: an order abandoned
               // between issuance and storage is lost for good.
               if (renewalScheduler) await settle(() => renewalScheduler?.stop());
+              if (backupScheduler) await settle(() => backupScheduler?.stop());
               if (mcpServer && !stdioClosed) {
                 auditStop("stdio", opts.allowTokenless === true, undefined, trigger);
                 await settle(() => mcpServer?.close());
@@ -835,6 +935,25 @@ export function registerServerCommand(program: Command): void {
             console.error(
               "[harpoc] certificate renewal scheduler running (checks hourly, first check in ~1 h; auto-renew certificates only)",
             );
+          }
+
+          if (backupDir !== undefined) {
+            const { BackupScheduler } = await import("@harpoc/core");
+            if (!shuttingDown) {
+              const scheduler = new BackupScheduler(engine, {
+                dir: backupDir,
+                intervalMs: backupIntervalMinutes * 60_000,
+                keep: backupKeep,
+                label: "--backup-dir",
+                onError: (err) => {
+                  if (shuttingDown) return;
+                  const code = err instanceof VaultError ? err.code : ErrorCode.INTERNAL_ERROR;
+                  console.error(`Warning: --backup-dir: ${code}`);
+                },
+              });
+              scheduler.start();
+              backupScheduler = scheduler;
+            }
           }
           starting = false;
           if (listenerFailure !== undefined) throw listenerFailure;

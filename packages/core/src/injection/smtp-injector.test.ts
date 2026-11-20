@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
@@ -20,6 +21,7 @@ const OAUTH_TOKEN = "tok-abc123";
 const PASSWORD_HALF = "s3cr3tpass";
 const FLOOR_USERNAME = "abc";
 const ARM_PASSWORD = "s3cr3t";
+const MAIL_DIR = process.platform === "win32" ? "C:\\mail" : "/mail";
 
 /** Build a full SmtpAction from a partial (bypasses the schema — the injector
  * receives an already-validated action; tests exercise its own guards). */
@@ -213,15 +215,18 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
     const err = await expectVaultError(
       () =>
         injector.run(
-          baseAction({ attachments: [{ path: "/big.bin" }] }),
+          baseAction({ attachments: [{ path: join(MAIL_DIR, "big.bin") }] }),
           SECRET,
-          basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+          basePolicy({ smtp_recipient_allowlist: ["*@example.com"], local_dirs: [MAIL_DIR] }),
           undefined,
           undefined,
         ),
       ErrorCode.ATTACHMENT_REJECTED,
     );
-    expect(err.message).not.toContain("/big.bin");
+    expect(err.message).toBe(
+      `Attachment rejected: an attachment exceeds the ${MAX_ATTACHMENT_BYTES}-byte per-file limit`,
+    );
+    expect(err.message).not.toContain("big.bin");
   });
 
   it("refuses when the total across files exceeds the message cap", async () => {
@@ -234,16 +239,21 @@ describe("SmtpInjector — attachment caps (vault-authored reasons only)", () =>
       readFile: () => Promise.reject(new Error("must not read once total exceeded")),
     });
 
-    await expectVaultError(
+    const err = await expectVaultError(
       () =>
         injector.run(
-          baseAction({ attachments: [{ path: "/a" }, { path: "/b" }, { path: "/c" }] }),
+          baseAction({
+            attachments: ["a", "b", "c"].map((name) => ({ path: join(MAIL_DIR, name) })),
+          }),
           SECRET,
-          basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+          basePolicy({ smtp_recipient_allowlist: ["*@example.com"], local_dirs: [MAIL_DIR] }),
           undefined,
           undefined,
         ),
       ErrorCode.ATTACHMENT_REJECTED,
+    );
+    expect(err.message).toBe(
+      `Attachment rejected: attachments exceed the ${MAX_ATTACHMENT_TOTAL_BYTES}-byte per-message limit`,
     );
     expect(per * 3).toBeGreaterThan(MAX_ATTACHMENT_TOTAL_BYTES);
   });
@@ -489,21 +499,22 @@ describe("buildSmtpAuditDetails", () => {
 
   it("run() returns audit details reflecting the resolved attachment bytes", async () => {
     const { fn } = makeFakeSend();
+    const a = join(MAIL_DIR, "a.txt");
+    const b = join(MAIL_DIR, "b.txt");
     const injector = new SmtpInjector({
       sendSmtp: fn,
       realpath: (p: string) => Promise.resolve(p),
-      stat: (p: string) =>
-        Promise.resolve({ size: p === "/a.txt" ? 100 : 250, isFile: () => true }),
-      readFile: (p: string) => Promise.resolve(Buffer.alloc(p === "/a.txt" ? 100 : 250)),
+      stat: (p: string) => Promise.resolve({ size: p === a ? 100 : 250, isFile: () => true }),
+      readFile: (p: string) => Promise.resolve(Buffer.alloc(p === a ? 100 : 250)),
     });
     const { auditDetails } = await injector.run(
-      baseAction({ attachments: [{ path: "/a.txt" }, { path: "/b.txt" }] }),
+      baseAction({ attachments: [{ path: a }, { path: b }] }),
       SECRET,
-      basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+      basePolicy({ smtp_recipient_allowlist: ["*@example.com"], local_dirs: [MAIL_DIR] }),
       undefined,
       undefined,
     );
-    expect(auditDetails.attachment_paths).toEqual(["/a.txt", "/b.txt"]);
+    expect(auditDetails.attachment_paths).toEqual([a, b]);
     expect(auditDetails.attachment_total_bytes).toBe(350);
   });
 

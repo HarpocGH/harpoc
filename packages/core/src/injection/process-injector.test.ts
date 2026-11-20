@@ -510,6 +510,143 @@ describe("ProcessInjector — dedicated-context binaries (C1)", () => {
     },
   );
 
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32").each(["docker", "sftp"])(
+    "refuses a link named %s that resolves to another binary",
+    async (name) => {
+      const dir = realpathSync(mkdtempSync(join(tmpRoot, "link-")));
+      try {
+        const marker = join(dir, "marker");
+        const multi = join(dir, "multi");
+        const link = join(dir, name);
+        writeFileSync(multi, `#!/bin/sh\nmkdir "${marker}"\n`, { mode: 0o755 });
+        symlinkSync(multi, link);
+        const log = vi.fn();
+        const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+        const err = await expectVaultError(
+          () =>
+            audited.executeWithSecret(
+              { type: "process", command: link, args: [], env_var: "SECRET" },
+              new Uint8Array(Buffer.from(SECRET, "utf8")),
+              { command_allowlist: [link], env_allowlist: [] },
+              "secret-1",
+            ),
+          ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+        );
+        expect(err.message).toMatch(new RegExp(`^'${name}' has a dedicated injection context`));
+        expect(log).toHaveBeenCalledOnce();
+        expect(log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            eventType: "secret.use",
+            secretId: "secret-1",
+            success: false,
+            detail: expect.objectContaining({
+              context: "process",
+              error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+            }),
+          }),
+        );
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+  );
+
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32").each([
+    ["refuses the target of a link the allowlist names docker", "docker", "multi"],
+    ["refuses another link to the target of an entry named docker", "docker", "other"],
+    ["refuses the target of a link the allowlist names sftp", "sftp", "multi"],
+    ["refuses another link to the target of an entry named sftp", "sftp", "other"],
+  ] as const)("%s", async (_title, name, requested) => {
+    const dir = realpathSync(mkdtempSync(join(tmpRoot, "entry-")));
+    try {
+      const marker = join(dir, "marker");
+      const multi = join(dir, "multi");
+      const link = join(dir, name);
+      writeFileSync(multi, `#!/bin/sh\nmkdir "${marker}"\n`, { mode: 0o755 });
+      symlinkSync(multi, link);
+      symlinkSync(multi, join(dir, "other"));
+      const log = vi.fn();
+      const audited = new ProcessInjector({ log } as unknown as AuditLogger);
+      const err = await expectVaultError(
+        () =>
+          audited.executeWithSecret(
+            { type: "process", command: join(dir, requested), args: [], env_var: "SECRET" },
+            new Uint8Array(Buffer.from(SECRET, "utf8")),
+            { command_allowlist: [link], env_allowlist: [] },
+            "secret-1",
+          ),
+        ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+      );
+      expect(err.message).toMatch(new RegExp(`^'${name}' has a dedicated injection context`));
+      expect(log).toHaveBeenCalledOnce();
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "secret.use",
+          secretId: "secret-1",
+          success: false,
+          detail: expect.objectContaining({
+            context: "process",
+            error: ErrorCode.DEDICATED_CONTEXT_REQUIRED,
+          }),
+        }),
+      );
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32")(
+    "runs a command no dedicated-named entry resolves to",
+    async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpRoot, "entry-")));
+      try {
+        const marker = join(dir, "marker");
+        const multi = join(dir, "multi");
+        const docker = join(dir, "docker");
+        const tool = join(dir, "tool");
+        writeFileSync(multi, "#!/bin/sh\n", { mode: 0o755 });
+        writeFileSync(tool, `#!/bin/sh\nmkdir "${marker}"\n`, { mode: 0o755 });
+        symlinkSync(multi, docker);
+        const result = await run(
+          { type: "process", command: tool, args: [], env_var: "SECRET" },
+          { command_allowlist: [docker, tool], env_allowlist: [] },
+        );
+        expect(result.exit_code).toBe(0);
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+  );
+
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32")(
+    "runs a link whose entry has no dedicated name",
+    async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpRoot, "entry-")));
+      try {
+        const marker = join(dir, "marker");
+        const tool = join(dir, "tool");
+        const alias = join(dir, "alias");
+        writeFileSync(tool, `#!/bin/sh\nmkdir "${marker}"\n`, { mode: 0o755 });
+        symlinkSync(tool, alias);
+        const result = await run(
+          { type: "process", command: alias, args: [], env_var: "SECRET" },
+          { command_allowlist: [tool], env_allowlist: [] },
+        );
+        expect(result.exit_code).toBe(0);
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+  );
+
   it("negative control: an ordinary allowlisted binary still runs", async () => {
     const result = await run(nodeAction(`process.stdout.write("ran")`));
     expect(result.exit_code).toBe(0);

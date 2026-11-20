@@ -21,3 +21,14 @@ export const MIN_CA_DAYS = 1;
 export const MAX_CA_DAYS = 3650;
 export const DEFAULT_CA_DAYS = 3650;
 export const DEFAULT_UNCONSTRAINED_CA_DAYS = 7;
+
+/**
+ * `server start --backup-interval` in minutes and `--backup-keep` in copies: refused outside the
+ * range, never clamped.
+ */
+export const MIN_BACKUP_INTERVAL_MINUTES = 5;
+export const MAX_BACKUP_INTERVAL_MINUTES = 10_080;
+export const DEFAULT_BACKUP_INTERVAL_MINUTES = 1_440;
+export const MIN_BACKUP_KEEP = 1;
+export const MAX_BACKUP_KEEP = 365;
+export const DEFAULT_BACKUP_KEEP = 7;

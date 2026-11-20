@@ -76,7 +76,7 @@ export interface EgressProxyOptions {
   timeoutMs?: number;
   /** Upstream idle budget between response body chunks; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
   bodyIdleTimeoutMs?: number;
-  /** Every refusal and failure, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. `status` is the HTTP status the refusal answers, or would have answered once the response head was sent — never a relayed one. */
+  /** Every refusal and failure but a spent budget's 429 and a repeated CONNECT host refusal, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. `status` is the HTTP status the refusal answers, or would have answered once the response head was sent — never a relayed one. The budget's trip is reported once, with its own error and the 429 the principal gets from then on. */
   onError?: (err: VaultError, status: number) => void;
   /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
   onListenerError?: (err: VaultError) => void;
@@ -110,6 +110,8 @@ interface Refusal {
   headers?: Record<string, string>;
   /** What `onError` receives instead of `error` — a post-lease refusal behind the generic 500. */
   reported?: VaultError;
+  /** Not handed to `onError`. */
+  silent?: true;
 }
 
 function internalProxyError(): VaultError {
@@ -124,7 +126,7 @@ function refusesConsumer(err: unknown): boolean {
 
 function budgetExceeded(): Refusal {
   const error = new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Proxy refusal budget exceeded");
-  return { status: error.statusCode, error };
+  return { status: error.statusCode, error, silent: true };
 }
 
 const TCP_LABEL = "Egress proxy";
@@ -248,7 +250,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   function refuse(res: ServerResponse, refusal: Refusal): void {
-    report(refusal.reported ?? refusal.error, refusal.status);
+    if (refusal.silent !== true) report(refusal.reported ?? refusal.error, refusal.status);
     if (res.headersSent) {
       res.destroy();
       return;
@@ -265,6 +267,8 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   function charge(caller: CallerContext): void {
     if (!budget.charge(refusalBudgetKey(caller))) return;
     engine.auditProxyRefusal(caller, BUDGET_OPERATION, ErrorCode.RATE_LIMIT_EXCEEDED);
+    const trip = budgetExceeded();
+    report(trip.error, trip.status);
   }
 
   /** The refusal's `access.denied` row, then its charge; a row that cannot be written answers in its place. */
@@ -546,7 +550,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   function refuseConnect(socket: Socket, refusal: Refusal): void {
-    report(refusal.reported ?? refusal.error, refusal.status);
+    if (refusal.silent !== true) report(refusal.reported ?? refusal.error, refusal.status);
     const headers: [string, string][] =
       refusal.status === 407 ? CONNECT_CHALLENGES : Object.entries(refusal.headers ?? {});
     socket.end(connectReply(refusal.status, refusal.error, headers));
@@ -575,7 +579,8 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       }
       const auth = authenticate(req, true);
       if ("error" in auth) return refuseConnect(socket, auth);
-      if (budget.spent(refusalBudgetKey(auth.caller))) {
+      const key = refusalBudgetKey(auth.caller);
+      if (budget.spent(key)) {
         return refuseConnect(socket, budgetExceeded());
       }
       const target = parseConnectTarget(req.url ?? "");
@@ -586,14 +591,14 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
         });
       }
       if (!hostPermitted({ hosts: caHosts }, target.host)) {
-        const refusal = VaultError.proxyConnectDenied(target.host, target.port);
-        return refuseConnect(
-          socket,
-          audited(auth.caller, `CONNECT ${target.authority}`, {
-            status: refusal.statusCode,
-            error: refusal,
-          }),
-        );
+        const error = VaultError.proxyConnectDenied(target.host, target.port);
+        const refusal: Refusal = { status: error.statusCode, error };
+        if (budget.refused(key, target.authority)) {
+          return refuseConnect(socket, { ...refusal, silent: true });
+        }
+        const answer = audited(auth.caller, `CONNECT ${target.authority}`, refusal);
+        if (answer === refusal) budget.remember(key, target.authority);
+        return refuseConnect(socket, answer);
       }
       const context = leaves.contextFor(target.host);
       const tunnel: Tunnel = {

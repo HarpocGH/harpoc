@@ -164,7 +164,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
-    sftp_local_dirs: [],
+    local_dirs: [],
     ...overrides,
   };
 }
@@ -287,7 +287,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(opts.env.HARPOC_GIT_ORIGIN).toBe("https://8.8.8.8");
       for (const [, local, localOpts] of calls.slice(0, 3)) {
         expect(local.slice(0, 6)).toEqual(FORCED);
-        expect(localOpts.cwd).toBe(wd);
+        expect(localOpts.cwd).toBe(realpathSync.native(wd));
         expect(localOpts.env.GIT_ASKPASS).toBeUndefined();
         expect(localOpts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
         expect(localOpts.env.HARPOC_GIT_USERNAME).toBeUndefined();
@@ -457,7 +457,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       "https://8.8.8.8/org/other.git",
       "--",
       "https://8.8.8.8/org/repo.git",
-      dest,
+      join(realpathSync.native(tmpdir()), "harpoc-s5-dest"),
     ]);
     // The credential-bearing steps name the repository behind `--` and no caller positional.
     for (const [, network] of calls.slice(0, 2)) {
@@ -538,7 +538,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       "main",
       "--",
       "https://8.8.8.8/org/repo.git",
-      dest,
+      join(realpathSync.native(tmpdir()), "harpoc-f1-dest"),
     ]);
     expect(cloneOpts.cwd).toBeUndefined();
     expect(cloneOpts.env.GIT_ASKPASS).toBeUndefined();
@@ -770,7 +770,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
         "https://8.8.8.8/org/repo.git",
       ]);
       for (const [, , opts] of [calls[0], calls[1], calls[3]] as SpawnCall[]) {
-        expect(opts.cwd).toBe(wd);
+        expect(opts.cwd).toBe(realpathSync.native(wd));
         expect(opts.env.GIT_ASKPASS).toBeUndefined();
         expect(opts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
         expect(opts.env.HARPOC_GIT_USERNAME).toBeUndefined();
@@ -1270,7 +1270,7 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         expect(args[at - 1]).toBe("-c");
         expect(at).toBeLessThan(args.indexOf(gitSubcommand(args) as string));
       }
-      expect((calls[3] as SpawnCall)[2].cwd).toBe(wd);
+      expect((calls[3] as SpawnCall)[2].cwd).toBe(realpathSync.native(wd));
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -1729,7 +1729,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       expect(opts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
       expect(Object.values(opts.env).every((v) => !v.includes(PEM_ARMOR))).toBe(true);
       for (const [, , localOpts] of calls.slice(0, 3)) {
-        expect(localOpts.cwd).toBe(wd);
+        expect(localOpts.cwd).toBe(realpathSync.native(wd));
         expect(localOpts.env.SSH_AUTH_SOCK).toBeUndefined();
         expect(localOpts.env.GIT_SSH_COMMAND).toBeUndefined();
         expect(localOpts.env.GIT_CONFIG_NOSYSTEM).toBe("1");

@@ -2,13 +2,19 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_BACKUP_INTERVAL_MINUTES,
+  DEFAULT_BACKUP_KEEP,
   DEFAULT_CA_DAYS,
   DEFAULT_PROXY_PORT,
   DEFAULT_UNCONSTRAINED_CA_DAYS,
+  MAX_BACKUP_INTERVAL_MINUTES,
+  MAX_BACKUP_KEEP,
   MAX_CA_DAYS,
   MAX_PORT,
   MAX_RENEW_BEFORE_DAYS,
   MAX_UNCONSTRAINED_CA_DAYS,
+  MIN_BACKUP_INTERVAL_MINUTES,
+  MIN_BACKUP_KEEP,
   MIN_CA_DAYS,
   MIN_PORT,
   MIN_RENEW_BEFORE_DAYS,
@@ -51,9 +57,18 @@ describe("option-bounds", () => {
     expect(MAX_UNCONSTRAINED_CA_DAYS).toBe(30);
   });
 
+  it("names the backup schedule's bounds: every 5–10080 minutes, 1440 by default; 1–365 copies kept, 7 by default", () => {
+    expect(MIN_BACKUP_INTERVAL_MINUTES).toBe(5);
+    expect(MAX_BACKUP_INTERVAL_MINUTES).toBe(10_080);
+    expect(DEFAULT_BACKUP_INTERVAL_MINUTES).toBe(1_440);
+    expect(MIN_BACKUP_KEEP).toBe(1);
+    expect(MAX_BACKUP_KEEP).toBe(365);
+    expect(DEFAULT_BACKUP_KEEP).toBe(7);
+  });
+
   it("no command declares a bound of its own (CM-5 tripwire)", () => {
     const declaration =
-      /^\s*(?:export )?const (?:MIN|MAX|DEFAULT)_(?:PORT|RENEW_BEFORE_DAYS|CA_DAYS|UNCONSTRAINED_CA_DAYS)\b/m;
+      /^\s*(?:export )?const (?:MIN|MAX|DEFAULT)_(?:PORT|RENEW_BEFORE_DAYS|CA_DAYS|UNCONSTRAINED_CA_DAYS|BACKUP_INTERVAL_MINUTES|BACKUP_KEEP)\b/m;
     const offenders = collectSources(new URL("../commands/", import.meta.url))
       .filter(({ url }) => declaration.test(readFileSync(url, "utf8")))
       .map(({ path }) => path)

@@ -5,19 +5,22 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { GitAction, InjectionPolicy } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
 import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
-import { expectAbsent } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 /**
  * S1 (C1.2 fix round 1, F-1): a clone's credential-bearing steps run against a
@@ -75,7 +78,7 @@ describeGit("Git clone through the relay — today's clone semantics on real git
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
-      sftp_local_dirs: [],
+      local_dirs: [],
     };
   }
 
@@ -257,4 +260,76 @@ describeGit("Git clone through the relay — today's clone semantics on real git
     expect(git(dest, "branch", "--show-current").trim()).toBe("main");
     expect(existsSync(join(dest, "f.txt"))).toBe(true);
   });
+
+  it("a relative destination is cloned below the process's directory, and git's output names the resolved path", async () => {
+    const savedCwd = process.cwd();
+    process.chdir(out);
+    let result;
+    try {
+      result = await clone("repo.git", { working_directory: "relative-clone" });
+    } finally {
+      process.chdir(savedCwd);
+    }
+    expect(result.exit_code, result.stderr).toBe(0);
+    const resolved = join(realpathSync.native(out), "relative-clone");
+    expect(result.stderr).toContain(`Cloning into '${resolved}'...`);
+    expect(readdirSync(out)).toEqual(["relative-clone"]);
+  });
+
+  // A symbolic link needs a privilege on win32, and only off win32 does the system resolve a
+  // `..` behind a link from the link's target.
+  it.skipIf(process.platform === "win32")(
+    "a destination spelled through a link and `..` is written where the system resolves the spelling, and nowhere else",
+    async () => {
+      mkdirSync(join(out, "elsewhere", "deep"), { recursive: true });
+      mkdirSync(join(out, "agent"));
+      const link = join(out, "agent", "link");
+      symlinkSync(join(out, "elsewhere", "deep"), link, "dir");
+      const result = await clone("repo.git", { working_directory: `${link}/../clone` });
+      expect(result.exit_code, result.stderr).toBe(0);
+      const resolved = join(realpathSync.native(join(out, "elsewhere")), "clone");
+      expect(result.stderr).toContain(`Cloning into '${resolved}'...`);
+      expect(readdirSync(join(out, "agent"))).toEqual(["link"]);
+      expect(readdirSync(join(out, "elsewhere")).sort()).toEqual(["clone", "deep"]);
+      expect(git(join(out, "elsewhere", "clone"), "branch", "--show-current").trim()).toBe("main");
+    },
+  );
+
+  // A symbolic link needs a privilege on win32. Plain git 2.39 writes a bare clone through a
+  // link that leads nowhere, into the link's target.
+  it.skipIf(process.platform === "win32").each(["--bare", "--mirror"])(
+    "a %s clone whose destination is a link that leads nowhere is refused, and nothing is made at the link's target",
+    async (option) => {
+      mkdirSync(join(out, "elsewhere"));
+      const link = join(out, "link");
+      symlinkSync(join(out, "elsewhere", "planted"), link, "dir");
+      const err = await expectVaultError(
+        () => clone("repo.git", { args: [option], working_directory: link }),
+        ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      );
+      expect(err.message).toBe("git working directory is inside a directory the vault protects");
+      expect(readdirSync(join(out, "elsewhere"))).toEqual([]);
+      expect(readdirSync(out).sort()).toEqual(["elsewhere", "link"]);
+    },
+  );
+
+  // A symbolic link needs a privilege on win32. Off win32 the system refuses to read a
+  // spelling at its length limit, 1024 bytes on macOS and 4096 on Linux, the link included.
+  it.skipIf(process.platform === "win32").each([1024, 4096])(
+    "a --bare clone whose destination is a link that leads nowhere, behind a spelling of %i characters of `.` steps, is refused, and nothing is made at the link's target",
+    async (length) => {
+      mkdirSync(join(out, "elsewhere"));
+      const room = length - out.length - 1 - "link".length;
+      const name = room % 2 === 0 ? "link" : "links";
+      symlinkSync(join(out, "elsewhere", "planted"), join(out, name), "dir");
+      const spelled = `${out}/${"./".repeat(Math.floor(room / 2))}${name}`;
+      expect(spelled).toHaveLength(length);
+      await expectVaultError(
+        () => clone("repo.git", { args: ["--bare"], working_directory: spelled }),
+        ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      );
+      expect(readdirSync(join(out, "elsewhere"))).toEqual([]);
+      expect(readdirSync(out).sort()).toEqual(["elsewhere", name]);
+    },
+  );
 });

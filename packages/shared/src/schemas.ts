@@ -882,7 +882,7 @@ const responseHeaderAllowlistSchema = z
   )
   .max(100);
 const smtpRecipientAllowlistSchema = z.array(recipientPatternSchema).max(100);
-const sftpLocalDirsSchema = z
+const localDirsSchema = z
   .array(
     z
       .string()
@@ -900,12 +900,13 @@ const sftpLocalDirsSchema = z
  * from before a field existed — no such vault opens under v1.5. The four
  * exceptions are read-side and live in core: the post-baseline fields
  * `strict_tree_exit` (2026-09-10), `proxy` (2026-11-06) and `ssh_agent_socket`
- * (2026-11-06) are defaulted to `false` and `sftp_local_dirs` (2026-11-18) to
- * `[]` by `loadInjectionPolicy` before this parse, because blobs written by
- * the prepared v1.5.0 tree carry the baseline ten, blobs written before
+ * (2026-11-06) are defaulted to `false` and `local_dirs` (2026-11-18; read
+ * from `sftp_local_dirs` where only that key is stored) to `[]` by
+ * `loadInjectionPolicy` before this parse, because blobs written by the
+ * prepared v1.5.0 tree carry the baseline ten, blobs written before
  * deployment model B's egress proxy carry eleven, blobs written before its
- * agent socket carry twelve, and blobs written before the sftp local
- * directories carry thirteen.
+ * agent socket carry twelve, and blobs written before the local directories
+ * carry thirteen.
  */
 export const injectionPolicySchema = z.strictObject({
   url_allowlist: urlAllowlistSchema,
@@ -921,7 +922,7 @@ export const injectionPolicySchema = z.strictObject({
   strict_tree_exit: z.boolean(),
   proxy: z.boolean(),
   ssh_agent_socket: z.boolean(),
-  sftp_local_dirs: sftpLocalDirsSchema,
+  local_dirs: localDirsSchema,
 });
 
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
@@ -939,7 +940,7 @@ export const injectionPolicyInputSchema = z.strictObject({
   strict_tree_exit: z.boolean().optional().default(false),
   proxy: z.boolean().optional().default(false),
   ssh_agent_socket: z.boolean().optional().default(false),
-  sftp_local_dirs: sftpLocalDirsSchema.optional().default([]),
+  local_dirs: localDirsSchema.optional().default([]),
 });
 
 /**
@@ -993,11 +994,13 @@ export const injectionPolicyInputSchema = z.strictObject({
  * session bound to a host whose pinned `ssh.known_hosts` key it presented and
  * which `host_allowlist` admits; unset, the socket neither lists nor signs
  * with the key.
- * `sftp_local_dirs` (2026-11-18, default `[]`) lists the directories the
- * local file of an sftp `upload` or `download` must resolve inside (absolute
- * POSIX or drive paths, at most 100): an empty list refuses both operations,
- * and a path inside the vault directory is refused whatever is listed — the
- * resolution and both refusals are the sftp injector's, not this schema's.
+ * `local_dirs` (2026-11-18, default `[]`) lists the directories the
+ * local file of an sftp `upload` or `download` and of an smtp attachment must
+ * resolve inside (absolute POSIX or drive paths, at most 100): an empty list
+ * refuses both operations and every attachment, and a path inside the vault
+ * directory (in a daemon also a path it declares) is refused whatever is
+ * listed — the resolution and the refusals are the judgement of
+ * `core/src/injection/local-path.ts`, not this schema's.
  * The shape the vault stores, loads and returns: every field
  * present, no defaults — defaults apply at `injectionPolicyInputSchema`, never
  * on the stored blob.

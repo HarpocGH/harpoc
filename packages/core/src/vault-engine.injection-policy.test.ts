@@ -11,7 +11,7 @@ import type { InjectionPolicyInput } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
-import { encrypt } from "./crypto/aes-gcm.js";
+import { decrypt, encrypt } from "./crypto/aes-gcm.js";
 import type { McpConnectionEntry } from "./injection/mcp-registry.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 
@@ -144,7 +144,7 @@ describe("injection policy", () => {
       strict_tree_exit: false,
       proxy: false,
       ssh_agent_socket: false,
-      sftp_local_dirs: [],
+      local_dirs: [],
     });
   });
 
@@ -327,7 +327,7 @@ describe("injection policy", () => {
     expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
   });
 
-  it("a policy stored before the field reads an empty list", async () => {
+  it("a policy stored before either key reads an empty list", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
     const thirteenFields = JSON.stringify({
@@ -360,20 +360,124 @@ describe("injection policy", () => {
       updated_at: now,
     });
     const loaded = await engine.getInjectionPolicy("secret://pol");
-    expect(loaded.sftp_local_dirs).toEqual([]);
+    expect(loaded.local_dirs).toEqual([]);
     expect(loaded.ssh_agent_socket).toBe(true);
     expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
     expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
   });
 
+  it("the old key reads", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const oldKey = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["sftp.example.com"],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: false,
+      sftp_local_dirs: ["/srv/a"],
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(oldKey, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.local_dirs).toEqual(["/srv/a"]);
+    expect("sftp_local_dirs" in loaded).toBe(false);
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+
+    await engine.setInjectionPolicy("secret://pol", {
+      ...loaded,
+      host_allowlist: ["sftp.example.com", "sftp2.example.com"],
+    });
+    const row = store.getInjectionPolicy(secretId);
+    const stored = JSON.parse(
+      Buffer.from(
+        decrypt(
+          kek,
+          row?.policy_encrypted as Uint8Array,
+          row?.policy_iv as Uint8Array,
+          row?.policy_tag as Uint8Array,
+          AAD_INJECTION_POLICY(secretId),
+        ),
+      ).toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(stored["local_dirs"]).toEqual(["/srv/a"]);
+    expect("sftp_local_dirs" in stored).toBe(false);
+  });
+
+  it("both keys are corruption", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const bothKeys = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: [],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: false,
+      local_dirs: ["/srv/new"],
+      sftp_local_dirs: ["/srv/old"],
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(bothKeys, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const err = await expectVaultError(
+      () => engine.getInjectionPolicy("secret://pol"),
+      ErrorCode.VAULT_CORRUPTED,
+    );
+    expect(err.message).toBe(
+      `Vault corrupted: injection policy for secret ${secretId} is malformed (<root>)`,
+    );
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
   it("the policy.grant row records the directories as a count", async () => {
-    await engine.setInjectionPolicy("secret://pol", { sftp_local_dirs: ["/srv/out", "/srv/in"] });
-    expect((await engine.getInjectionPolicy("secret://pol")).sftp_local_dirs).toEqual([
+    await engine.setInjectionPolicy("secret://pol", { local_dirs: ["/srv/out", "/srv/in"] });
+    expect((await engine.getInjectionPolicy("secret://pol")).local_dirs).toEqual([
       "/srv/out",
       "/srv/in",
     ]);
     const row = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0];
-    expect(row?.detail?.sftp_local_dir_count).toBe(2);
+    expect(row?.detail?.local_dir_count).toBe(2);
+    expect("sftp_local_dir_count" in (row?.detail as object)).toBe(false);
     expect(JSON.stringify(row?.detail).includes("/srv/out")).toBe(false);
     expect(JSON.stringify(row?.detail).includes("/srv/in")).toBe(false);
   });
@@ -764,7 +868,7 @@ describe("interpreter acknowledgement (thesis §4.5.3)", () => {
     expect(refused[0]?.detail?.exec_wrappers).toEqual(["sudo"]);
   });
 
-  it.each(["sshpass", "scp"])(
+  it.each(["sshpass", "scp", "ssh-agent", "podman", "nerdctl", "snap"])(
     "refuses the exec wrapper %s without acknowledgement and audits the tier",
     async (name) => {
       const err = await expectVaultError(

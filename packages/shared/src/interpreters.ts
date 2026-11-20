@@ -126,6 +126,7 @@ export const EXEC_WRAPPERS: ReadonlySet<string> = new Set([
   "gdb",
   "watch",
   "parallel",
+  "ssh-agent",
   // executes arbitrary programs named in an argument
   "find",
   "tar",
@@ -133,6 +134,9 @@ export const EXEC_WRAPPERS: ReadonlySet<string> = new Set([
   "make",
   "sshpass",
   "scp",
+  "podman",
+  "nerdctl",
+  "snap",
   // Windows
   "forfiles",
   "runas",

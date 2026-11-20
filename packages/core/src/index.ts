@@ -43,6 +43,20 @@ export type {
   IssuedTokenRow,
   IssuedTokenFilter,
 } from "./storage/sqlite-store.js";
+export {
+  VAULT_COPY_TIMEOUT_MS,
+  VAULT_COPY_WORKER_SOURCE,
+  takeVaultCopy,
+} from "./storage/vault-copy.js";
+export {
+  backupFileName,
+  isBackupTempName,
+  newestBackupAt,
+  parseBackupFileName,
+  removeBackupTemps,
+} from "./storage/backup-names.js";
+export { BACKUP_STOP_DRAIN_TIMEOUT_MS, BackupScheduler } from "./storage/backup-scheduler.js";
+export type { BackupSchedulerOptions } from "./storage/backup-scheduler.js";
 
 // Session
 export { SessionManager } from "./session/session-manager.js";
@@ -81,8 +95,25 @@ export {
   writeUnlockKeyFile,
 } from "./session/unlock-key-source.js";
 export type { ReadUnlockKeyFileOptions } from "./session/unlock-key-source.js";
-export { listWindowsAclSync } from "./session/owner-only.js";
+export {
+  holdsOnlyVaultAccounts,
+  listWindowsAclChain,
+  listWindowsAclSync,
+  restrictWindowsAclToVaultAccounts,
+} from "./session/owner-only.js";
 export type { WindowsAclListing, WindowsAclEntry } from "./session/owner-only.js";
+export {
+  WIN32_PARENT_RIGHTS,
+  WIN32_REPLACE_RIGHTS,
+  WIN32_TRUSTED_SIDS,
+  assertHeldDir,
+  assertOwnerOnlyDir,
+  assertUnlinkedDir,
+  isHeldPath,
+  isLinkPath,
+  posixHeld,
+  win32Held,
+} from "./session/path-trust.js";
 
 // Audit
 export { AuditLogger } from "./audit/audit-logger.js";
@@ -218,8 +249,10 @@ export {
   matchesHostPortAllowlist,
   resolveAndMatchCommand,
   resolveExecutable,
+  resolveExecutablePaths,
   controlledPathDirs,
 } from "./injection/allowlist.js";
+export type { DaemonPaths } from "./injection/local-path.js";
 export { redactSecretEncodings, mapStringLeaves } from "./injection/output-sanitizer.js";
 export { sanitizeUseSecretResult } from "./injection/sanitize-result.js";
 export { McpInjector } from "./injection/mcp-injector.js";

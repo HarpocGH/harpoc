@@ -4,6 +4,7 @@ import type { CallerContext } from "@harpoc/shared";
 interface RefusalWindow {
   opened: number;
   charges: number;
+  authorities: Set<string>;
 }
 
 export class RefusalBudget {
@@ -15,10 +16,15 @@ export class RefusalBudget {
     private readonly now: () => number = Date.now,
   ) {}
 
-  spent(key: string): boolean {
+  private live(key: string): RefusalWindow | undefined {
     const window = this.windows.get(key);
-    if (window === undefined) return false;
-    return window.charges >= this.limit && this.now() - window.opened < this.windowMs;
+    if (window === undefined || this.now() - window.opened >= this.windowMs) return undefined;
+    return window;
+  }
+
+  spent(key: string): boolean {
+    const window = this.live(key);
+    return window !== undefined && window.charges >= this.limit;
   }
 
   charge(key: string): boolean {
@@ -28,12 +34,22 @@ export class RefusalBudget {
     }
     let window = this.windows.get(key);
     if (window === undefined) {
-      window = { opened: now, charges: 0 };
+      window = { opened: now, charges: 0, authorities: new Set() };
       this.windows.set(key, window);
     }
     if (window.charges >= this.limit) return false;
     window.charges++;
     return window.charges === this.limit;
+  }
+
+  refused(key: string, authority: string): boolean {
+    return this.live(key)?.authorities.has(authority) === true;
+  }
+
+  remember(key: string, authority: string): void {
+    const window = this.live(key);
+    if (window === undefined || window.authorities.size >= this.limit) return;
+    window.authorities.add(authority);
   }
 }
 

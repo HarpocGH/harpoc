@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
 import { devNull, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
 import {
   DEFAULT_GIT_TIMEOUT_MS,
@@ -35,6 +35,13 @@ import {
   gitVersionAtLeast,
   readGitVersion,
 } from "./git-injector-version.js";
+import {
+  holdsNameNotWrittenAsStored,
+  holdsNameWin32ReadsDifferently,
+  isProtectedPath,
+  resolveSpelledDirectory,
+} from "./local-path.js";
+import type { DaemonPaths } from "./local-path.js";
 import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
@@ -423,6 +430,11 @@ function fetchRefspecsOf(action: GitAction): FetchRefspec[] {
   return parsed;
 }
 
+interface FloorPaths {
+  vaultFiles: readonly string[];
+  daemon?: DaemonPaths;
+}
+
 /**
  * Executes a Git operation, authenticating over HTTPS (request-mediated, via a
  * git-credential/askpass helper) or SSH (process-mediated, via the ephemeral
@@ -457,6 +469,7 @@ export class GitInjector {
     config: ConnectionConfig | undefined,
     secretId?: string,
     attribution?: AuditAttribution,
+    local?: FloorPaths,
   ): Promise<GitResult> {
     let transport: "https" | "ssh" | null;
     try {
@@ -489,8 +502,8 @@ export class GitInjector {
     }
 
     return transport === "https"
-      ? this.runHttps(action, gitPath, secretValue, policy, config, secretId, attribution)
-      : this.runSsh(action, gitPath, secretValue, policy, config, secretId, attribution);
+      ? this.runHttps(action, gitPath, secretValue, policy, config, secretId, attribution, local)
+      : this.runSsh(action, gitPath, secretValue, policy, config, secretId, attribution, local);
   }
 
   private async runHttps(
@@ -501,6 +514,7 @@ export class GitInjector {
     config: ConnectionConfig | undefined,
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
+    local: FloorPaths | undefined,
   ): Promise<GitResult> {
     if (hostLeadsWithSign(action.repository)) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
@@ -548,8 +562,10 @@ export class GitInjector {
         this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
+    let directory: string | undefined;
     try {
-      assertWorkingTree(action);
+      assertWorkingTree(action, local);
+      directory = await directoryOutsideFloor(action, local);
     } catch (err) {
       hooks.dispose();
       if (err instanceof VaultError)
@@ -622,6 +638,7 @@ export class GitInjector {
       try {
         r = await runPlan(action, gitPath, hooks.dir, networkConfig, env, policy, {
           networkRepository: judged,
+          directory,
           timeoutMs,
           redact,
           parseRedact: [
@@ -687,6 +704,7 @@ export class GitInjector {
     config: ConnectionConfig | undefined,
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
+    local: FloorPaths | undefined,
   ): Promise<GitResult> {
     const address = parseSshHost(action.repository);
     if (!address) {
@@ -755,8 +773,10 @@ export class GitInjector {
         this.audit(action, secretId, { host, error: err.code }, false, attribution);
       throw err;
     }
+    let directory: string | undefined;
     try {
-      assertWorkingTree(action);
+      assertWorkingTree(action, local);
+      directory = await directoryOutsideFloor(action, local);
     } catch (err) {
       hooks.dispose();
       if (err instanceof VaultError)
@@ -809,6 +829,7 @@ export class GitInjector {
       try {
         r = await runPlan(action, gitPath, hooks.dir, [], env, policy, {
           networkRepository: action.repository,
+          directory,
           timeoutMs,
           redact: [keyPem],
           parseRedact: [keyPem],
@@ -1142,8 +1163,13 @@ function forcedGitConfig(hooksDir: string): string[] {
   ];
 }
 
-function assertWorkingTree(action: GitAction): void {
-  if (action.operation === "clone") return;
+function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): void {
+  if (action.operation === "clone") {
+    if (!action.working_directory && local?.daemon !== undefined) {
+      throw VaultError.invalidGitConfig("working_directory is required for clone in a daemon");
+    }
+    return;
+  }
   if (action.operation === "ls-remote") {
     if (action.working_directory !== undefined) {
       throw VaultError.invalidGitConfig("working_directory is not accepted by ls-remote");
@@ -1157,8 +1183,62 @@ function assertWorkingTree(action: GitAction): void {
   assertDirectory(wd);
 }
 
+/**
+ * The directory an operation names, absolute and as its caller spelled it —
+ * without a working directory the process's own —, or null where the
+ * process's own cannot be read. Off win32 a `..` is left for the system to
+ * resolve: behind a link it climbs from the link's target, which a collapse
+ * by text would miss. The Win32 path layer collapses a `..` by text before it
+ * follows a link, as `resolve` does.
+ */
+function spelledDirectory(action: GitAction): string | null {
+  try {
+    const spelled = action.working_directory;
+    if (!spelled) return process.cwd();
+    if (process.platform === "win32") return resolve(spelled);
+    return isAbsolute(spelled) ? spelled : `${process.cwd()}${sep}${spelled}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The one directory an operation is judged by and git is handed: the caller's
+ * spelling resolved as the system resolves it, links followed, a part that
+ * does not exist yet joined on. The floor's refusal where it lies inside the
+ * floor, where it cannot be resolved so, and where git would read the resolved
+ * spelling as another directory; undefined where git is handed none.
+ */
+async function directoryOutsideFloor(
+  action: GitAction,
+  local: FloorPaths | undefined,
+): Promise<string | undefined> {
+  if (action.operation === "ls-remote") return undefined;
+  if (local === undefined && !action.working_directory) return undefined;
+  const spelled = spelledDirectory(action);
+  const resolved =
+    spelled === null || holdsNameWin32ReadsDifferently(spelled, process.platform)
+      ? null
+      : await resolveSpelledDirectory(spelled);
+  if (
+    resolved === null ||
+    (local !== undefined && (await isProtectedPath(resolved, local.vaultFiles, local.daemon)))
+  ) {
+    throw VaultError.localPathProtected();
+  }
+  if (!action.working_directory) return undefined;
+  if (
+    holdsNameWin32ReadsDifferently(resolved, process.platform) ||
+    holdsNameNotWrittenAsStored(resolved)
+  ) {
+    throw VaultError.localPathProtected();
+  }
+  return resolved;
+}
+
 interface StepOptions {
   networkRepository: string;
+  directory: string | undefined;
   timeoutMs: number;
   redact: string[];
   parseRedact: readonly string[];
@@ -1241,6 +1321,7 @@ async function runPlan(
       return runRelayedClone(
         action,
         opts.networkRepository,
+        opts.directory,
         hooksDir,
         networkConfig,
         networkEnv,
@@ -1256,6 +1337,7 @@ async function runPlan(
       return runRelayed(
         action,
         opts.networkRepository,
+        opts.directory as string,
         hooksDir,
         networkConfig,
         networkEnv,
@@ -1349,6 +1431,7 @@ function parseRemoteHead(stdout: string): {
 async function runRelayedClone(
   action: GitAction,
   networkRepository: string,
+  directory: string | undefined,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1415,7 +1498,7 @@ async function runRelayedClone(
         ...args,
         "--",
         action.repository,
-        ...(action.working_directory ? [action.working_directory] : []),
+        ...(directory !== undefined ? [directory] : []),
       ],
       undefined,
       localEnv,
@@ -1509,6 +1592,7 @@ function remoteOf(listing: string, repository: string): string {
 async function runRelayed(
   action: GitAction,
   networkRepository: string,
+  wd: string,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1516,7 +1600,6 @@ async function runRelayed(
   step: GitStep,
   probeStep: GitStep,
 ): Promise<SpawnCapturedResult> {
-  const wd = action.working_directory as string;
   const forced = forcedGitConfig(hooksDir);
   const local = (args: string[]) => step([...forced, ...args], wd, localEnv);
   const localProbe = (args: string[]) => probeStep([...forced, ...args], wd, localEnv);

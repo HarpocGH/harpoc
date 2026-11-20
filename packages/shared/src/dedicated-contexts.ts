@@ -31,9 +31,13 @@
  * administrator who acknowledged one has knowingly granted arbitrary execution.
  * `git`, `ssh`, `sftp` and `docker` carried no such acknowledgement.
  *
- * Matching is by normalized basename against the *resolved, symlink-followed*
- * path the allowlist check returns, so a symlink to `git` under another name is
- * still refused. A renamed *copy* of the binary evades basename matching by
+ * Matching is by normalized basename against the path the command was found
+ * at, before links are followed, the *resolved, symlink-followed* path the
+ * allowlist check returns, and the found path of every allowlist entry that
+ * resolves to that same file. A symlink to `git` under another name is still
+ * refused, and so is a `docker` that is a link to a multiplexer binary such as
+ * `snap`; where the allowlist names such a link, whatever resolves to its
+ * target is too. A renamed *copy* of the binary evades basename matching by
  * construction — as with the interpreter gate, this targets the mandatory
  * allowlist entry an ordinary Git/SSH/SFTP/docker-registry configuration
  * produces, not an administrator adversarially planting a renamed binary
@@ -54,9 +58,9 @@ export const DEDICATED_CONTEXT_BINARIES: ReadonlyMap<string, DedicatedContext> =
 ]);
 
 /**
- * The dedicated context a resolved binary path belongs to, or null when the
- * binary has none and the process context may run it.
+ * The dedicated context of the binary a path names — a path as found or as
+ * resolved — or null when that name has none.
  */
-export function dedicatedContextForBinary(resolvedPath: string): DedicatedContext | null {
-  return DEDICATED_CONTEXT_BINARIES.get(normalizeBinaryBasename(resolvedPath)) ?? null;
+export function dedicatedContextForBinary(binaryPath: string): DedicatedContext | null {
+  return DEDICATED_CONTEXT_BINARIES.get(normalizeBinaryBasename(binaryPath)) ?? null;
 }

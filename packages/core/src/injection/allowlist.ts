@@ -194,6 +194,18 @@ function normalizeForCompare(p: string): string {
  * absolute path.
  */
 export function resolveExecutable(command: string, pathDirs: string[]): string | null {
+  return resolveExecutablePaths(command, pathDirs)?.resolved ?? null;
+}
+
+/**
+ * The resolution of `resolveExecutable`, answering both the path the probe
+ * found, before links are followed, and the resolved path; null where
+ * `resolveExecutable` answers null.
+ */
+export function resolveExecutablePaths(
+  command: string,
+  pathDirs: string[],
+): { found: string; resolved: string } | null {
   const candidates: string[] = [];
   if (isAbsolute(command)) {
     candidates.push(command);
@@ -215,7 +227,7 @@ export function resolveExecutable(command: string, pathDirs: string[]): string |
             resolved = resolve(full);
           }
           if (!isWindowsExecutable(resolved)) continue;
-          return resolved;
+          return { found: full, resolved };
         }
       } catch {
         // not here — keep probing
@@ -240,24 +252,43 @@ export function resolveAndMatchCommand(
   allowlist: string[],
   pathDirs: string[],
 ): string {
+  return resolveAndMatchCommandPaths(command, allowlist, pathDirs).resolved;
+}
+
+/**
+ * The check of `resolveAndMatchCommand`, from one resolution of the command and
+ * of each entry: the command's path as found, before links are followed, its
+ * resolved path, and the found path of every entry that resolves to the same
+ * file, in the allowlist's order.
+ *
+ * @throws VaultError COMMAND_NOT_ALLOWED where `resolveAndMatchCommand` throws it.
+ */
+export function resolveAndMatchCommandPaths(
+  command: string,
+  allowlist: string[],
+  pathDirs: string[],
+): { found: string; resolved: string; matchedEntries: string[] } {
   if (allowlist.length === 0) {
     throw VaultError.commandNotAllowed(command);
   }
 
-  const resolvedRequest = resolveExecutable(command, pathDirs);
-  if (!resolvedRequest) {
+  const request = resolveExecutablePaths(command, pathDirs);
+  if (!request) {
     throw VaultError.commandNotAllowed(command);
   }
 
-  const allowed = new Set<string>();
+  const target = normalizeForCompare(request.resolved);
+  const matchedEntries: string[] = [];
   for (const entry of allowlist) {
-    const resolvedEntry = resolveExecutable(entry, pathDirs);
-    if (resolvedEntry) allowed.add(normalizeForCompare(resolvedEntry));
+    const resolvedEntry = resolveExecutablePaths(entry, pathDirs);
+    if (resolvedEntry && normalizeForCompare(resolvedEntry.resolved) === target) {
+      matchedEntries.push(resolvedEntry.found);
+    }
   }
 
-  if (!allowed.has(normalizeForCompare(resolvedRequest))) {
+  if (matchedEntries.length === 0) {
     throw VaultError.commandNotAllowed(command);
   }
 
-  return resolvedRequest;
+  return { found: request.found, resolved: request.resolved, matchedEntries };
 }

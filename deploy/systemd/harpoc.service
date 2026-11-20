@@ -35,10 +35,10 @@ LoadCredentialEncrypted=harpoc-unlock:/etc/credstore.encrypted/harpoc-unlock.cre
 # The memory session: the keys stay in this process and no session file is written or
 # read, so an administrator's own unlock or lock as harpoc leaves the daemon serving;
 # systemctl stop (SIGTERM) or POST /api/v1/vault/lock with an admin token locks it.
-ExecStart=/usr/local/bin/harpoc --vault-dir /var/lib/harpoc server start --rest --session memory --unlock-credential harpoc-unlock --runtime-dir /run/harpoc
+ExecStart=/usr/local/bin/harpoc --vault-dir /var/lib/harpoc server start --rest --session memory --unlock-credential harpoc-unlock --runtime-dir /run/harpoc --backup-dir /var/lib/harpoc/backups --backup-interval 1440
 # /run/harpoc is /etc/tmpfiles.d/harpoc.conf's, never RuntimeDirectory='s: systemd
 # would remove it, consumer directories included, whenever the unit stops.
-StateDirectory=harpoc
+StateDirectory=harpoc harpoc/backups
 StateDirectoryMode=0700
 ReadWritePaths=/run/harpoc
 Restart=on-failure

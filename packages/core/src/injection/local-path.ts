@@ -4,6 +4,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse,
   posix,
   relative,
   resolve,
@@ -11,12 +12,55 @@ import {
   win32,
 } from "node:path";
 import { VaultError } from "@harpoc/shared";
-import { namesDevice, namesNetworkShare } from "./smtp-injector.js";
+import { isHeldPath } from "../session/path-trust.js";
 
 const GLOB_CHARACTERS = /[*?[]/;
 const GLOB_CHARACTERS_AND_ESCAPE = /[*?[\\]/;
 const WIN32_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³]|CONIN\$|CONOUT\$)$/i;
 const NOT_WRITTEN_AS_STORED = /[\uFFFD\p{Cs}]/u;
+const POSIX_DEVICE_ROOTS = ["/dev", "/proc", "/sys"];
+
+/** The paths a daemon knows beside the vault's own files: under the floor whatever a policy lists. */
+export interface DaemonPaths {
+  protectedDirs: readonly string[];
+  protectedFiles: readonly string[];
+}
+
+/**
+ * Why a local path is refused: `not_absolute`, `device`, `network_share`,
+ * `glob` and `win32_name` before any file-system call; `protected` inside the
+ * vault directory or a declared path, a path that does not resolve judged
+ * through its nearest ancestor that resolves; `not_allowed` any other path that
+ * does not resolve, a resolved name that is not handed on, one in no listed
+ * directory or one not held; `is_directory` a write onto an existing directory
+ * inside a listed directory.
+ */
+export type LocalPathRefusal =
+  | "not_absolute"
+  | "device"
+  | "network_share"
+  | "glob"
+  | "win32_name"
+  | "protected"
+  | "not_allowed"
+  | "is_directory";
+
+export interface LocalPathInput {
+  localPath: unknown;
+  access: "read" | "write";
+  allowedDirs: readonly string[];
+  vaultFiles: readonly string[];
+  daemon?: DaemonPaths;
+  refuseGlob: boolean;
+  platform?: NodeJS.Platform;
+  fs?: Partial<FileSystem>;
+}
+
+interface FileSystem {
+  realpath: (path: string) => Promise<string>;
+  lstat: (path: string) => Promise<unknown>;
+  stat: (path: string) => Promise<{ isDirectory(): boolean }>;
+}
 
 interface ResolvedTarget {
   resolved: string;
@@ -26,6 +70,28 @@ interface ResolvedTarget {
 export function isWithin(dir: string, target: string): boolean {
   const rel = relative(dir, target);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Whether an attachment path names a device rather than a file: on win32 the
+ * `\\.\` and `\\?\` namespaces in either slash form (`\\?\UNC\` is a network
+ * share); elsewhere anything under `/dev`, `/proc` or `/sys`.
+ */
+export function namesDevice(path: string, platform: NodeJS.Platform): boolean {
+  if (platform === "win32") {
+    const normalized = win32.normalize(path).toUpperCase();
+    if (normalized.startsWith("\\\\?\\UNC\\")) return false;
+    return normalized.startsWith("\\\\.\\") || normalized.startsWith("\\\\?\\");
+  }
+  const normalized = posix.normalize(path);
+  return POSIX_DEVICE_ROOTS.some(
+    (root) => normalized === root || normalized.startsWith(`${root}/`),
+  );
+}
+
+/** Whether an attachment path names a win32 network share (`\\server\share`, `//server/share`, `\\?\UNC\`). */
+export function namesNetworkShare(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" && win32.normalize(path).startsWith("\\\\");
 }
 
 /**
@@ -68,7 +134,7 @@ function namesReservedDevice(path: string, platform: NodeJS.Platform): boolean {
   );
 }
 
-function holdsNameWin32ReadsDifferently(path: string, platform: NodeJS.Platform): boolean {
+export function holdsNameWin32ReadsDifferently(path: string, platform: NodeJS.Platform): boolean {
   return (
     platform === "win32" &&
     win32Names(path).some((name) => /[. ]$/.test(name) || name.includes(":"))
@@ -80,32 +146,26 @@ function holdsNameWin32ReadsDifferently(path: string, platform: NodeJS.Platform)
  * an unpaired surrogate is written to the batch file as U+FFFD: either way
  * `sftp` would be handed another name than the one judged.
  */
-function holdsNameNotWrittenAsStored(path: string): boolean {
+export function holdsNameNotWrittenAsStored(path: string): boolean {
   return NOT_WRITTEN_AS_STORED.test(path);
 }
 
-function lexicalRefusal(path: unknown, platform: NodeJS.Platform): VaultError | null {
-  if (typeof path !== "string" || !isAbsoluteFor(path, platform)) {
-    return VaultError.invalidInput("sftp local path must be absolute");
-  }
-  if (namesDevice(path, platform) || namesReservedDevice(path, platform)) {
-    return VaultError.invalidInput("sftp local path names a device");
-  }
-  if (namesNetworkShare(path, platform)) {
-    return VaultError.invalidInput("sftp local path names a network share");
-  }
-  if (holdsGlobCharacter(path, platform)) {
-    return VaultError.invalidInput("sftp local path must not contain glob characters");
-  }
-  if (holdsNameWin32ReadsDifferently(path, platform)) {
-    return VaultError.invalidInput("sftp local path holds a name Windows reads differently");
-  }
+function lexicalRefusal(
+  path: unknown,
+  platform: NodeJS.Platform,
+  refuseGlob: boolean,
+): LocalPathRefusal | null {
+  if (typeof path !== "string" || !isAbsoluteFor(path, platform)) return "not_absolute";
+  if (namesDevice(path, platform) || namesReservedDevice(path, platform)) return "device";
+  if (namesNetworkShare(path, platform)) return "network_share";
+  if (refuseGlob && holdsGlobCharacter(path, platform)) return "glob";
+  if (holdsNameWin32ReadsDifferently(path, platform)) return "win32_name";
   return null;
 }
 
-async function realpathOrNull(path: string): Promise<string | null> {
+async function realpathOrNull(path: string, fs: FileSystem): Promise<string | null> {
   try {
-    return await realpath(path);
+    return await fs.realpath(path);
   } catch {
     return null;
   }
@@ -115,8 +175,8 @@ function errnoCode(err: unknown): unknown {
   return (err as NodeJS.ErrnoException | null)?.code;
 }
 
-async function resolveUploadSource(path: string): Promise<ResolvedTarget | null> {
-  const resolved = await realpathOrNull(path);
+async function resolveReadSource(path: string, fs: FileSystem): Promise<ResolvedTarget | null> {
+  const resolved = await realpathOrNull(path, fs);
   return resolved === null ? null : { resolved, existing: true };
 }
 
@@ -124,100 +184,262 @@ async function resolveUploadSource(path: string): Promise<ResolvedTarget | null>
  * An entry that exists but does not resolve (a dangling or looping link) is
  * refused: `sftp` would write through it.
  */
-async function resolveDownloadTarget(path: string): Promise<ResolvedTarget | null> {
-  const existing = await realpathOrNull(path);
+async function resolveWriteTarget(path: string, fs: FileSystem): Promise<ResolvedTarget | null> {
+  const existing = await realpathOrNull(path, fs);
   if (existing !== null) return { resolved: existing, existing: true };
   try {
-    await lstat(path);
+    await fs.lstat(path);
     return null;
   } catch (err) {
     if (errnoCode(err) !== "ENOENT") return null;
   }
-  const parent = await realpathOrNull(dirname(path));
+  const parent = await realpathOrNull(dirname(path), fs);
   return parent === null ? null : { resolved: join(parent, basename(path)), existing: false };
 }
 
-async function resolvedVaultDirs(vaultFiles: readonly string[]): Promise<string[] | null> {
-  const resolved: string[] = [];
-  for (const dir of new Set(vaultFiles.map((file) => dirname(resolve(file))))) {
+/**
+ * The path resolved; where it does not resolve, its nearest ancestor that
+ * does, resolved and joined with the rest. `missing` climbs only past a step
+ * that does not exist: null where a step cannot be read, as spelled where no
+ * ancestor exists. `any` climbs past every error: null where no ancestor
+ * resolves.
+ */
+async function nearestResolvedPath(
+  path: string,
+  realpathOf: FileSystem["realpath"],
+  climb: "missing" | "any",
+): Promise<string | null> {
+  const missing: string[] = [];
+  for (let current = path; ; current = dirname(current)) {
     try {
-      resolved.push(await realpath(dir));
+      const real = await realpathOf(current);
+      return missing.length === 0 ? real : join(real, ...missing);
     } catch (err) {
-      if (errnoCode(err) !== "ENOENT") return null;
-      resolved.push(dir);
+      if (climb === "missing" && errnoCode(err) !== "ENOENT") return null;
+    }
+    if (dirname(current) === current) return climb === "missing" ? path : null;
+    missing.unshift(basename(current));
+  }
+}
+
+function saysNotThere(err: unknown): boolean {
+  const code = errnoCode(err);
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * A directory that may not exist yet, resolved as the system resolves the
+ * absolute spelling it is handed: links followed, every `..` up to the nearest
+ * step that resolves climbing from where the path really is, the steps behind
+ * that one joined on. A step is climbed past only where the system says it is
+ * not there. Null where the spelling names no one directory: no step resolves;
+ * a step fails to resolve for another reason — it exists all the same, a link
+ * that leads nowhere, through which git writes a bare clone, or the system
+ * refuses to read it, as it refuses a spelling at its length limit, link and
+ * all —; or a `..` stands among the steps behind, with no directory to climb
+ * from.
+ */
+export async function resolveSpelledDirectory(
+  path: string,
+  fs: Pick<FileSystem, "realpath" | "lstat"> = { realpath, lstat },
+): Promise<string | null> {
+  const { root } = parse(path);
+  if (root === "") return null;
+  const steps = path
+    .slice(root.length)
+    .split(sep)
+    .filter((step) => step !== "");
+  for (let held = steps.length; held >= 0; held--) {
+    const prefix = root + steps.slice(0, held).join(sep);
+    try {
+      const real = await fs.realpath(prefix);
+      const rest = steps.slice(held);
+      return rest.includes("..") ? null : join(real, ...rest);
+    } catch (err) {
+      if (!saysNotThere(err)) return null;
+    }
+    try {
+      await fs.lstat(prefix);
+      return null;
+    } catch (err) {
+      if (!saysNotThere(err)) return null;
     }
   }
+  return null;
+}
+
+/** Each path through `nearestResolvedPath` past missing steps; null where one cannot be read. */
+async function resolvedFloorPaths(
+  paths: readonly string[],
+  realpathOf: FileSystem["realpath"],
+): Promise<string[] | null> {
+  const resolved: string[] = [];
+  for (const path of paths) {
+    const real = await nearestResolvedPath(path, realpathOf, "missing");
+    if (real === null) return null;
+    resolved.push(real);
+  }
   return resolved;
+}
+
+async function isUnderFloor(
+  resolved: string,
+  vaultFiles: readonly string[],
+  daemon: DaemonPaths | undefined,
+  realpathOf: FileSystem["realpath"],
+): Promise<boolean> {
+  const dirs = await resolvedFloorPaths(
+    [
+      ...new Set(vaultFiles.map((file) => dirname(resolve(file)))),
+      ...(daemon?.protectedDirs ?? []).map((dir) => resolve(dir)),
+    ],
+    realpathOf,
+  );
+  const files = await resolvedFloorPaths(
+    (daemon?.protectedFiles ?? []).map((file) => resolve(file)),
+    realpathOf,
+  );
+  return (
+    dirs === null ||
+    files === null ||
+    dirs.some((dir) => isWithin(dir, resolved)) ||
+    files.some((file) => relative(file, resolved) === "")
+  );
+}
+
+/**
+ * Whether a resolved path is under the vault-directory floor: inside a
+ * directory of `vaultFiles` or of `daemon.protectedDirs`, or one of
+ * `daemon.protectedFiles`. A floor path that cannot be read holds every path.
+ */
+export async function isProtectedPath(
+  resolved: string,
+  vaultFiles: readonly string[],
+  daemon?: DaemonPaths,
+): Promise<boolean> {
+  return isUnderFloor(resolved, vaultFiles, daemon, realpath);
 }
 
 async function resolvedListedDirs(
   allowedDirs: readonly string[],
   platform: NodeJS.Platform,
+  refuseGlob: boolean,
+  fs: FileSystem,
 ): Promise<string[]> {
   const resolved = await Promise.all(
     allowedDirs.map((dir) =>
-      lexicalRefusal(dir, platform) === null ? realpathOrNull(dir) : Promise.resolve(null),
+      lexicalRefusal(dir, platform, refuseGlob) === null
+        ? realpathOrNull(dir, fs)
+        : Promise.resolve(null),
     ),
   );
   return resolved.filter((dir): dir is string => dir !== null);
 }
 
-async function isDirectory(path: string): Promise<boolean | null> {
+async function isDirectory(path: string, fs: FileSystem): Promise<boolean | null> {
   try {
-    return (await stat(path)).isDirectory();
+    return (await fs.stat(path)).isDirectory();
   } catch {
     return null;
   }
 }
 
 /**
- * Judges the local file of an sftp `upload` or `download` against the
- * directories the secret's policy lists and returns the resolved path the
- * batch command names. Past the lexical checks every refusal carries one code
- * and one message, so a refusal never tells whether a file exists; a download
- * onto a directory is told so only inside a listed directory.
+ * Judges a local file the vault reads or writes for an agent against the
+ * directories a policy lists, and answers the resolved path or the reason it
+ * is refused. With `daemon` the floor also covers its paths and every
+ * directory of the resolved path must be held (`isHeldPath`).
+ */
+export async function judgeLocalPath(
+  input: LocalPathInput,
+): Promise<{ resolved: string } | { refusal: LocalPathRefusal }> {
+  const platform = input.platform ?? process.platform;
+  const fs: FileSystem = {
+    realpath: input.fs?.realpath ?? realpath,
+    lstat: input.fs?.lstat ?? lstat,
+    stat: input.fs?.stat ?? stat,
+  };
+  const lexical = lexicalRefusal(input.localPath, platform, input.refuseGlob);
+  if (lexical !== null) return { refusal: lexical };
+  const localPath = input.localPath as string;
+
+  const target =
+    input.access === "read"
+      ? await resolveReadSource(localPath, fs)
+      : await resolveWriteTarget(localPath, fs);
+  if (target === null) {
+    const nearest = await nearestResolvedPath(localPath, fs.realpath, "any");
+    return nearest !== null &&
+      (await isUnderFloor(nearest, input.vaultFiles, input.daemon, fs.realpath))
+      ? { refusal: "protected" }
+      : { refusal: "not_allowed" };
+  }
+  const { resolved, existing } = target;
+
+  if (
+    namesDevice(resolved, platform) ||
+    namesReservedDevice(resolved, platform) ||
+    (input.refuseGlob && holdsGlobCharacter(resolved, platform)) ||
+    holdsNameWin32ReadsDifferently(resolved, platform) ||
+    holdsNameNotWrittenAsStored(resolved)
+  ) {
+    return { refusal: "not_allowed" };
+  }
+  if (await isUnderFloor(resolved, input.vaultFiles, input.daemon, fs.realpath)) {
+    return { refusal: "protected" };
+  }
+  const listedDirs = await resolvedListedDirs(input.allowedDirs, platform, input.refuseGlob, fs);
+  if (!listedDirs.some((dir) => relative(dir, resolved) !== "" && isWithin(dir, resolved))) {
+    return { refusal: "not_allowed" };
+  }
+
+  if (input.access === "write" && existing) {
+    const directory = await isDirectory(resolved, fs);
+    if (directory === null) return { refusal: "not_allowed" };
+    if (directory) return { refusal: "is_directory" };
+  }
+  if (input.daemon !== undefined && !(await isHeldPath(resolved))) {
+    return { refusal: "not_allowed" };
+  }
+  return { resolved };
+}
+
+const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
+  not_absolute: () => VaultError.invalidInput("sftp local path must be absolute"),
+  device: () => VaultError.invalidInput("sftp local path names a device"),
+  network_share: () => VaultError.invalidInput("sftp local path names a network share"),
+  glob: () => VaultError.invalidInput("sftp local path must not contain glob characters"),
+  win32_name: () =>
+    VaultError.invalidInput("sftp local path holds a name Windows reads differently"),
+  protected: () => VaultError.localPathNotAllowed(),
+  not_allowed: () => VaultError.localPathNotAllowed(),
+  is_directory: () => VaultError.invalidInput("sftp download path must name a file"),
+};
+
+/**
+ * Judges the local file of an sftp `upload` or `download` (`judgeLocalPath`)
+ * and returns the resolved path the batch command names. Past the lexical
+ * checks every refusal carries one code and one message, so a refusal never
+ * tells whether a file exists; a download onto a directory is told so only
+ * inside a listed directory.
  */
 export async function resolveSftpLocalPath(input: {
   localPath: unknown;
   operation: "upload" | "download";
   allowedDirs: readonly string[];
   vaultFiles: readonly string[];
+  daemon?: DaemonPaths;
   platform?: NodeJS.Platform;
 }): Promise<string> {
-  const platform = input.platform ?? process.platform;
-  const refusal = lexicalRefusal(input.localPath, platform);
-  if (refusal !== null) throw refusal;
-  const localPath = input.localPath as string;
-
-  const target =
-    input.operation === "upload"
-      ? await resolveUploadSource(localPath)
-      : await resolveDownloadTarget(localPath);
-  if (target === null) throw VaultError.localPathNotAllowed();
-  const { resolved, existing } = target;
-
-  if (
-    namesDevice(resolved, platform) ||
-    namesReservedDevice(resolved, platform) ||
-    holdsGlobCharacter(resolved, platform) ||
-    holdsNameWin32ReadsDifferently(resolved, platform) ||
-    holdsNameNotWrittenAsStored(resolved)
-  ) {
-    throw VaultError.localPathNotAllowed();
-  }
-  const vaultDirs = await resolvedVaultDirs(input.vaultFiles);
-  if (vaultDirs === null || vaultDirs.some((dir) => isWithin(dir, resolved))) {
-    throw VaultError.localPathNotAllowed();
-  }
-  const listedDirs = await resolvedListedDirs(input.allowedDirs, platform);
-  if (!listedDirs.some((dir) => relative(dir, resolved) !== "" && isWithin(dir, resolved))) {
-    throw VaultError.localPathNotAllowed();
-  }
-
-  if (input.operation === "download" && existing) {
-    const directory = await isDirectory(resolved);
-    if (directory === null) throw VaultError.localPathNotAllowed();
-    if (directory) throw VaultError.invalidInput("sftp download path must name a file");
-  }
-  return resolved;
+  const verdict = await judgeLocalPath({
+    localPath: input.localPath,
+    access: input.operation === "upload" ? "read" : "write",
+    allowedDirs: input.allowedDirs,
+    vaultFiles: input.vaultFiles,
+    daemon: input.daemon,
+    refuseGlob: true,
+    platform: input.platform,
+  });
+  if ("refusal" in verdict) throw SFTP_REFUSALS[verdict.refusal]();
+  return verdict.resolved;
 }

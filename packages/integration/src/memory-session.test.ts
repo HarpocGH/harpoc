@@ -255,6 +255,7 @@ describe("the memory session on the built CLI (server start --session memory, th
     ["--unlock-key-file", (): string[] => ["--unlock-key-file", keyPath]],
     ["--proxy", (): string[] => ["--proxy"]],
     ["--ssh-agent", (): string[] => ["--ssh-agent"]],
+    ["--backup-dir", (): string[] => ["--backup-dir", join(root, "backups")]],
   ])(
     "server start %s without --session memory is refused SESSION_MODE_CONFLICT naming the flag, before the vault opens",
     async (flag, tail) => {

@@ -94,3 +94,67 @@ describe("RefusalBudget — a fixed window from a principal's first charge (B1)"
     expect(entry.RefusalBudget).toBe(RefusalBudget);
   });
 });
+
+describe("RefusalBudget — the refused authorities a window remembers", () => {
+  const EVIL = "evil.example:443";
+
+  it("an authority is not refused before it is remembered", () => {
+    const subject = budget();
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+    subject.charge(KEY);
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+  });
+
+  it("a remembered authority is refused, another port of its host is not", () => {
+    const subject = budget();
+    subject.charge(KEY);
+    subject.remember(KEY, EVIL);
+    expect(subject.refused(KEY, EVIL)).toBe(true);
+    expect(subject.refused(KEY, "evil.example:8443")).toBe(false);
+  });
+
+  it("a remembered authority is forgotten when the window ends", () => {
+    const subject = budget();
+    subject.charge(KEY);
+    subject.remember(KEY, EVIL);
+    clock = 59_999;
+    expect(subject.refused(KEY, EVIL)).toBe(true);
+    clock = 60_000;
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+    subject.charge(KEY);
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+  });
+
+  it("remember without a live window keeps nothing", () => {
+    const subject = budget();
+    subject.remember(KEY, EVIL);
+    subject.charge(KEY);
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+
+    clock = 60_000;
+    subject.remember(KEY, EVIL);
+    subject.charge(KEY);
+    expect(subject.refused(KEY, EVIL)).toBe(false);
+  });
+
+  it("another principal's authorities are its own", () => {
+    const subject = budget();
+    subject.charge(KEY);
+    subject.charge("agent:b");
+    subject.remember(KEY, EVIL);
+    expect([subject.refused(KEY, EVIL), subject.refused("agent:b", EVIL)]).toEqual([true, false]);
+  });
+
+  it("a window never holds more authorities than its limit", () => {
+    const subject = budget();
+    subject.charge(KEY);
+    const authorities = ["a.example:443", "b.example:443", "c.example:443", "d.example:443"];
+    for (const authority of authorities) subject.remember(KEY, authority);
+    expect(authorities.map((authority) => subject.refused(KEY, authority))).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+  });
+});

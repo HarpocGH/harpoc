@@ -263,7 +263,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
           strict_tree_exit: false,
           proxy: false,
           ssh_agent_socket: false,
-          sftp_local_dirs: [],
+          local_dirs: [],
         }),
       });
       expect(res.status).toBe(403);

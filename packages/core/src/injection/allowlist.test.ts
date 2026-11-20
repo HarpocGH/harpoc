@@ -10,7 +10,9 @@ import {
   matchesHostPortAllowlist,
   matchesUrlAllowlist,
   resolveAndMatchCommand,
+  resolveAndMatchCommandPaths,
   resolveExecutable,
+  resolveExecutablePaths,
 } from "./allowlist.js";
 
 // ---------------------------------------------------------------------------
@@ -191,6 +193,53 @@ describe("resolveExecutable", () => {
   });
 });
 
+describe("resolveExecutablePaths", () => {
+  it("answers an absolute path as found and its realpath as resolved", () => {
+    expect(resolveExecutablePaths(process.execPath, [])).toEqual({
+      found: process.execPath,
+      resolved: NODE,
+    });
+  });
+
+  it("answers a bare name's PATH hit as found", () => {
+    expect(resolveExecutablePaths(NODE_BASE, [NODE_DIR])).toEqual({
+      found: join(NODE_DIR, NODE_BASE),
+      resolved: NODE,
+    });
+  });
+
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32")(
+    "answers the PATH hit as found and the link's target as resolved",
+    () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-found-")));
+      try {
+        const multi = join(dir, "multi");
+        const link = join(dir, "docker");
+        writeFileSync(multi, "");
+        symlinkSync(multi, link);
+        expect(resolveExecutablePaths("docker", [dir])).toEqual({ found: link, resolved: multi });
+        expect(resolveExecutablePaths(link, [])).toEqual({ found: link, resolved: multi });
+        expect(resolveExecutable("docker", [dir])).toBe(multi);
+      } finally {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+  );
+
+  it.each([
+    ["an absolute path", process.execPath, [] as string[], NODE],
+    ["a bare name on the PATH", NODE_BASE, [NODE_DIR], NODE],
+    ["a bare name on no PATH", NODE_BASE, [] as string[], null],
+    ["an unknown command", "definitely-not-a-real-binary-xyz", controlledPathDirs(), null],
+    ["a relative path with a slash", "./node", [NODE_DIR], null],
+    ["a relative path with a backslash", ".\\node", [NODE_DIR], null],
+  ])("answers null exactly where resolveExecutable does: %s", (_label, command, dirs, expected) => {
+    expect(resolveExecutablePaths(command, dirs)?.resolved ?? null).toBe(expected);
+    expect(resolveExecutable(command, dirs)).toBe(expected);
+  });
+});
+
 describe("resolveAndMatchCommand", () => {
   it("returns the resolved path when the command is allowlisted (absolute)", () => {
     expect(resolveAndMatchCommand(process.execPath, [process.execPath], [])).toBe(NODE);
@@ -222,6 +271,70 @@ describe("resolveAndMatchCommand", () => {
       () => resolveAndMatchCommand("definitely-not-real-xyz", ["definitely-not-real-xyz"], []),
       ErrorCode.COMMAND_NOT_ALLOWED,
     );
+  });
+});
+
+describe("resolveAndMatchCommandPaths", () => {
+  it("answers the command's two paths and the found path of each entry that resolves to its file, in the allowlist's order", () => {
+    const allowlist = [process.execPath, "definitely-not-a-real-binary-xyz", NODE_BASE];
+    expect(resolveAndMatchCommandPaths(NODE_BASE, allowlist, [NODE_DIR])).toEqual({
+      found: join(NODE_DIR, NODE_BASE),
+      resolved: NODE,
+      matchedEntries: [process.execPath, join(NODE_DIR, NODE_BASE)],
+    });
+    expect(resolveAndMatchCommand(NODE_BASE, allowlist, [NODE_DIR])).toBe(NODE);
+  });
+
+  // Skips on win32: creating a symlink needs Developer Mode or elevation there.
+  it.skipIf(process.platform === "win32")(
+    "answers the links two entries name, in the allowlist's order, and no entry that resolves elsewhere",
+    () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-matched-")));
+      try {
+        const multi = join(dir, "multi");
+        const tool = join(dir, "tool");
+        const docker = join(dir, "docker");
+        const other = join(dir, "other");
+        writeFileSync(multi, "");
+        writeFileSync(tool, "");
+        symlinkSync(multi, docker);
+        symlinkSync(multi, other);
+        expect(resolveAndMatchCommandPaths(multi, [other, tool, docker], [])).toEqual({
+          found: multi,
+          resolved: multi,
+          matchedEntries: [other, docker],
+        });
+        expect(resolveAndMatchCommandPaths("other", ["tool", "docker"], [dir])).toEqual({
+          found: other,
+          resolved: multi,
+          matchedEntries: [docker],
+        });
+        expect(resolveAndMatchCommand("other", ["tool", "docker"], [dir])).toBe(multi);
+      } finally {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+  );
+
+  it.each([
+    ["an empty allowlist", process.execPath, [] as string[], [] as string[]],
+    ["a command on no entry", process.execPath, ["some-other-binary"], controlledPathDirs()],
+    [
+      "an unresolvable command",
+      "definitely-not-real-xyz",
+      ["definitely-not-real-xyz"],
+      [] as string[],
+    ],
+  ])("refuses as resolveAndMatchCommand does: %s", async (_label, command, allowlist, dirs) => {
+    const viaPaths = await expectVaultError(
+      () => resolveAndMatchCommandPaths(command, allowlist, dirs),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
+    const direct = await expectVaultError(
+      () => resolveAndMatchCommand(command, allowlist, dirs),
+      ErrorCode.COMMAND_NOT_ALLOWED,
+    );
+    expect(viaPaths.message).toBe(direct.message);
   });
 });
 
@@ -266,6 +379,15 @@ describeWindows("Windows batch file exclusion", () => {
     expect(resolveExecutable(join(dir, "tool.cmd"), [])).toBeNull();
     expect(resolveExecutable(join(dir, "tool.bat"), [])).toBeNull();
     expect(resolveExecutable(join(dir, "UPPER.CMD"), [])).toBeNull();
+  });
+
+  it("finds the .exe beside batch siblings and finds no batch file", () => {
+    expect(resolveExecutablePaths("tool", [dir])).toEqual({
+      found: join(dir, "tool.exe"),
+      resolved: realpathSync(join(dir, "tool.exe")),
+    });
+    expect(resolveExecutablePaths("batchonly", [dir])).toBeNull();
+    expect(resolveExecutablePaths(join(dir, "tool.cmd"), [])).toBeNull();
   });
 
   it("denies a batch file at the command-allowlist choke point even when allowlisted", async () => {
@@ -328,6 +450,32 @@ describeWindows("Windows executable extensions", () => {
     const exe = realpathSync(join(dir, "docker.exe"));
     expect(resolveExecutable(shim, [])).toBe(exe);
     expect(resolveAndMatchCommand(shim, [shim], [])).toBe(exe);
+  });
+
+  it("finds the .exe it resolves, never the extensionless sibling the probe skipped", () => {
+    const exe = join(dir, "docker.exe");
+    expect(resolveExecutablePaths("docker", [dir])).toEqual({
+      found: exe,
+      resolved: realpathSync(exe),
+    });
+    expect(resolveExecutablePaths(join(dir, "docker"), [])).toEqual({
+      found: exe,
+      resolved: realpathSync(exe),
+    });
+    expect(resolveExecutablePaths("shimonly", [dir])).toBeNull();
+    expect(resolveExecutablePaths(join(dir, "shimonly"), [])).toBeNull();
+  });
+
+  it("matches an entry whatever its case and answers each matched entry as the probe found it", () => {
+    const exe = join(dir, "docker.exe");
+    const upper = join(dir, "DOCKER.EXE");
+    const allowlist = [upper, "shimonly", join(dir, "docker")];
+    expect(resolveAndMatchCommandPaths("docker", allowlist, [dir])).toEqual({
+      found: exe,
+      resolved: realpathSync(exe),
+      matchedEntries: [upper, exe],
+    });
+    expect(resolveAndMatchCommand("docker", allowlist, [dir])).toBe(realpathSync(exe));
   });
 
   it("accepts .exe and .com, whatever the extension's case", () => {

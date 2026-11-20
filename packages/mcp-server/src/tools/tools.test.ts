@@ -611,12 +611,21 @@ describe("MCP Tools", () => {
         );
       });
 
-      it("describes the git arm with its five operations and a fetch's refspecs (B9)", async () => {
+      it("describes the git arm with its five operations, a fetch's refspecs and the working directory a clone needs behind a daemon (B9)", async () => {
         const tool = (await listTools(server)).find((t) => t.name === "use_secret");
         const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
           { description?: string } | undefined;
         expect(action?.description).toContain(
-          "Git: {type:'git', operation:'clone'|'pull'|'push'|'fetch'|'ls-remote', repository, refspecs?, args?, working_directory?} (refspecs on a fetch only; ls-remote returns the remote's refs).",
+          "Git: {type:'git', operation:'clone'|'pull'|'push'|'fetch'|'ls-remote', repository, refspecs?, args?, working_directory?} (refspecs on a fetch only; a clone that a daemon serves needs working_directory; ls-remote returns the remote's refs).",
+        );
+      });
+
+      it("names the local directories among what is set out-of-band", async () => {
+        const tool = (await listTools(server)).find((t) => t.name === "use_secret");
+        const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
+          { description?: string } | undefined;
+        expect(action?.description).toContain(
+          "Target allowlists, local directories, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode, strict tree exit and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
         );
       });
     });

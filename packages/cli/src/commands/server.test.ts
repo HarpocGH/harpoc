@@ -11,7 +11,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { Command } from "commander";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Mock } from "vitest";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -36,12 +37,15 @@ const {
   mockUnlockKeySource,
   mockRotationScheduler,
   rotationSchedulerCtorCalls,
+  mockBackupScheduler,
+  backupSchedulerCtorCalls,
 } = vi.hoisted(() => ({
   mockEngine: {
     destroy: vi.fn().mockResolvedValue(undefined),
     createToken: vi.fn().mockReturnValue("mock-launch-jwt"),
     auditServerStop: vi.fn(),
     loadProxyCa: vi.fn().mockResolvedValue(null),
+    declareDaemon: vi.fn(),
   },
   mockMcpServer: {
     connect: vi.fn().mockResolvedValue(undefined),
@@ -103,6 +107,11 @@ const {
     specs: unknown;
     options: Record<string, unknown>;
   }[],
+  mockBackupScheduler: {
+    start: vi.fn(),
+    stop: vi.fn().mockResolvedValue(undefined),
+  },
+  backupSchedulerCtorCalls: [] as { engine: unknown; options: Record<string, unknown> }[],
 }));
 
 // ── Module mocks ───────────────────────────────────────────────────
@@ -158,8 +167,9 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
-// server.ts reaches core only for AgentSocketServer, the unlock key's three readers and the token
-// rotation's scheduler (vault-loader.js, the engine's one other path, is mocked above).
+// server.ts reaches core only for AgentSocketServer, the unlock key's three readers, the token
+// rotation's scheduler, the backup directory's judgement and the backup scheduler (vault-loader.js,
+// the engine's one other path, is mocked above).
 vi.mock("@harpoc/core", () => ({
   AgentSocketServer: mockAgentSocketServer,
   readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
@@ -178,6 +188,13 @@ vi.mock("@harpoc/core", () => ({
     rotationSchedulerCtorCalls.push({ engine, specs, options: options as Record<string, unknown> });
     return mockRotationScheduler;
   }),
+  assertUnlinkedDir: vi.fn(),
+  assertOwnerOnlyDir: vi.fn(),
+  assertHeldDir: vi.fn(async (path: string) => path),
+  BackupScheduler: vi.fn().mockImplementation(function (engine: unknown, options: unknown) {
+    backupSchedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
+    return mockBackupScheduler;
+  }),
 }));
 
 // Spy wrapper around the real implementation: the assertion's argument and its
@@ -194,9 +211,16 @@ vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-import { listWindowsAclSync } from "@harpoc/core";
+import {
+  assertHeldDir,
+  assertOwnerOnlyDir,
+  assertUnlinkedDir,
+  BackupScheduler,
+  listWindowsAclSync,
+} from "@harpoc/core";
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
+import { icacls } from "../__fixtures__/icacls.js";
 import { assertRuntimeDir, consumerDirs, consumerSocketPaths } from "../utils/runtime-dir.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
@@ -233,6 +257,7 @@ describe("server start", () => {
     certManagerCtorCalls.length = 0;
     renewalSchedulerCtorCalls.length = 0;
     rotationSchedulerCtorCalls.length = 0;
+    backupSchedulerCtorCalls.length = 0;
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
     priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
@@ -510,7 +535,7 @@ describe("server start", () => {
       await expect(run(["--mcp", "--token-file", value])).rejects.toThrow("process.exit");
       expect(spies.exitSpy).toHaveBeenCalledWith(1);
       expect(spies.errorSpy).toHaveBeenCalledWith(
-        "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+        "Error: [INVALID_INPUT] --token-file: a flag, not a path (give a path that starts with a dash as ./-name)",
       );
       expect(readLaunchTokenFile).not.toHaveBeenCalled();
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
@@ -525,13 +550,30 @@ describe("server start", () => {
     await expect(run(["--token-file", "--mcp"])).rejects.toThrow("process.exit");
     expect(spies.exitSpy).toHaveBeenCalledWith(1);
     expect(spies.errorSpy.mock.calls[0]).toEqual([
-      "Error: --token-file requires a path (give a path that starts with a dash as ./-name).",
+      "Error: [INVALID_INPUT] --token-file: a flag, not a path (give a path that starts with a dash as ./-name)",
     ]);
     expect(spies.errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("At least one of"));
     expect(readLaunchTokenFile).not.toHaveBeenCalled();
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
     expect(createStdioServerFactory).not.toHaveBeenCalled();
   });
+
+  it.each(["", "  "])(
+    "refuses an empty --token-file (%j) before the file is read or the vault opens",
+    async (value) => {
+      const { createStdioServerFactory, readLaunchTokenFile } = await import("@harpoc/mcp-server");
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(run(["--mcp", "--token-file", value])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["Error: [INVALID_INPUT] --token-file: empty path"],
+      ]);
+      expect(readLaunchTokenFile).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(createStdioServerFactory).not.toHaveBeenCalled();
+    },
+  );
 
   it("reads a dash-led --token-file written as ./-name", async () => {
     const { readLaunchTokenFile } = await import("@harpoc/mcp-server");
@@ -788,9 +830,11 @@ describe("server start", () => {
       onError(new VaultError(ErrorCode.URL_NOT_ALLOWED, "a message that names a value"), 403);
       onError(new VaultError(ErrorCode.INVALID_TOKEN, "Missing Proxy-Authorization header"), 407);
       onError(new VaultError(ErrorCode.INVALID_TOKEN, "Malformed Proxy-Authorization header"), 401);
+      onError(new VaultError(ErrorCode.RATE_LIMIT_EXCEEDED, "Proxy refusal budget exceeded"), 429);
       expect(spies.errorSpy.mock.calls).toEqual([
         ["[harpoc] egress proxy: URL_NOT_ALLOWED"],
         ["[harpoc] egress proxy: INVALID_TOKEN"],
+        ["[harpoc] egress proxy: RATE_LIMIT_EXCEEDED"],
       ]);
 
       const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
@@ -3276,6 +3320,7 @@ describe("server start", () => {
       { flag: "--unlock-key-file", argv: ["--rest", "--unlock-key-file", KEY_FILE] },
       { flag: "--proxy", argv: ["--proxy", "--runtime-dir", ""] },
       { flag: "--ssh-agent", argv: ["--ssh-agent"] },
+      { flag: "--backup-dir", argv: ["--rest", "--backup-dir", "/var/backups/harpoc"] },
     ])(
       "$flag in file mode (the default) is refused SESSION_MODE_CONFLICT naming it, nothing read or loaded",
       async ({ flag, argv }) => {
@@ -3294,6 +3339,7 @@ describe("server start", () => {
         expect(mockUnlockKeySource.readUnlockKeyFile).not.toHaveBeenCalled();
         expect(mockUnlockKeySource.readUnlockCredential.mock.calls.length).toBe(0);
         expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
         expect(loadUnlockedEngine).not.toHaveBeenCalled();
         expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
         expect(TokenRotationScheduler).not.toHaveBeenCalled();
@@ -3728,6 +3774,619 @@ describe("server start", () => {
         "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.",
       ]);
       expect(TokenRotationScheduler).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── --backup-dir (the scheduled copies) ────────────────────────
+
+  describe("--backup-dir", () => {
+    const FLAG_AS_PATH =
+      "Error: [INVALID_INPUT] --backup-dir: a flag, not a path (give a path that starts with a dash as ./-name)";
+    const AT_LEAST_ONE =
+      "Error: At least one of --mcp, --mcp-http, --rest, --oauth-refresh or --cert-renew is required.";
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-backup-dir-"));
+    });
+
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    it.each([
+      { argv: ["--backup-dir", "--rest"], line: FLAG_AS_PATH },
+      { argv: ["--rest", "--backup-dir=-x"], line: FLAG_AS_PATH },
+      {
+        argv: ["--rest", "--backup-dir", ""],
+        line: "Error: [INVALID_INPUT] --backup-dir: empty path",
+      },
+      {
+        argv: ["--rest", "--backup-dir", "  "],
+        line: "Error: [INVALID_INPUT] --backup-dir: empty path",
+      },
+    ])(
+      "refuses $argv first, before the transport check, the directory's judgement or the vault",
+      async ({ argv, line }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(argv)).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+        expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(BackupScheduler).not.toHaveBeenCalled();
+      },
+    );
+
+    const BOUNDS = [
+      {
+        flag: "--backup-interval",
+        value: "4",
+        line: 'Invalid backup interval "4". Must be 5-10080.',
+      },
+      {
+        flag: "--backup-interval",
+        value: "10081",
+        line: 'Invalid backup interval "10081". Must be 5-10080.',
+      },
+      {
+        flag: "--backup-interval",
+        value: "1e3",
+        line: 'Invalid backup interval "1e3". Must be 5-10080.',
+      },
+      { flag: "--backup-keep", value: "0", line: 'Invalid backup keep count "0". Must be 1-365.' },
+      {
+        flag: "--backup-keep",
+        value: "366",
+        line: 'Invalid backup keep count "366". Must be 1-365.',
+      },
+    ];
+
+    it.each(BOUNDS)(
+      "$flag $value beside --backup-dir is refused INVALID_INPUT naming the range, before the directory's judgement or the vault",
+      async ({ flag, value, line }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(
+          run(["--session", "memory", "--rest", "--backup-dir", dir, flag, value]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${line}`]]);
+        expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(BOUNDS)(
+      "$flag $value without --backup-dir is refused INVALID_INPUT: $flag requires --backup-dir",
+      async ({ flag, value }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(run(["--session", "memory", "--rest", flag, value])).rejects.toThrow(
+          "process.exit",
+        );
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [`Error: [INVALID_INPUT] ${flag} requires --backup-dir`],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a start with nothing but the backup flags is refused as a start without a service", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await expect(
+        run([
+          "--session",
+          "memory",
+          "--backup-dir",
+          dir,
+          "--backup-interval",
+          "60",
+          "--backup-keep",
+          "3",
+        ]),
+      ).rejects.toThrow("process.exit");
+      expect(spies.exitSpy).toHaveBeenCalledWith(1);
+      expect(spies.errorSpy.mock.calls[0]).toEqual([AT_LEAST_ONE]);
+      expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(BackupScheduler).not.toHaveBeenCalled();
+    });
+
+    it("the backup directory is judged before the vault opens: a refused directory leaves the loader uncalled", async () => {
+      const { loadUnlockedEngine, unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      const refusal = VaultError.invalidInput(
+        `--backup-dir: mode 0755 is not 0700 (group- or world-accessible): ${resolve(dir)}`,
+      );
+      vi.mocked(assertOwnerOnlyDir).mockImplementationOnce(() => {
+        throw refusal;
+      });
+
+      await expect(run(["--session", "memory", "--rest", "--backup-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${refusal.message}`]]);
+      expect(vi.mocked(assertOwnerOnlyDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      const [walked] = vi.mocked(assertHeldDir).mock.invocationCallOrder;
+      const [judged] = vi.mocked(assertOwnerOnlyDir).mock.invocationCallOrder;
+      expect(walked as number).toBeLessThan(judged as number);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(vi.mocked(unlockEngineWithKey).mock.calls.length).toBe(0);
+      expect(BackupScheduler).not.toHaveBeenCalled();
+    });
+
+    it("the directories above the backup directory are judged before it and before the vault opens: a refused chain leaves the loader uncalled", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const refusal = VaultError.invalidInput(
+        `--backup-dir: a directory on its path can be changed by another account: ${resolve(dir)}`,
+      );
+      vi.mocked(assertHeldDir).mockRejectedValueOnce(refusal);
+
+      await expect(run(["--session", "memory", "--rest", "--backup-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${refusal.message}`]]);
+      expect(vi.mocked(assertHeldDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      expect(vi.mocked(assertOwnerOnlyDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      const [walked] = vi.mocked(assertHeldDir).mock.invocationCallOrder;
+      const [judged] = vi.mocked(assertOwnerOnlyDir).mock.invocationCallOrder;
+      expect(walked as number).toBeLessThan(judged as number);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(BackupScheduler).not.toHaveBeenCalled();
+    });
+
+    it("a backup directory that is not closed, under directories that are not held, is refused with its own refusal", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const own = VaultError.invalidInput(
+        `--backup-dir: mode 0750 is not 0700 (group- or world-accessible): ${resolve(dir)}`,
+      );
+      vi.mocked(assertHeldDir).mockRejectedValueOnce(
+        VaultError.invalidInput(
+          `--backup-dir: a directory on its path can be changed by another account: ${resolve(dir)}`,
+        ),
+      );
+      vi.mocked(assertOwnerOnlyDir).mockImplementationOnce(() => {
+        throw own;
+      });
+
+      await expect(run(["--session", "memory", "--rest", "--backup-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${own.message}`]]);
+      expect(vi.mocked(assertOwnerOnlyDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(BackupScheduler).not.toHaveBeenCalled();
+    });
+
+    it("the backup directory is judged closed at the path its links lead to, once the directories above it are held", async () => {
+      const led = join(dir, "led");
+      vi.mocked(assertHeldDir).mockResolvedValueOnce(led);
+
+      await run(["--session", "memory", "--rest", "--backup-dir", dir]);
+
+      expect(vi.mocked(assertUnlinkedDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      expect(vi.mocked(assertHeldDir).mock.calls).toEqual([[resolve(dir), "--backup-dir"]]);
+      expect(vi.mocked(assertOwnerOnlyDir).mock.calls).toEqual([[led, "--backup-dir"]]);
+      const [shaped] = vi.mocked(assertUnlinkedDir).mock.invocationCallOrder;
+      const [walked] = vi.mocked(assertHeldDir).mock.invocationCallOrder;
+      const [judged] = vi.mocked(assertOwnerOnlyDir).mock.invocationCallOrder;
+      expect(shaped as number).toBeLessThan(walked as number);
+      expect(walked as number).toBeLessThan(judged as number);
+      expect(backupSchedulerCtorCalls[0]?.options["dir"]).toBe(resolve(dir));
+    });
+
+    it("a backup directory that is a link, or none, is refused before the directories above it are judged", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+      const refusal = VaultError.invalidInput(
+        `--backup-dir: the path is a symbolic link or junction, not a directory: ${resolve(dir)}`,
+      );
+      vi.mocked(assertUnlinkedDir).mockImplementationOnce(() => {
+        throw refusal;
+      });
+
+      await expect(run(["--session", "memory", "--rest", "--backup-dir", dir])).rejects.toThrow(
+        "process.exit",
+      );
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${refusal.message}`]]);
+      expect(assertHeldDir).not.toHaveBeenCalled();
+      expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(BackupScheduler).not.toHaveBeenCalled();
+    });
+
+    /** A closed directory under `open`, which another account can change (0777, or on win32 a delete grant for Users). */
+    async function closedUnderOpen(): Promise<string> {
+      const open = join(dir, "open");
+      mkdirSync(open);
+      if (REAL_PLATFORM === "win32") icacls(open, "/grant", "*S-1-5-32-545:(D)");
+      else chmodSync(open, 0o777);
+      const closed = join(open, "backups");
+      mkdirSync(closed, { mode: 0o700 });
+      // The real core loads its native modules for the platform it reads.
+      stubPlatform(REAL_PLATFORM);
+      const actual = await vi.importActual<typeof import("@harpoc/core")>("@harpoc/core");
+      vi.mocked(assertOwnerOnlyDir).mockImplementationOnce(actual.assertOwnerOnlyDir);
+      vi.mocked(assertHeldDir).mockImplementationOnce(actual.assertHeldDir);
+      return closed;
+    }
+
+    // POSIX modes; the win32 arm below grants a delete.
+    it.skipIf(REAL_PLATFORM === "win32")(
+      "a 0700 directory under a 0777 directory that is not sticky is refused before the vault opens (POSIX)",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        const closed = await closedUnderOpen();
+
+        await expect(
+          run(["--session", "memory", "--rest", "--backup-dir", closed]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --backup-dir: a directory on its path can be changed by another account: ${closed}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(BackupScheduler).not.toHaveBeenCalled();
+      },
+    );
+
+    // The win32 arm of the row above: Users may delete the directory above the closed one.
+    it.runIf(REAL_PLATFORM === "win32")(
+      "on win32 a closed directory under a directory another account can delete is refused before the vault opens",
+      async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        const closed = await closedUnderOpen();
+
+        await expect(
+          run(["--session", "memory", "--rest", "--backup-dir", closed]),
+        ).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [
+            `Error: [INVALID_INPUT] --backup-dir: a directory on its path can be changed by another account: ${closed}`,
+          ],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(BackupScheduler).not.toHaveBeenCalled();
+      },
+    );
+
+    it("the scheduler gets the directory, the interval in milliseconds and the keep count; it is built and started once the vault is open", async () => {
+      const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+      await run([
+        "--session",
+        "memory",
+        "--rest",
+        "--backup-dir",
+        dir,
+        "--backup-interval",
+        "60",
+        "--backup-keep",
+        "3",
+      ]);
+
+      expect(backupSchedulerCtorCalls).toEqual([
+        {
+          engine: mockEngine,
+          options: {
+            dir: resolve(dir),
+            intervalMs: 3_600_000,
+            keep: 3,
+            label: "--backup-dir",
+            onError: expect.any(Function),
+          },
+        },
+      ]);
+      expect(mockBackupScheduler.start).toHaveBeenCalledTimes(1);
+      const [judged] = vi.mocked(assertOwnerOnlyDir).mock.invocationCallOrder;
+      const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+      const [built] = vi.mocked(BackupScheduler).mock.invocationCallOrder;
+      const [started] = mockBackupScheduler.start.mock.invocationCallOrder;
+      expect(judged as number).toBeLessThan(loaded as number);
+      expect(loaded as number).toBeLessThan(built as number);
+      expect(built as number).toBeLessThan(started as number);
+      expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION]]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("the scheduler's defaults: one copy a day, seven kept", async () => {
+      await run(["--session", "memory", "--rest", "--backup-dir", dir]);
+
+      expect(backupSchedulerCtorCalls.map((call) => call.options)).toEqual([
+        {
+          dir: resolve(dir),
+          intervalMs: 86_400_000,
+          keep: 7,
+          label: "--backup-dir",
+          onError: expect.any(Function),
+        },
+      ]);
+      expect(mockBackupScheduler.start).toHaveBeenCalledTimes(1);
+    });
+
+    it("a relative --backup-dir is judged and scheduled as resolved against the working directory", async () => {
+      await run(["--session", "memory", "--rest", "--backup-dir", "harpoc-backups"]);
+
+      expect(vi.mocked(assertOwnerOnlyDir).mock.calls).toEqual([
+        [resolve("harpoc-backups"), "--backup-dir"],
+      ]);
+      expect(backupSchedulerCtorCalls[0]?.options["dir"]).toBe(resolve("harpoc-backups"));
+    });
+
+    it("without --backup-dir no directory is judged and no scheduler is built", async () => {
+      await run(["--session", "memory", "--rest"]);
+
+      expect(assertOwnerOnlyDir).not.toHaveBeenCalled();
+      expect(BackupScheduler).not.toHaveBeenCalled();
+      expect(mockBackupScheduler.start).not.toHaveBeenCalled();
+    });
+
+    it("the scheduler's error prints the code alone and nothing once the stop began", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      const needle = "needle-7c3e-not-for-stderr";
+
+      await run(["--session", "memory", "--rest", "--backup-dir", dir]);
+      const options = backupSchedulerCtorCalls[0]?.options as { onError: (err: unknown) => void };
+      spies.errorSpy.mockClear();
+      options.onError(new VaultError(ErrorCode.DATABASE_ERROR, `copy failed at ${needle}`));
+      options.onError(new Error(`ENOSPC: write '${needle}.tmp'`));
+      options.onError(needle);
+      expect(spies.stderr().includes(needle)).toBe(false);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        ["Warning: --backup-dir: DATABASE_ERROR"],
+        ["Warning: --backup-dir: INTERNAL_ERROR"],
+        ["Warning: --backup-dir: INTERNAL_ERROR"],
+      ]);
+
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      spies.errorSpy.mockClear();
+      options.onError(VaultError.vaultLocked());
+      expect(spies.errorSpy).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("stopAll stops the backup scheduler after the renewal scheduler and before a listener closes, and awaits its stop before any stop row or the engine's destroy", async () => {
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      let releaseStop: () => void = () => undefined;
+      mockBackupScheduler.stop.mockReturnValueOnce(
+        new Promise<void>((resolveStop) => {
+          releaseStop = resolveStop;
+        }),
+      );
+
+      await run(["--session", "memory", "--rest", "--cert-renew", "--backup-dir", dir]);
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(mockBackupScheduler.stop).toHaveBeenCalledTimes(1));
+      await new Promise<void>((resolveTick) => setImmediate(resolveTick));
+      expect(mockEngine.auditServerStop).not.toHaveBeenCalled();
+      expect(mockRestServer.close).not.toHaveBeenCalled();
+      expect(mockEngine.destroy).not.toHaveBeenCalled();
+
+      releaseStop();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      const renewalStop = mockRenewalScheduler.stop.mock.invocationCallOrder[0] as number;
+      const backupStop = mockBackupScheduler.stop.mock.invocationCallOrder[0] as number;
+      const restRow = mockEngine.auditServerStop.mock.invocationCallOrder[0] as number;
+      const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+      const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+      expect(renewalStop).toBeLessThan(backupStop);
+      expect(backupStop).toBeLessThan(restRow);
+      expect(restRow).toBeLessThan(restClose);
+      expect(restClose).toBeLessThan(destroy);
+
+      onSpy.mockRestore();
+    });
+
+    it("a stop that begins during the start builds no backup scheduler", async () => {
+      const { startServer } = await import("@harpoc/rest-api");
+      const onSpy = vi.spyOn(process, "on");
+      spies.exitSpy.mockImplementation(() => undefined as never);
+      let releaseListen: (server: typeof mockRestServer) => void = () => undefined;
+      (startServer as unknown as Mock).mockReturnValueOnce(
+        new Promise<typeof mockRestServer>((resolveListen) => {
+          releaseListen = resolveListen;
+        }),
+      );
+
+      const started = run(["--session", "memory", "--rest", "--backup-dir", dir]);
+      await vi.waitFor(() => expect(startServer).toHaveBeenCalledTimes(1));
+      const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+      (sigtermCall?.[1] as () => void)();
+      await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+      expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+      releaseListen(mockRestServer);
+      await started;
+
+      expect(BackupScheduler).not.toHaveBeenCalled();
+      expect(mockBackupScheduler.start).not.toHaveBeenCalled();
+
+      onSpy.mockRestore();
+    });
+
+    it("the --session help names --backup-dir among the flags that need the memory session", () => {
+      const program = new Command();
+      registerServerCommand(program);
+      const start = program.commands
+        .find((command) => command.name() === "server")
+        ?.commands.find((command) => command.name() === "start");
+      const session = start?.options.find((option) => option.long === "--session");
+      expect(session?.description).toContain(
+        "(required by --issue-token, --unlock-credential, --unlock-key-file, --unlock-key-dpapi, --proxy, --ssh-agent and --backup-dir)",
+      );
+    });
+  });
+
+  // ── The daemon's declaration (every start) ──────────────────────
+
+  describe("the daemon's declaration", () => {
+    const platform = process.platform;
+    const DAEMON = "S-1-5-21-1-2-3-1001";
+    const TRUSTED = [DAEMON, "S-1-5-18", "S-1-5-32-544"].map((sid) => ({
+      allow: true,
+      sid,
+      rights: 0x1f01ff,
+      inherited: true,
+      inheritance: 3,
+      propagation: 0,
+    }));
+    const key = new Uint8Array(32);
+    let dir: string;
+
+    /** The runtime and token directory listed as a mkdtemp directory on win32 — the trusted three alone; on a win32 host the row takes win32's judgement, since the POSIX ladder reads `process.geteuid`, which Windows lacks. */
+    function trustedThreeListing(): void {
+      if (platform === "win32") stubPlatform("win32");
+      vi.mocked(listWindowsAclSync).mockImplementation(() => ({
+        user: DAEMON,
+        owner: DAEMON,
+        account: null,
+        rules: TRUSTED,
+      }));
+    }
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harpoc-server-daemon-"));
+      mockUnlockKeySource.readUnlockKeyFile.mockResolvedValue(key);
+      mockUnlockKeySource.readUnlockCredential.mockResolvedValue(key);
+      mockUnlockKeySource.readUnlockKeyDpapi.mockResolvedValue(key);
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.mocked(listWindowsAclSync).mockReset();
+      mockUnlockKeySource.readUnlockKeyFile.mockReset();
+      mockUnlockKeySource.readUnlockCredential.mockReset();
+      mockUnlockKeySource.readUnlockKeyDpapi.mockReset();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    });
+
+    it.each([
+      {
+        label: "--rest",
+        argv: ["--rest"],
+        served: async (): Promise<number | undefined> =>
+          vi.mocked((await import("@harpoc/rest-api")).startServer).mock.invocationCallOrder[0],
+        stderr: [] as string[][],
+      },
+      {
+        label: "--mcp (standard input alone)",
+        argv: ["--mcp"],
+        served: async (): Promise<number | undefined> =>
+          vi.mocked((await import("@modelcontextprotocol/server/stdio")).serveStdio).mock
+            .invocationCallOrder[0],
+        stderr: [["[harpoc] MCP server running on stdio"]],
+      },
+    ])(
+      "every start declares the daemon: a file-mode $label start declares no path and the loader still gets the vault directory alone",
+      async ({ argv, served, stderr }) => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        vi.stubEnv("CREDENTIALS_DIRECTORY", join(dir, "credentials"));
+
+        await run(argv);
+
+        expect(mockEngine.declareDaemon.mock.calls).toEqual([
+          [{ protectedDirs: [], protectedFiles: [] }],
+        ]);
+        expect(vi.mocked(loadUnlockedEngine).mock.calls).toEqual([["/mock/.harpoc"]]);
+        const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+        const [declared] = mockEngine.declareDaemon.mock.invocationCallOrder;
+        expect(loaded as number).toBeLessThan(declared as number);
+        expect(declared as number).toBeLessThan((await served()) as number);
+        expect(spies.errorSpy.mock.calls).toEqual(stderr);
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a memory-mode start declares exactly the paths it was given: the runtime directory, the credentials directory, the backup directory, each token file and the launch token's file", async () => {
+      const { unlockEngineWithKey } = await import("../utils/vault-loader.js");
+      trustedThreeListing();
+      const credentials = join(dir, "credentials");
+      const backups = join(dir, "backups");
+      const launch = join(dir, "launch.jwt");
+      vi.stubEnv("CREDENTIALS_DIRECTORY", credentials);
+      const spec = (agent: string): string =>
+        `agent=${agent},file=${join(dir, `${agent}.jwt`)},scope=use,secrets=db-*`;
+
+      await run([
+        "--session",
+        "memory",
+        "--rest",
+        "--mcp",
+        "--token-file",
+        launch,
+        "--runtime-dir",
+        dir,
+        "--unlock-credential",
+        "harpoc-unlock",
+        "--backup-dir",
+        backups,
+        "--issue-token",
+        spec("alice"),
+        "--issue-token",
+        spec("bob"),
+      ]);
+
+      expect(mockEngine.declareDaemon.mock.calls).toEqual([
+        [
+          {
+            protectedDirs: [resolve(dir), resolve(credentials), resolve(backups)],
+            protectedFiles: [
+              resolve(join(dir, "alice.jwt")),
+              resolve(join(dir, "bob.jwt")),
+              resolve(launch),
+            ],
+          },
+        ],
+      ]);
+      const [unlocked] = vi.mocked(unlockEngineWithKey).mock.invocationCallOrder;
+      const [declared] = mockEngine.declareDaemon.mock.invocationCallOrder;
+      const [rotation] = mockRotationScheduler.start.mock.invocationCallOrder;
+      expect(unlocked as number).toBeLessThan(declared as number);
+      expect(declared as number).toBeLessThan(rotation as number);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("--unlock-credential without a CREDENTIALS_DIRECTORY in the environment declares no credentials directory", async () => {
+      vi.stubEnv("CREDENTIALS_DIRECTORY", undefined);
+
+      await run(["--session", "memory", "--rest", "--unlock-credential", "harpoc-unlock"]);
+
+      expect(mockEngine.declareDaemon.mock.calls).toEqual([
+        [{ protectedDirs: [], protectedFiles: [] }],
+      ]);
+    });
+
+    it("--unlock-key-file declares its file, resolved against the working directory", async () => {
+      await run(["--session", "memory", "--rest", "--unlock-key-file", "unlock.key"]);
+
+      expect(mockEngine.declareDaemon.mock.calls).toEqual([
+        [{ protectedDirs: [], protectedFiles: [resolve("unlock.key")] }],
+      ]);
+    });
+
+    it("--unlock-key-dpapi declares its file (the platform stubbed)", async () => {
+      stubPlatform("win32");
+      const sealed = join(dir, "unlock-key.dpapi");
+
+      await run(["--session", "memory", "--rest", "--unlock-key-dpapi", sealed]);
+
+      expect(mockEngine.declareDaemon.mock.calls).toEqual([
+        [{ protectedDirs: [], protectedFiles: [resolve(sealed)] }],
+      ]);
     });
   });
 

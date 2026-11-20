@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   expectAbsent,
@@ -280,6 +280,56 @@ describe("harpoc-mcp --url holds no engine (spawned binary under the resolve-hoo
       ["--import", tripwire],
     );
     expect(result.stderr).toContain(`${FORBIDDEN_MODULE_MARKER} @harpoc/core`);
+    expect(result.stderr).toContain("Error: Vault is locked.");
+    expect(result.code).toBe(1);
+  }, 30_000);
+});
+
+/**
+ * The listener's engine is a daemon's: `--http` declares it, with no path of its own, once the
+ * engine is built; on its standard input alone the server declares nothing. A preload wraps
+ * `declareDaemon` on the engine module the binary itself resolves (core's entry through
+ * mcp-server's own link, with links followed as Node's resolver follows them) and writes each call
+ * to fd 2; both starts then meet the empty directory's locked vault.
+ */
+describe("harpoc-mcp declares the daemon under --http alone (spawned binary)", () => {
+  const DECLARED = "DAEMON_DECLARED";
+  const coreEntry = pathToFileURL(
+    realpathSync(
+      resolve(dirname(MCP_ENTRY), "..", "node_modules", "@harpoc", "core", "dist", "index.js"),
+    ),
+  ).href;
+  const preload = `data:text/javascript,${encodeURIComponent(
+    'import { writeSync } from "node:fs";\n' +
+      `import { VaultEngine } from ${JSON.stringify(coreEntry)};\n` +
+      "const declare = VaultEngine.prototype.declareDaemon;\n" +
+      "VaultEngine.prototype.declareDaemon = function (paths) {\n" +
+      `  writeSync(2, "${DECLARED} " + JSON.stringify(paths) + "\\n");\n` +
+      "  return declare.call(this, paths);\n" +
+      "};\n",
+  )}`;
+
+  it("harpoc-mcp --http declares the daemon with no path, once, before the vault is found locked", async () => {
+    const result = await spawnMcp(
+      ["--vault-dir", vaultDir, "--http"],
+      childEnv({ HOME: vaultDir, USERPROFILE: vaultDir }),
+      vaultDir,
+      ["--import", preload],
+    );
+    expect(result.stderr).toContain(`${DECLARED} {"protectedDirs":[],"protectedFiles":[]}\n`);
+    expect(result.stderr.split(DECLARED).length - 1).toBe(1);
+    expect(result.stderr).toContain("Error: Vault is locked.");
+    expect(result.code).toBe(1);
+  }, 30_000);
+
+  it("harpoc-mcp on its standard input alone declares no daemon", async () => {
+    const result = await spawnMcp(
+      ["--vault-dir", vaultDir],
+      childEnv({ HOME: vaultDir, USERPROFILE: vaultDir }),
+      vaultDir,
+      ["--import", preload],
+    );
+    expect(result.stderr).not.toContain(DECLARED);
     expect(result.stderr).toContain("Error: Vault is locked.");
     expect(result.code).toBe(1);
   }, 30_000);

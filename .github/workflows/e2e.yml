@@ -226,7 +226,7 @@ jobs:
           $agentSid = [System.Security.Principal.NTAccount]::new($env:COMPUTERNAME, $agentUser).Translate([System.Security.Principal.SecurityIdentifier]).Value
           $trustedSids = @($vaultSid, 'S-1-5-18', 'S-1-5-32-544')
           $consumerDir = Join-Path $base "run\$agentUser"
-          foreach ($dir in $base, (Join-Path $base 'vault'), (Join-Path $base 'run'), $consumerDir) {
+          foreach ($dir in $base, (Join-Path $base 'vault'), (Join-Path $base 'backups'), (Join-Path $base 'run'), $consumerDir) {
             $listing = (& "$env:SystemRoot\System32\icacls.exe" $dir | Out-String)
             if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE on $dir" }
             Write-Output $listing
@@ -528,14 +528,13 @@ jobs:
             }
             Unregister-ScheduledTask -TaskName Harpoc -Confirm:$false -ErrorAction SilentlyContinue
             Invoke-Diagnostic 'the logon rights after the teardown' { Show-LogonRights }
-            $scratch = 'default.vault.db', 'default.vault.db-wal', 'default.vault.db-shm', 'session.json', 'unlock.key.dpapi'
+            $scratch = @('default.vault.db', 'default.vault.db-wal', 'default.vault.db-shm', 'session.json', 'unlock.key.dpapi' | ForEach-Object { Join-Path $vaultDir $_ }) + @(Get-ChildItem -LiteralPath (Join-Path $base 'backups') -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
             try {
-              Invoke-AsVaultAccount 'the scratch vault removal' (@('-e', "for (const file of process.argv.slice(1)) require('node:fs').rmSync(file, { force: true, maxRetries: 5, retryDelay: 100 })") + @($scratch | ForEach-Object { Join-Path $vaultDir $_ })) '' -Bare
+              Invoke-AsVaultAccount 'the scratch vault removal' (@('-e', "for (const file of process.argv.slice(1)) require('node:fs').rmSync(file, { force: true, maxRetries: 5, retryDelay: 100 })") + $scratch) '' -Bare
             } catch {
               Write-Output "the scratch vault removal as $vaultUser failed: $($_.Exception.Message)"
             }
-            foreach ($name in $scratch) {
-              $path = Join-Path $vaultDir $name
+            foreach ($path in $scratch) {
               for ($attempt = 1; Test-Path -LiteralPath $path; $attempt++) {
                 try {
                   Remove-Item -LiteralPath $path -Force

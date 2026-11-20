@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { tmpdir, userInfo } from "node:os";
@@ -9,14 +17,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { system32Path } from "../win32-paths.js";
 import { runKeystoreHelper } from "./keystore-helper.js";
 import {
+  TRUSTED_INSTALLER_SID,
   WINDOWS_PIPE_CONSUMER_RIGHTS,
   WINDOWS_READ_EXECUTE_RIGHTS,
+  foreignToVaultAccounts,
+  holdsOnlyVaultAccounts,
   listWindowsAcl,
+  listWindowsAclChain,
   listWindowsAclSync,
   parseWindowsAcl,
+  restrictWindowsAclToVaultAccounts,
   restrictWindowsPipeToAccount,
 } from "./owner-only.js";
-import type { WindowsAclListing } from "./owner-only.js";
+import type { WindowsAclEntry, WindowsAclListing } from "./owner-only.js";
+import { WIN32_TRUSTED_SIDS } from "./path-trust.js";
 
 vi.mock("./keystore-helper.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./keystore-helper.js")>();
@@ -408,5 +422,233 @@ describe("restrictWindowsPipeToAccount's read-back check (the host's output stub
     await expect(restrictWindowsPipeToAccount(PIPE, USERS_SID)).rejects.toThrow(
       "pipe access list: not as set",
     );
+  });
+});
+
+describe.runIf(process.platform === "win32")("listWindowsAclChain on win32", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-owner-only-")));
+    vi.mocked(runKeystoreHelper).mockClear();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("lists C:\\ and the temporary directory in one host run and in that order, C:\\ owned by SYSTEM, Administrators or TrustedInstaller", async () => {
+    const temp = realpathSync(tmpdir());
+    const chain = await listWindowsAclChain(["C:\\", temp]);
+    expect(runKeystoreHelper).toHaveBeenCalledTimes(1);
+    expect(chain).toHaveLength(2);
+    expect(chain[0]).toEqual(listWindowsAclSync("C:\\"));
+    expect(chain[1]).toEqual(listWindowsAclSync(temp));
+    expect(WIN32_TRUSTED_SIDS).toContain(chain[0]?.owner);
+  });
+
+  it("rejects, value-free, when a path does not exist", async () => {
+    await expect(listWindowsAclChain(["C:\\", join(dir, "missing")])).rejects.toThrow(
+      /^ACL listing failed$/,
+    );
+  });
+});
+
+describe("listWindowsAclChain's answer check (the host's output stubbed)", () => {
+  const ME = "S-1-5-21-1000-2000-3000-1001";
+  const PATHS = ["C:\\", "C:\\ProgramData"];
+  const ROOT = ["path 0", `user ${ME}`, `owner ${TRUSTED_INSTALLER_SID}`];
+  const PROGRAM_DATA = [
+    "path 1",
+    `user ${ME}`,
+    "owner S-1-5-18",
+    `rule 0 ${USERS_SID} 00000116 0 1 0`,
+  ];
+
+  beforeEach(() => {
+    vi.mocked(runKeystoreHelper).mockClear();
+  });
+
+  afterEach(() => {
+    vi.mocked(runKeystoreHelper).mockReset();
+  });
+
+  function answer(lines: string[]): void {
+    vi.mocked(runKeystoreHelper).mockResolvedValueOnce({
+      stdout: [...lines, ""].join("\r\n"),
+      stderr: "",
+      exitCode: 0,
+    });
+  }
+
+  it("hands every path as one base64 line in one host run, under the listing's timeout, and reads one listing per path in the order asked", async () => {
+    answer([...ROOT, ...PROGRAM_DATA]);
+    const chain = await listWindowsAclChain(PATHS);
+    expect(runKeystoreHelper).toHaveBeenCalledTimes(1);
+    const [, , stdin, options] = vi.mocked(runKeystoreHelper).mock.calls[0] ?? [];
+    expect(stdin).toBe(
+      `${PATHS.map((path) => Buffer.from(path, "utf8").toString("base64")).join("\n")}\n`,
+    );
+    expect(options?.timeoutMs).toBe(15_000);
+    expect(chain).toEqual([
+      { user: ME, owner: TRUSTED_INSTALLER_SID, rules: [] },
+      {
+        user: ME,
+        owner: "S-1-5-18",
+        rules: [
+          {
+            allow: true,
+            sid: USERS_SID,
+            rights: 0x116,
+            inherited: false,
+            inheritance: 1,
+            propagation: 0,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it.each([
+    ["fewer listings than paths", [...ROOT]],
+    [
+      "more listings than paths",
+      [...ROOT, ...PROGRAM_DATA, "path 2", `user ${ME}`, "owner S-1-5-18"],
+    ],
+    ["the listings out of order", [...PROGRAM_DATA, ...ROOT]],
+    ["a listing before its path line", [...ROOT.slice(1), "path 0", ...PROGRAM_DATA]],
+    ["a listing without its owner", [...ROOT.slice(0, 2), ...PROGRAM_DATA]],
+  ])("rejects %s — never a partial chain", async (_, lines) => {
+    answer(lines);
+    await expect(listWindowsAclChain(PATHS)).rejects.toThrow(
+      /^ACL listing: (unexpected|incomplete) output$/,
+    );
+  });
+
+  it("rejects value-free when the host run rejects: nothing of its message is passed on", async () => {
+    vi.mocked(runKeystoreHelper).mockRejectedValueOnce(
+      new Error("ACL listing failed (exit 1): Exception calling GetAccessControl"),
+    );
+    await expect(listWindowsAclChain(PATHS)).rejects.toThrow(/^ACL listing failed$/);
+  });
+});
+
+describe("foreignToVaultAccounts", () => {
+  const ME = "S-1-5-21-1000-2000-3000-1001";
+  const NEIGHBOUR = "S-1-5-21-1000-2000-3000-1002";
+
+  function entry(sid: string, allow = true, propagation = 0): WindowsAclEntry {
+    return { allow, sid, rights: 0x1200a9, inherited: false, inheritance: 3, propagation };
+  }
+
+  const VAULT_RULES = [entry(ME), entry("S-1-5-18"), entry("S-1-5-32-544")];
+
+  it("names nothing where this account, SYSTEM or Administrators own and they alone hold allow entries, a deny entry of another SID aside", () => {
+    for (const owner of [ME, "S-1-5-18", "S-1-5-32-544"]) {
+      expect(
+        foreignToVaultAccounts({
+          user: ME,
+          owner,
+          rules: [entry(NEIGHBOUR, false), ...VAULT_RULES],
+        }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("names another owner, before any entry", () => {
+    expect(
+      foreignToVaultAccounts({
+        user: ME,
+        owner: TRUSTED_INSTALLER_SID,
+        rules: [...VAULT_RULES, entry(USERS_SID)],
+      }),
+    ).toEqual({ owner: TRUSTED_INSTALLER_SID });
+  });
+
+  it("names the first allow entry of another SID, an inherit-only one included", () => {
+    const inheritOnly = entry(NEIGHBOUR, true, 2);
+    expect(
+      foreignToVaultAccounts({
+        user: ME,
+        owner: ME,
+        rules: [...VAULT_RULES, inheritOnly, entry(USERS_SID)],
+      }),
+    ).toEqual({ grant: inheritOnly });
+  });
+});
+
+describe("holdsOnlyVaultAccounts", () => {
+  const ME = "S-1-5-21-1000-2000-3000-1001";
+  const NEIGHBOUR = "S-1-5-21-1000-2000-3000-1002";
+
+  function entry(sid: string, allow = true, propagation = 0): WindowsAclEntry {
+    return { allow, sid, rights: 0x1f01ff, inherited: false, inheritance: 3, propagation };
+  }
+
+  const VAULT_RULES = [entry(ME), entry("S-1-5-18"), entry("S-1-5-32-544")];
+
+  it("holds this account, SYSTEM or Administrators as owner with no other allow entry; a deny entry is not judged", () => {
+    for (const owner of [ME, "S-1-5-18", "S-1-5-32-544"]) {
+      expect(holdsOnlyVaultAccounts({ user: ME, owner, rules: VAULT_RULES })).toBe(true);
+    }
+    expect(
+      holdsOnlyVaultAccounts({
+        user: ME,
+        owner: ME,
+        rules: [...VAULT_RULES, entry(NEIGHBOUR, false)],
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for another owner, TrustedInstaller included, and for another SID's allow entry, an inherit-only one included", () => {
+    for (const owner of [NEIGHBOUR, TRUSTED_INSTALLER_SID]) {
+      expect(holdsOnlyVaultAccounts({ user: ME, owner, rules: VAULT_RULES })).toBe(false);
+    }
+    for (const extra of [entry(USERS_SID), entry(USERS_SID, true, 2)]) {
+      expect(holdsOnlyVaultAccounts({ user: ME, owner: ME, rules: [...VAULT_RULES, extra] })).toBe(
+        false,
+      );
+    }
+  });
+});
+
+describe.runIf(process.platform === "win32")("restrictWindowsAclToVaultAccounts on win32", () => {
+  let dir: string;
+  let file: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-owner-only-")));
+    file = join(dir, "harpoc-20261119T120000Z.db.0123456789ab.tmp");
+    writeFileSync(file, "");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("leaves a fresh file allow entries for exactly this account, SYSTEM and Administrators, full control each, and holdsOnlyVaultAccounts is true", () => {
+    restrictWindowsAclToVaultAccounts(file);
+    const acl = listWindowsAclSync(file);
+    expect(acl.rules).toHaveLength(3);
+    expect(new Map(acl.rules.map((rule) => [rule.sid, rule]))).toEqual(
+      new Map(
+        [acl.user, "S-1-5-18", "S-1-5-32-544"].map((sid) => [
+          sid,
+          { allow: true, sid, rights: 0x1f01ff, inherited: false, inheritance: 0, propagation: 0 },
+        ]),
+      ),
+    );
+    expect(holdsOnlyVaultAccounts(acl)).toBe(true);
+  });
+
+  it("after icacls /grant Users:R, holdsOnlyVaultAccounts is false", () => {
+    restrictWindowsAclToVaultAccounts(file);
+    const res = spawnSync(system32Path("icacls.exe"), [file, "/grant", `*${USERS_SID}:R`], {
+      shell: false,
+      windowsHide: true,
+      timeout: 15_000,
+    });
+    expect(res.status).toBe(0);
+    expect(holdsOnlyVaultAccounts(listWindowsAclSync(file))).toBe(false);
   });
 });

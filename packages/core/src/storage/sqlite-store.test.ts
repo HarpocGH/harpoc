@@ -750,6 +750,7 @@ describe("audit_log visibility — failed rows without a secret_id (S6) and read
     AuditEventType.AGENT_DELETE,
     AuditEventType.VAULT_UNLOCK_KEY_ENROLL,
     AuditEventType.VAULT_UNLOCK_KEY_REVOKE,
+    AuditEventType.VAULT_BACKUP,
   ];
   const HIDDEN_FROM_SCOPED_READERS: AuditEventType[] = [AuditEventType.VAULT_READ];
   const BEYOND_SQL_CEILING = ["id-a", ...Array.from({ length: 40_000 }, (_, i) => `unseen-${i}`)];
@@ -788,10 +789,10 @@ describe("audit_log visibility — failed rows without a secret_id (S6) and read
       .map((event) => event.event_type)
       .sort();
 
-  it("self-check: the three lists classify all 39 audit event types exactly once", () => {
+  it("self-check: the three lists classify all 40 audit event types exactly once", () => {
     const classified = [...HIDDEN_WHEN_FAILED, ...VAULT_LEVEL, ...HIDDEN_FROM_SCOPED_READERS];
-    expect(classified).toHaveLength(39);
-    expect(new Set(classified).size).toBe(39);
+    expect(classified).toHaveLength(40);
+    expect(new Set(classified).size).toBe(40);
     expect([...classified].sort()).toEqual([...Object.values(AuditEventType)].sort());
   });
 
@@ -819,7 +820,7 @@ describe("audit_log visibility — failed rows without a secret_id (S6) and read
   it("control: a scoped read keeps every successful secret-less row of the two S6 lists", () => {
     for (const type of [...HIDDEN_WHEN_FAILED, ...VAULT_LEVEL]) insert(type, null, true);
     for (const visibleSecretIds of [["id-a"], [], BEYOND_SQL_CEILING]) {
-      expect(store.queryAuditLog({ visibleSecretIds })).toHaveLength(38);
+      expect(store.queryAuditLog({ visibleSecretIds })).toHaveLength(39);
     }
   });
 

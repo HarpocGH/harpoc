@@ -318,13 +318,13 @@ describe("secret routes", () => {
       const put = await app.request("/api/v1/secrets/test-key/injection-policy", {
         method: "PUT",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ ...FULL_POLICY, sftp_local_dirs: dirs }),
+        body: JSON.stringify({ ...FULL_POLICY, local_dirs: dirs }),
       });
       expect(put.status).toBe(200);
       const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
       expect(call.slice(0, 3)).toEqual([
         "secret://test-key",
-        { ...FULL_POLICY, sftp_local_dirs: dirs },
+        { ...FULL_POLICY, local_dirs: dirs },
         { acknowledge_interpreters: false },
       ]);
       engine.getInjectionPolicy.mockResolvedValueOnce(call[1]);
@@ -333,8 +333,8 @@ describe("secret routes", () => {
         headers: AUTH,
       });
       expect(get.status).toBe(200);
-      const body = (await get.json()) as { data: { sftp_local_dirs: string[] } };
-      expect(body.data.sftp_local_dirs).toEqual(dirs);
+      const body = (await get.json()) as { data: { local_dirs: string[] } };
+      expect(body.data.local_dirs).toEqual(dirs);
     });
 
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {

@@ -892,6 +892,13 @@ export class VaultError extends Error {
     );
   }
 
+  static localPathProtected(): VaultError {
+    return new VaultError(
+      ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      "git working directory is inside a directory the vault protects",
+    );
+  }
+
   static dockerOperationFailed(exitCode: number): VaultError {
     return new VaultError(
       ErrorCode.DOCKER_OPERATION_FAILED,

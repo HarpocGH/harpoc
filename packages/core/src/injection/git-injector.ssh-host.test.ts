@@ -105,7 +105,7 @@ function policy(hosts: string[]): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
-    sftp_local_dirs: [],
+    local_dirs: [],
   };
 }
 

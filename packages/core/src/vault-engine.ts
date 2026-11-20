@@ -5,6 +5,17 @@ import {
   timingSafeEqual,
   X509Certificate,
 } from "node:crypto";
+import {
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  realpathSync,
+  unlinkSync,
+} from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
   AccessPolicy,
   Agent,
@@ -148,6 +159,7 @@ import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
 import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.js";
+import type { DaemonPaths } from "./injection/local-path.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { redactErrorMessage } from "./injection/output-sanitizer.js";
@@ -178,11 +190,30 @@ import { setJobWrapperUnavailableHandler } from "./injection/win32-job-wrapper.j
 import type { SecretInfo, SecretListEntry } from "./secrets/secret-manager.js";
 import { SecretManager } from "./secrets/secret-manager.js";
 import { isVaultManagedCertificate } from "./secrets/vault-managed-certificate.js";
+import {
+  holdsOnlyVaultAccounts,
+  listWindowsAclSync,
+  restrictWindowsAclToVaultAccounts,
+} from "./session/owner-only.js";
+import {
+  assertHeldDir,
+  assertOwnerOnlyDir,
+  assertUnlinkedDir,
+  isHeldPath,
+} from "./session/path-trust.js";
 import { SessionManager } from "./session/session-manager.js";
 import type { SessionExpectation } from "./session/session-manager.js";
 import type { SessionKeyProtector } from "./session/session-key-protector.js";
+import {
+  backupFileName,
+  backupSideNames,
+  parseBackupFileName,
+  pruneBackups,
+  removeBackupTemps,
+} from "./storage/backup-names.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import type { AgentRow, CertificateRow, OAuthTokenRow } from "./storage/sqlite-store.js";
+import { takeVaultCopy } from "./storage/vault-copy.js";
 
 export interface VaultEngineOptions {
   dbPath: string;
@@ -682,6 +713,7 @@ export class VaultEngine {
   private websocketExecutor: WebsocketExecutor = executeWebsocketAction;
   private sftpExecutor: SftpExecutor = executeSftpAction;
   private dockerExecutor: DockerExecutor = executeDockerRegistryAction;
+  private daemonPaths: DaemonPaths | undefined;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
   private lastSessionSlideAt = 0;
@@ -1107,6 +1139,18 @@ export class VaultEngine {
 
   getState(): VaultState {
     return this.state;
+  }
+
+  /**
+   * Declares that this engine serves a daemon: the judgement of a local path
+   * adds these paths to the vault-directory floor and requires every directory
+   * of the path to be held. A later call replaces the paths.
+   */
+  declareDaemon(paths: DaemonPaths): void {
+    this.daemonPaths = {
+      protectedDirs: [...paths.protectedDirs],
+      protectedFiles: [...paths.protectedFiles],
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1745,6 +1789,10 @@ export class VaultEngine {
             config,
             secret.id,
             attribution,
+            {
+              vaultFiles: [this.options.dbPath, this.options.sessionPath],
+              ...(this.daemonPaths !== undefined ? { daemon: this.daemonPaths } : {}),
+            },
           );
         }
 
@@ -1910,6 +1958,7 @@ export class VaultEngine {
           try {
             execution = await s.sftpExecutor(action, value, policy, config, {
               vaultFiles: [this.options.dbPath, this.options.sessionPath],
+              ...(this.daemonPaths !== undefined ? { daemon: this.daemonPaths } : {}),
             });
           } catch (err) {
             const mapped = toVaultError(err);
@@ -2753,7 +2802,8 @@ export class VaultEngine {
    * until an administrator writes its policy. A stored blob is parsed strictly
    * (R2/C43): the writer always emits all fourteen fields, so a miss (other
    * than the post-baseline `strict_tree_exit`, `proxy`, `ssh_agent_socket` and
-   * `sftp_local_dirs`, defaulted below) or an extra key is corruption.
+   * `local_dirs`, defaulted below) or an extra key (other than `local_dirs`'s
+   * first name `sftp_local_dirs` standing alone, moved below) is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -2772,7 +2822,7 @@ export class VaultEngine {
         strict_tree_exit: false,
         proxy: false,
         ssh_agent_socket: false,
-        sftp_local_dirs: [],
+        local_dirs: [],
       };
     }
     const bytes = decrypt(
@@ -2791,7 +2841,7 @@ export class VaultEngine {
     // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06; S1,
     // 2026-11-18): blobs written by the prepared v1.5.0 tree carry the baseline
     // ten, blobs written before the egress proxy eleven, blobs written before
-    // the agent socket twelve, blobs written before the sftp local directories
+    // the agent socket twelve, blobs written before the local directories
     // thirteen, so these four fields — and only these — default on read; no
     // rewrite (policy writes are POLICY_GRANT events). The writer writes all
     // fourteen; any other miss stays corruption (R2/C43).
@@ -2825,9 +2875,20 @@ export class VaultEngine {
       typeof raw === "object" &&
       raw !== null &&
       !Array.isArray(raw) &&
-      !Object.hasOwn(raw, "sftp_local_dirs")
+      Object.hasOwn(raw, "sftp_local_dirs") &&
+      !Object.hasOwn(raw, "local_dirs")
     ) {
-      (raw as Record<string, unknown>)["sftp_local_dirs"] = [];
+      const blob = raw as Record<string, unknown>;
+      blob["local_dirs"] = blob["sftp_local_dirs"];
+      delete blob["sftp_local_dirs"];
+    }
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "local_dirs")
+    ) {
+      (raw as Record<string, unknown>)["local_dirs"] = [];
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -2960,7 +3021,7 @@ export class VaultEngine {
           strict_tree_exit: input.strict_tree_exit,
           proxy: input.proxy,
           ssh_agent_socket: input.ssh_agent_socket,
-          sftp_local_dir_count: input.sftp_local_dirs.length,
+          local_dir_count: input.local_dirs.length,
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -6090,6 +6151,188 @@ export class VaultEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Backup
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A scheduled copy of the vault into `dir`, named for `at` (default now); a
+   * `keep` that is no whole number of at least 1 is refused. Every run refuses
+   * a directory that is a link or none (`assertUnlinkedDir`), judges the
+   * directories above it, links resolved, held (`assertHeldDir`) and only then
+   * the directory the links lead to owner-only (`assertOwnerOnlyDir`): read
+   * earlier, it could be swapped from a directory above that is not held yet.
+   * `label` names the directory in a refusal; the run writes into the resolved
+   * directory and then removes the oldest other copies there so that at most
+   * `keep` stay, the fresh one among them whatever its stamp.
+   */
+  async backupToDirectory(
+    dir: string,
+    options: { keep: number; label: string; signal?: AbortSignal; at?: Date },
+  ): Promise<{ file: string }> {
+    return await this.takeBackup({
+      trigger: "schedule",
+      dir,
+      keep: options.keep,
+      label: options.label,
+      at: options.at ?? new Date(),
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * An attended copy of the vault to `file`, an absolute path whose name must
+   * not exist. Its directory, resolved through links, must be held from the
+   * root down (`isHeldPath`); on win32 it must also be no link itself
+   * (`assertUnlinkedDir`) and, judged after that walk, owner-only where its
+   * links lead (`assertOwnerOnlyDir`). The copy is written into the resolved
+   * directory and nothing is pruned.
+   */
+  async backupToFile(
+    file: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ file: string }> {
+    return await this.takeBackup({ trigger: "command", file, signal: options.signal });
+  }
+
+  private async takeBackup(
+    run:
+      | {
+          trigger: "schedule";
+          dir: string;
+          keep: number;
+          label: string;
+          at: Date;
+          signal: AbortSignal | undefined;
+        }
+      | { trigger: "command"; file: string; signal: AbortSignal | undefined },
+  ): Promise<{ file: string }> {
+    const s = this.assertUnlocked();
+    const at = run.trigger === "schedule" ? run.at : new Date();
+    if (run.trigger === "schedule" && !(Number.isInteger(run.keep) && run.keep >= 1)) {
+      throw VaultError.invalidInput("backup: keep must be a whole number of at least 1");
+    }
+    if (Number.isNaN(at.getTime()) || parseBackupFileName(backupFileName(at)) === null) {
+      throw VaultError.invalidInput("backup: the time is not a valid date");
+    }
+    if (run.trigger === "command" && !isAbsolute(run.file)) {
+      throw VaultError.invalidInput("backup: the target is not an absolute path");
+    }
+    let final = run.trigger === "schedule" ? join(run.dir, backupFileName(at)) : run.file;
+    if (run.trigger === "command") {
+      let taken: boolean;
+      try {
+        taken = lstatSync(final, { throwIfNoEntry: false }) !== undefined;
+      } catch {
+        taken = false;
+      }
+      if (taken) {
+        throw VaultError.invalidInput(
+          `backup: ${final} exists; a backup is written to a new file only`,
+        );
+      }
+    }
+    const detail = { trigger: run.trigger, file: basename(final) };
+    s.auditLogger.log({
+      eventType: AuditEventType.VAULT_BACKUP,
+      detail,
+      sessionId: this.sessionId ?? undefined,
+    });
+    let target = dirname(final);
+    const unwritten = (reason: string): VaultError =>
+      new VaultError(ErrorCode.FILE_IO_ERROR, `could not write the backup (${reason})`);
+    let tmp: string | undefined;
+    try {
+      if (run.trigger === "schedule") {
+        assertUnlinkedDir(run.dir, run.label);
+        try {
+          target = await assertHeldDir(run.dir, run.label);
+        } catch (err) {
+          // A refused walk lets the directory's own refusal speak first.
+          assertOwnerOnlyDir(run.dir, run.label);
+          throw err;
+        }
+        assertOwnerOnlyDir(target, run.label);
+        final = join(target, basename(final));
+      } else {
+        const win32 = process.platform === "win32";
+        if (win32) assertUnlinkedDir(target, "backup");
+        const real = realpathSync(target);
+        if (!lstatSync(real).isDirectory()) throw unwritten("ENOTDIR");
+        final = join(real, basename(final));
+        const held = await isHeldPath(final);
+        if (win32) assertOwnerOnlyDir(real, "backup");
+        if (!held) {
+          throw VaultError.invalidInput(
+            "backup: a directory on the target's path can be changed by another account",
+          );
+        }
+        target = real;
+      }
+      removeBackupTemps(target);
+      const created = join(
+        target,
+        `${backupFileName(at)}.${Buffer.from(generateRandomBytes(6)).toString("hex")}.tmp`,
+      );
+      const fd = openSync(created, "wx", 0o600);
+      tmp = created;
+      try {
+        fchmodSync(fd, 0o600);
+        if (process.platform === "win32") restrictWindowsAclToVaultAccounts(created);
+      } finally {
+        closeSync(fd);
+      }
+      await takeVaultCopy(
+        { dbPath: this.options.dbPath, tmpPath: created, slotKeys: UNLOCK_KEY_META_KEYS },
+        { signal: run.signal },
+      );
+      if (
+        backupSideNames(created).some(
+          (side) => lstatSync(side, { throwIfNoEntry: false }) !== undefined,
+        )
+      ) {
+        throw unwritten("a journal file was left beside the copy");
+      }
+      let closed: boolean;
+      if (process.platform === "win32") {
+        closed = holdsOnlyVaultAccounts(listWindowsAclSync(created));
+      } else {
+        const stat = lstatSync(created);
+        closed = stat.isFile() && stat.uid === process.geteuid?.() && (stat.mode & 0o077) === 0;
+      }
+      if (!closed) throw unwritten("the copy is not closed to other accounts");
+      const flush = openSync(created, "r+");
+      try {
+        fsyncSync(flush);
+      } finally {
+        closeSync(flush);
+      }
+      linkSync(created, final);
+      unlinkSync(created);
+      tmp = undefined;
+      if (run.trigger === "schedule") pruneBackups(target, run.keep, basename(final));
+      return { file: final };
+    } catch (err) {
+      if (tmp !== undefined) {
+        for (const left of [tmp, ...backupSideNames(tmp)]) {
+          try {
+            unlinkSync(left);
+          } catch {
+            // The run ends with its first error; the next run removes the file.
+          }
+        }
+      }
+      const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+      const failure = err instanceof VaultError ? err : unwritten(code ?? "unknown error");
+      try {
+        this.auditDenied(s, AuditEventType.VAULT_BACKUP, failure, detail);
+      } catch {
+        // A failed row that cannot be written leaves the run's own error to the caller.
+      }
+      throw failure;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // The Harpoc CA (deployment model B, M4(ii))
   // ---------------------------------------------------------------------------
 
@@ -6693,6 +6936,7 @@ export class VaultEngine {
     // projection and the engine writes the `secret.use` row (design §7.2).
     this.smtpInjector = new SmtpInjector({
       vaultFiles: [this.options.dbPath, this.options.sessionPath],
+      daemon: () => this.daemonPaths,
     });
     this.imapInjector = new ImapInjector();
   }

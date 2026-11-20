@@ -10,7 +10,7 @@ import {
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
-import { controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
+import { controlledPathDirs, resolveAndMatchCommandPaths } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { TreeKillMechanism } from "./win32-job-wrapper.js";
@@ -50,14 +50,19 @@ export class ProcessInjector {
     let resolvedPath: string;
     let env: Record<string, string>;
     try {
-      resolvedPath = resolveAndMatchCommand(action.command, policy.command_allowlist, pathDirs);
+      const match = resolveAndMatchCommandPaths(action.command, policy.command_allowlist, pathDirs);
+      resolvedPath = match.resolved;
       // A binary with its own injection context is only in the allowlist so that
       // context can spawn it under vault-authored arguments; running it here,
       // where no argument is inspected, would hand the credential to an
-      // instruction vehicle. Checked against the resolved, symlink-followed path.
-      const dedicated = dedicatedContextForBinary(resolvedPath);
-      if (dedicated !== null) {
-        throw VaultError.dedicatedContextRequired(normalizeBinaryBasename(resolvedPath), dedicated);
+      // instruction vehicle. Checked against the path the command was found at,
+      // before links are followed, its resolved, symlink-followed path, and the
+      // found path of each allowlist entry that resolves to the same file.
+      for (const path of [match.found, match.resolved, ...match.matchedEntries]) {
+        const dedicated = dedicatedContextForBinary(path);
+        if (dedicated !== null) {
+          throw VaultError.dedicatedContextRequired(normalizeBinaryBasename(path), dedicated);
+        }
       }
       if (action.working_directory !== undefined) {
         this.assertDirectory(action.working_directory);

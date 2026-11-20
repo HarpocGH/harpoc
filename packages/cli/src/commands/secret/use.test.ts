@@ -1143,6 +1143,16 @@ describe("secret use — git fetch and ls-remote (B9)", () => {
     );
   });
 
+  it("--cwd's help names the git action beside the process action, and the clone a daemon serves", () => {
+    const program = new Command();
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    const use = secret.commands.find((c) => c.name() === "use");
+    expect(use?.options.find((o) => o.long === "--cwd")?.description).toBe(
+      "Working directory (process action); working tree or clone destination (git action; a clone a daemon serves requires it)",
+    );
+  });
+
   it("fetch: repeated --refspec reaches refspecs in order, git options ride --arg", async () => {
     await run([
       "secret://k",

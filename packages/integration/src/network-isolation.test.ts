@@ -173,11 +173,11 @@ interface IsolationCell {
 const CELLS: IsolationCell[] = [
   {
     context: "git",
-    action: (port, dir) => ({
+    action: (port, _dir, localDir) => ({
       type: "git",
       operation: "clone",
       repository: `http://127.0.0.1:${String(port)}/repo.git`,
-      working_directory: join(dir, "clone"),
+      working_directory: join(localDir, "clone"),
       timeout_ms: 20_000,
     }),
     error: undefined,
@@ -283,7 +283,7 @@ describe.skipIf(!posixWithIsolation)(
         command_allowlist: [GIT as string, SSH as string, SFTP as string],
         host_allowlist: ["127.0.0.1"],
         network_isolation: networkIsolation,
-        sftp_local_dirs: [localDir],
+        local_dirs: [localDir],
       });
       await vault.engine.setConnectionConfig(created.handle, {
         ssh: { known_hosts: ["127.0.0.1 ssh-ed25519 AAAA"] },

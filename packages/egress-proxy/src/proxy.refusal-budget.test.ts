@@ -1,12 +1,12 @@
 import type { TLSSocket } from "node:tls";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCa } from "@harpoc/cert-manager";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, TokenPrincipalType, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
 import type { ProxyCaOptions } from "./ca.js";
 import type { EgressProxy } from "./proxy.js";
 import { createEgressProxy } from "./proxy.js";
-import { RefusalBudget } from "./refusal-budget.js";
+import { RefusalBudget, refusalBudgetKey } from "./refusal-budget.js";
 import { TOKENS, engineDouble } from "./__fixtures__/engine-double.js";
 import type { EngineDouble } from "./__fixtures__/engine-double.js";
 import { proxyRequest } from "./__fixtures__/proxy-client.js";
@@ -22,6 +22,9 @@ const CA_OPTIONS: ProxyCaOptions = { certPem: CA.certPem, keyPem: CA.keyPem, hos
 const LIMITED_HANDLE = "secret://limited";
 const OTHER_TOKEN = "tok-other";
 const SPENT = { error: ErrorCode.RATE_LIMIT_EXCEEDED, message: "Proxy refusal budget exceeded" };
+const KEY = refusalBudgetKey({ principal_type: TokenPrincipalType.AGENT, principal_id: "agent-a" });
+const EVIL = "evil.example:443";
+const REFUSED = ["a.example:443", "b.example:443", "c.example:443"];
 
 let upstream: UpstreamFixture;
 let dead: number;
@@ -29,6 +32,8 @@ let double: EngineDouble;
 let proxy: EgressProxy;
 let port: number;
 let clock: number;
+let budget: RefusalBudget;
+let reports: [string, number][];
 
 beforeAll(async () => {
   upstream = await startUpstream();
@@ -43,6 +48,8 @@ beforeEach(async () => {
   upstream.seen.length = 0;
   clock = 0;
   double = engineDouble();
+  budget = new RefusalBudget(3, 60_000, () => clock);
+  reports = [];
   proxy = createEgressProxy({
     engine: double.engine,
     ca: CA_OPTIONS,
@@ -53,7 +60,8 @@ beforeEach(async () => {
         }
       },
     },
-    refusalBudget: new RefusalBudget(3, 60_000, () => clock),
+    refusalBudget: budget,
+    onError: (err, status) => reports.push([err.code, status]),
   });
   port = (await proxy.listenTcp(0, "127.0.0.1")).port;
 });
@@ -100,6 +108,14 @@ async function spend(): Promise<void> {
   for (let i = 0; i < 3; i++) statuses.push((await scopeRefusal()).status);
   expect(statuses).toEqual([403, 403, 403]);
 }
+
+const statusLine = (answer: TunnelOpen): string | undefined => answer.established.split("\r\n")[0];
+
+const rows = (): [string, ErrorCode][] =>
+  double.auditProxyRefusal.mock.calls.map(([, operation, code]): [string, ErrorCode] => [
+    operation,
+    code,
+  ]);
 
 describe("the refusal budget — checked after authentication, charged by every refusal that leaves a row", () => {
   it("the third scope refusal is answered 403 and writes the trip row", async () => {
@@ -314,4 +330,140 @@ describe("the refusal budget — checked after authentication, charged by every 
       });
     },
   );
+});
+
+describe("the refusal budget — a refused CONNECT host costs once per window, the trip is reported once", () => {
+  it("sixty refused CONNECTs to one host cost one row and one charge", async () => {
+    const charge = vi.spyOn(budget, "charge");
+
+    const answers: TunnelOpen[] = [];
+    for (let i = 0; i < 4; i++) answers.push(await connectTo(EVIL));
+
+    const first = answers[0] as TunnelOpen;
+    expect(statusLine(first)).toBe("HTTP/1.1 403 Forbidden");
+    expect(JSON.parse(first.body ?? "")).toMatchObject({ error: ErrorCode.PROXY_CONNECT_DENIED });
+    expect(answers.map((answer) => `${answer.established}\r\n\r\n${answer.body ?? ""}`)).toEqual(
+      Array.from({ length: 4 }, () => `${first.established}\r\n\r\n${first.body ?? ""}`),
+    );
+    expect(rows()).toEqual([[`CONNECT ${EVIL}`, ErrorCode.PROXY_CONNECT_DENIED]]);
+    expect(charge).toHaveBeenCalledTimes(1);
+    expect(budget.spent(KEY)).toBe(false);
+    expect(reports).toEqual([[ErrorCode.PROXY_CONNECT_DENIED, 403]]);
+  });
+
+  it("refused CONNECTs to as many hosts as the limit trip the budget", async () => {
+    const answers: TunnelOpen[] = [];
+    for (const authority of REFUSED) answers.push(await connectTo(authority));
+    const next = await connectTo("d.example:443");
+
+    expect(answers.map(statusLine)).toEqual(
+      Array.from({ length: 3 }, () => "HTTP/1.1 403 Forbidden"),
+    );
+    expect(rows()).toEqual([
+      ...REFUSED.map((authority) => [`CONNECT ${authority}`, ErrorCode.PROXY_CONNECT_DENIED]),
+      ["proxy refusal budget", ErrorCode.RATE_LIMIT_EXCEEDED],
+    ]);
+    expect(statusLine(next)).toBe("HTTP/1.1 429 Too Many Requests");
+    expect(JSON.parse(next.body ?? "")).toEqual(SPENT);
+  });
+
+  it("the trip is reported once and the 429s after it are not", async () => {
+    for (const authority of REFUSED) await connectTo(authority);
+    expect(reports).toEqual([
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+      [ErrorCode.RATE_LIMIT_EXCEEDED, 429],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+    ]);
+
+    const after: (string | number | undefined)[] = [];
+    for (let i = 0; i < 5; i++) {
+      after.push(statusLine(await connectTo(i % 2 === 0 ? EVIL : (REFUSED[0] as string))));
+      after.push((await brokered()).status);
+    }
+
+    expect(after).toEqual(
+      Array.from({ length: 5 }, () => ["HTTP/1.1 429 Too Many Requests", 429]).flat(),
+    );
+    expect(reports).toHaveLength(4);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(4);
+  });
+
+  it("the per-handle limiter's 429 is still reported", async () => {
+    const answer = await brokered("limited");
+
+    expect(answer.status).toBe(429);
+    expect(JSON.parse(answer.body)).toEqual({
+      error: ErrorCode.RATE_LIMIT_EXCEEDED,
+      message: "Per-secret rate limit exceeded",
+    });
+    expect(reports).toEqual([[ErrorCode.RATE_LIMIT_EXCEEDED, 429]]);
+  });
+
+  it("a CONNECT refusal whose row cannot be written is not remembered", async () => {
+    const opening = await scopeRefusal();
+    expect(opening.status).toBe(403);
+    double.auditProxyRefusal.mockImplementationOnce(() => {
+      throw VaultError.vaultLocked();
+    });
+
+    const failed = await connectTo(EVIL);
+    const retried = await connectTo(EVIL);
+    const repeated = await connectTo(EVIL);
+
+    expect([failed, retried, repeated].map(statusLine)).toEqual([
+      "HTTP/1.1 503 Service Unavailable",
+      "HTTP/1.1 403 Forbidden",
+      "HTTP/1.1 403 Forbidden",
+    ]);
+    expect(rows()).toEqual([
+      [`CONNECT ${EVIL}`, ErrorCode.PROXY_CONNECT_DENIED],
+      [`CONNECT ${EVIL}`, ErrorCode.PROXY_CONNECT_DENIED],
+    ]);
+    expect(reports).toEqual([
+      [ErrorCode.ACCESS_DENIED, 403],
+      [ErrorCode.VAULT_LOCKED, 503],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+    ]);
+  });
+
+  it("the window ends and the host costs a row again", async () => {
+    const inWindow = [await connectTo(EVIL), await connectTo(EVIL)];
+    expect(inWindow.map(statusLine)).toEqual(["HTTP/1.1 403 Forbidden", "HTTP/1.1 403 Forbidden"]);
+    expect(double.auditProxyRefusal).toHaveBeenCalledTimes(1);
+
+    clock += 60_000;
+    const again = await connectTo(EVIL);
+
+    expect(statusLine(again)).toBe("HTTP/1.1 403 Forbidden");
+    expect(rows()).toEqual([
+      [`CONNECT ${EVIL}`, ErrorCode.PROXY_CONNECT_DENIED],
+      [`CONNECT ${EVIL}`, ErrorCode.PROXY_CONNECT_DENIED],
+    ]);
+    expect(reports).toEqual([
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+    ]);
+  });
+
+  it("a trip row that cannot be written reports nothing", async () => {
+    double.auditProxyRefusal.mockImplementation((_caller, operation) => {
+      if (operation === "proxy refusal budget") throw VaultError.vaultLocked();
+    });
+
+    const answers: TunnelOpen[] = [];
+    for (const authority of REFUSED) answers.push(await connectTo(authority));
+
+    expect(answers.map(statusLine)).toEqual([
+      "HTTP/1.1 403 Forbidden",
+      "HTTP/1.1 403 Forbidden",
+      "HTTP/1.1 503 Service Unavailable",
+    ]);
+    expect(reports).toEqual([
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+      [ErrorCode.PROXY_CONNECT_DENIED, 403],
+      [ErrorCode.VAULT_LOCKED, 503],
+    ]);
+    expect(budget.spent(KEY)).toBe(true);
+  });
 });

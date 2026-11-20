@@ -208,6 +208,7 @@ async function main(): Promise<void> {
       );
     },
   });
+  if (values.http) engine.declareDaemon({ protectedDirs: [], protectedFiles: [] });
 
   const loaded = await engine.loadSession();
   if (!loaded) {

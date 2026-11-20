@@ -471,6 +471,22 @@ describe("deploy PowerShell scripts (deployment model B on Windows)", () => {
     );
   });
 
+  it("windows/install-two-identity.ps1 checks harpoc\\backups with the layout's other paths before its administrator check and creates it right after harpoc\\vault with the layout's access list and no agent entry, and its usage text lists it", () => {
+    const text = psText("windows/install-two-identity.ps1");
+    const check = text.indexOf(
+      "\nforeach ($path in @($base, (Join-Path $base 'vault'), (Join-Path $base 'backups'), $run) + @($agents | ForEach-Object { Join-Path $run $_ })) {\n",
+    );
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(text.indexOf("if (-not (Test-Elevated))"));
+    expect(text).toContain(
+      "\nSet-HarpocDirectory $base ''\nSet-HarpocDirectory (Join-Path $base 'vault') ''\nSet-HarpocDirectory (Join-Path $base 'backups') ''\nSet-HarpocDirectory $run ''\n",
+    );
+    expect(text.split("(Join-Path $base 'backups')").length - 1).toBe(2);
+    expect(text).toContain(
+      "\n  <ProgramData>\\harpoc\\vault           the vault account, SYSTEM, Administrators: full\n  <ProgramData>\\harpoc\\backups         the vault account, SYSTEM, Administrators: full\n  <ProgramData>\\harpoc\\run             the vault account, SYSTEM, Administrators: full\n",
+    );
+  });
+
   it.each(PS_SCRIPTS)(
     "%s never puts a password into a string, an output, a file or an argv (no schtasks /rp, no plain-text conversion)",
     (script) => {
@@ -1267,6 +1283,10 @@ describe.skipIf(process.platform !== "win32")(
           join(vault, "unlock.key.dpapi"),
           "--runtime-dir",
           join(base, "run"),
+          "--backup-dir",
+          join(base, "backups"),
+          "--backup-interval",
+          "1440",
           "--proxy",
           "--ssh-agent",
           "--issue-token",
@@ -1343,6 +1363,10 @@ describe.skipIf(process.platform !== "win32")(
           join(vault, "unlock.key.dpapi"),
           "--runtime-dir",
           join(base, "run"),
+          "--backup-dir",
+          join(base, "backups"),
+          "--backup-interval",
+          "1440",
         ]
           .map(winArg)
           .join(" ");

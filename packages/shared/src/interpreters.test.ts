@@ -215,4 +215,14 @@ describe("EXEC_WRAPPERS", () => {
       execWrapperName("C:\\x\\dist\\win32\\harpoc-job\\0123456789abcdef\\harpoc-job.exe"),
     ).toBe("harpoc-job");
   });
+
+  it.each(["ssh-agent", "podman", "nerdctl", "snap"])(
+    "holds %s, and the interpreter tier does not",
+    (name) => {
+      expect(EXEC_WRAPPERS.has(name)).toBe(true);
+      expect(KNOWN_INTERPRETERS.has(name)).toBe(false);
+      expect(execWrapperName(`/usr/bin/${name}`)).toBe(name);
+      expect(execWrapperName(`C:\\Program Files\\${name}\\${name}.exe`)).toBe(name);
+    },
+  );
 });

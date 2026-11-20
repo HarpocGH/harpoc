@@ -31,6 +31,31 @@ export function restrictWindowsAclToOwner(path: string): void {
   }
 }
 
+/**
+ * Drop a file's inherited entries and give this account, SYSTEM and
+ * Administrators full control. An explicit entry of another principal stays;
+ * `holdsOnlyVaultAccounts` on a listing taken afterwards tells. Throws
+ * value-free when the step fails.
+ */
+export function restrictWindowsAclToVaultAccounts(path: string): void {
+  const account = userInfo().username;
+  if (!account) throw new Error("could not determine the current account name");
+  const res = spawnSync(
+    system32Path("icacls.exe"),
+    [
+      path,
+      "/inheritance:r",
+      "/grant:r",
+      `${account}:F`,
+      `*${SYSTEM_SID}:F`,
+      `*${ADMINISTRATORS_SID}:F`,
+    ],
+    { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
+  );
+  if (res.error) throw new Error("ACL restriction failed to run");
+  if (res.status !== 0) throw new Error(`ACL restriction failed (exit ${String(res.status)})`);
+}
+
 /** One access rule by SID; `allow` is false for a deny rule. */
 export interface WindowsAclRule {
   allow: boolean;
@@ -73,10 +98,13 @@ export const WINDOWS_READ_EXECUTE_RIGHTS = 0x001200a9;
 /** What the agent pipe grants its consumer: `FILE_GENERIC_READ | FILE_GENERIC_WRITE` without `CreateNewInstance` (0x4) — the `GENERIC_READ | GENERIC_WRITE` Win32-OpenSSH opens the pipe for, measured 0x0012019B. */
 export const WINDOWS_PIPE_CONSUMER_RIGHTS = 0x0012019b;
 
+export const SYSTEM_SID = "S-1-5-18";
+export const ADMINISTRATORS_SID = "S-1-5-32-544";
+export const TRUSTED_INSTALLER_SID =
+  "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
 const SID_PATTERN = /^S-1-\d+(-\d+)*$/;
 const HEX_MASK = /^[0-9A-F]{8}$/;
-const SYSTEM_SID = "S-1-5-18";
-const ADMINISTRATORS_SID = "S-1-5-32-544";
 const PIPE_FULL_CONTROL_RIGHTS = 0x001f019f;
 const MAX_LISTING_BYTES = 64 * 1024;
 const LISTING_TIMEOUT_MS = 15_000;
@@ -109,6 +137,24 @@ const ACL_SCRIPT =
   "foreach($r in $a.GetAccessRules($true,$true,$s)){[System.Console]::Out.WriteLine(" +
   RULE_LINE.replace("%RIGHTS%", "FileSystemRights") +
   ")}";
+
+/** `ACL_SCRIPT` for a chain: one base64 path per stdin line, each listing after a `path <n>` line. */
+const ACL_CHAIN_SCRIPT =
+  "$ErrorActionPreference='Stop';" +
+  "$s=[System.Security.Principal.SecurityIdentifier];" +
+  "$u=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;" +
+  "$n=0;" +
+  "foreach($l in [System.Console]::In.ReadToEnd().Split([char]10)){" +
+  "if($l.Trim() -eq ''){continue};" +
+  "$p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($l.Trim()));" +
+  "if([System.IO.Directory]::Exists($p)){$a=[System.IO.Directory]::GetAccessControl($p)}else{$a=[System.IO.File]::GetAccessControl($p)};" +
+  "[System.Console]::Out.WriteLine('path '+$n);" +
+  "[System.Console]::Out.WriteLine('user '+$u);" +
+  "[System.Console]::Out.WriteLine('owner '+$a.GetOwner($s).Value);" +
+  "foreach($r in $a.GetAccessRules($true,$true,$s)){[System.Console]::Out.WriteLine(" +
+  RULE_LINE.replace("%RIGHTS%", "FileSystemRights") +
+  ")};" +
+  "$n++}";
 
 /**
  * Replace a named pipe's DACL through a client handle opened with
@@ -196,6 +242,64 @@ export function listWindowsAclSync(
     throw new Error("ACL listing: incomplete output");
   }
   return listing;
+}
+
+/**
+ * `listWindowsAcl` for a chain of paths in one host process: the listings in
+ * the order asked. Rejects value-free when the host fails, a path cannot be
+ * read, or the answer does not hold one listing per path in that order.
+ */
+export async function listWindowsAclChain(paths: readonly string[]): Promise<WindowsAclListing[]> {
+  if (paths.length === 0) return [];
+  let stdout: string;
+  try {
+    ({ stdout } = await runKeystoreHelper(
+      powershellPath(),
+      powershellArgs(ACL_CHAIN_SCRIPT),
+      `${paths.map((path) => Buffer.from(path, "utf8").toString("base64")).join("\n")}\n`,
+      { label: "ACL listing", timeoutMs: LISTING_TIMEOUT_MS },
+    ));
+  } catch {
+    throw new Error("ACL listing failed");
+  }
+  return parseWindowsAclChain(stdout, paths.length);
+}
+
+function parseWindowsAclChain(text: string, count: number): WindowsAclListing[] {
+  const sections: string[][] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    const marker = /^path (\d+)$/.exec(line.trim());
+    if (marker !== null) {
+      if (Number(marker[1]) !== sections.length) throw new Error("ACL listing: unexpected output");
+      sections.push([]);
+      continue;
+    }
+    const section = sections.at(-1);
+    if (section === undefined) throw new Error("ACL listing: unexpected output");
+    section.push(line);
+  }
+  if (sections.length !== count) throw new Error("ACL listing: incomplete output");
+  return sections.map((lines) => parseWindowsAcl(lines.join("\n")));
+}
+
+/**
+ * What on a listing is not this account's, SYSTEM's or Administrators': the
+ * owner, else the first allow entry, an inherited or inherit-only one
+ * included; deny entries are not judged.
+ */
+export function foreignToVaultAccounts(
+  acl: WindowsAclListing,
+): { owner: string } | { grant: WindowsAclEntry } | undefined {
+  const vault = new Set([acl.user, SYSTEM_SID, ADMINISTRATORS_SID]);
+  if (!vault.has(acl.owner)) return { owner: acl.owner };
+  const grant = acl.rules.find((rule) => rule.allow && !vault.has(rule.sid));
+  return grant === undefined ? undefined : { grant };
+}
+
+/** The owner and every allow entry are this account, SYSTEM or Administrators (`foreignToVaultAccounts` names nothing). */
+export function holdsOnlyVaultAccounts(acl: WindowsAclListing): boolean {
+  return foreignToVaultAccounts(acl) === undefined;
 }
 
 /**

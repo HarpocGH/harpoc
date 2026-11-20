@@ -5,6 +5,7 @@ import { extractRestModeOptions, prepareRestMode, REST_MODE_HELP } from "./utils
 import { registerInitCommand } from "./commands/init.js";
 import { registerUnlockCommand } from "./commands/unlock.js";
 import { registerLockCommand } from "./commands/lock.js";
+import { registerBackupCommand } from "./commands/backup.js";
 import { registerSecretSetCommand } from "./commands/secret/set.js";
 import { registerSecretGetCommand } from "./commands/secret/get.js";
 import { registerSecretListCommand } from "./commands/secret/list.js";
@@ -71,6 +72,7 @@ export function buildProgram(): Command {
   registerInitCommand(program);
   registerUnlockCommand(program);
   registerLockCommand(program);
+  registerBackupCommand(program);
   registerAuditCommand(program);
   registerServerCommand(program);
 

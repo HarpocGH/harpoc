@@ -188,7 +188,7 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
-    sftp_local_dirs: [],
+    local_dirs: [],
   });
 
   it.each(ADDRESSES)(

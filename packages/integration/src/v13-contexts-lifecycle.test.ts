@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -130,7 +130,7 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     });
     cleanups.push(fake.close);
 
-    const dir = mkdtempSync(join(tmpdir(), "v13-smtp-att-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "v13-smtp-att-")));
     cleanups.push(() =>
       Promise.resolve(
         rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
@@ -144,6 +144,7 @@ describe("v1.3 contexts — lifecycle through the real engine", () => {
     await vault.engine.setInjectionPolicy(handle, {
       smtp_recipient_allowlist: ["*@example.com"],
       host_allowlist: [`${LOOPBACK_HOST}:${fake.port}`],
+      local_dirs: [dir],
     });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
 

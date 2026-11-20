@@ -54,6 +54,7 @@ second run with the same arguments changes nothing.
                                        it is: a reset would orphan its DPAPI master key)
   <ProgramData>\harpoc                 the vault account, SYSTEM, Administrators: full
   <ProgramData>\harpoc\vault           the vault account, SYSTEM, Administrators: full
+  <ProgramData>\harpoc\backups         the vault account, SYSTEM, Administrators: full
   <ProgramData>\harpoc\run             the vault account, SYSTEM, Administrators: full
   <ProgramData>\harpoc\run\<agent>     the same, and the agent read and execute, which the
                                        files the vault writes there inherit (token.jwt)
@@ -141,7 +142,7 @@ foreach ($agent in $agents) {
 }
 $base = Join-Path $ProgramData 'harpoc'
 $run = Join-Path $base 'run'
-foreach ($path in @($base, (Join-Path $base 'vault'), $run) + @($agents | ForEach-Object { Join-Path $run $_ })) {
+foreach ($path in @($base, (Join-Path $base 'vault'), (Join-Path $base 'backups'), $run) + @($agents | ForEach-Object { Join-Path $run $_ })) {
   $item = Get-ExistingItem $path
   if ($null -ne $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     Stop-WithError "$path is a reparse point (junction or symbolic link); remove it" 2
@@ -215,6 +216,7 @@ function Set-HarpocDirectory([string]$Path, [string]$AgentSid) {
 
 Set-HarpocDirectory $base ''
 Set-HarpocDirectory (Join-Path $base 'vault') ''
+Set-HarpocDirectory (Join-Path $base 'backups') ''
 Set-HarpocDirectory $run ''
 foreach ($agent in $agents) {
   Set-HarpocDirectory (Join-Path $run $agent) $agentSids[$agent]

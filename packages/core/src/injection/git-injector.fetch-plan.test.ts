@@ -6,7 +6,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,7 +95,7 @@ function policy(): InjectionPolicy {
     strict_tree_exit: false,
     proxy: false,
     ssh_agent_socket: false,
-    sftp_local_dirs: [],
+    local_dirs: [],
   };
 }
 
@@ -229,7 +229,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     const [probe, remotes, listing, network, local] = calls();
     for (const step of [probe, remotes, listing, local]) {
       const [, args, opts] = step as SpawnCall;
-      expect(opts.cwd).toBe(wd);
+      expect(opts.cwd).toBe(realpathSync.native(wd));
       expect(Object.keys(opts.env).some((k) => k.startsWith("HARPOC_GIT_"))).toBe(false);
       expect("GIT_ASKPASS" in opts.env).toBe(false);
       expect(args.some((a) => a.startsWith("--git-dir="))).toBe(false);
@@ -656,7 +656,7 @@ describeGitSsh("the fetch step plan over SSH (RX-B9-17)", () => {
     ]);
     for (const step of [probe, remotes, listing, local]) {
       const [, , opts] = step as SpawnCall;
-      expect(opts.cwd).toBe(wd);
+      expect(opts.cwd).toBe(realpathSync.native(wd));
       expect("GIT_SSH_COMMAND" in opts.env).toBe(false);
       expect("SSH_AUTH_SOCK" in opts.env).toBe(false);
     }

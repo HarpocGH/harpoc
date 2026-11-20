@@ -56,7 +56,8 @@ Registers the Scheduled Task '$TaskName': at startup, as the local account <Vaul
 
   <node> <cli>\dist\index.js --vault-dir <ProgramData>\harpoc\vault server start --rest
     --session memory --unlock-key-dpapi <ProgramData>\harpoc\vault\unlock.key.dpapi
-    --runtime-dir <ProgramData>\harpoc\run [--proxy] [--ssh-agent] [--issue-token <spec>]...
+    --runtime-dir <ProgramData>\harpoc\run --backup-dir <ProgramData>\harpoc\backups
+    --backup-interval 1440 [--proxy] [--ssh-agent] [--issue-token <spec>]...
 
 with no execution time limit (the Task Scheduler's default stops a task after 72 hours), on
 battery too, one instance, and at most two restarts a minute apart: each failed start with a
@@ -346,7 +347,8 @@ $vaultDir = Join-Path $base 'vault'
 $arguments = @(
   $entry, '--vault-dir', $vaultDir, 'server', 'start', '--rest', '--session', 'memory',
   '--unlock-key-dpapi', (Join-Path $vaultDir 'unlock.key.dpapi'),
-  '--runtime-dir', (Join-Path $base 'run')
+  '--runtime-dir', (Join-Path $base 'run'),
+  '--backup-dir', (Join-Path $base 'backups'), '--backup-interval', '1440'
 )
 if ($Proxy) { $arguments += '--proxy' }
 if ($SshAgent) { $arguments += '--ssh-agent' }

@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, SmtpAction } from "@harpoc/shared";
 import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
@@ -6,6 +7,7 @@ import type { SmtpInjectorDeps } from "./smtp-injector.js";
 import { SmtpInjector } from "./smtp-injector.js";
 
 const SECRET = "smtpuser:smtppass";
+const MAIL_DIR = process.platform === "win32" ? "C:\\mail" : "/mail";
 
 function baseAction(partial: Record<string, unknown> = {}): SmtpAction {
   return {
@@ -130,9 +132,9 @@ describe("SmtpInjector — recipient allowlist coupling (design §5.2)", () => {
     const { fn, calls } = makeFakeSend();
     const injector = new SmtpInjector({ sendSmtp: fn, ...smallFs() });
     await injector.run(
-      baseAction({ to: ["a@example.com"], attachments: [{ path: "/doc.pdf" }] }),
+      baseAction({ to: ["a@example.com"], attachments: [{ path: join(MAIL_DIR, "doc.pdf") }] }),
       SECRET,
-      basePolicy({ smtp_recipient_allowlist: ["*@example.com"] }),
+      basePolicy({ smtp_recipient_allowlist: ["*@example.com"], local_dirs: [MAIL_DIR] }),
       undefined,
       undefined,
     );

@@ -207,7 +207,7 @@ describe("api client", () => {
       strict_tree_exit: false,
       proxy: true,
       ssh_agent_socket: true,
-      sftp_local_dirs: [],
+      local_dirs: [],
       acknowledge_interpreters: true,
     };
     await api.putInjectionPolicy("secret://k1", policy);

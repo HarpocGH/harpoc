@@ -36,8 +36,8 @@ describe("enum member counts", () => {
     expect(Object.values(Permission)).toHaveLength(7);
   });
 
-  it("AuditEventType has 39 members", () => {
-    expect(Object.values(AuditEventType)).toHaveLength(39);
+  it("AuditEventType has 40 members", () => {
+    expect(Object.values(AuditEventType)).toHaveLength(40);
   });
 
   it("PrincipalType has 4 members", () => {
@@ -240,6 +240,12 @@ describe("AuditEventType deployment model B values (B4)", () => {
   it("AuditEventType carries the unlock-key slot's enrol and revoke events", () => {
     expect(AuditEventType.VAULT_UNLOCK_KEY_ENROLL).toBe("vault.unlock_key.enroll");
     expect(AuditEventType.VAULT_UNLOCK_KEY_REVOKE).toBe("vault.unlock_key.revoke");
+  });
+});
+
+describe("AuditEventType backup values", () => {
+  it("AuditEventType carries the vault's backup event", () => {
+    expect(AuditEventType.VAULT_BACKUP).toBe("vault.backup");
   });
 });
 

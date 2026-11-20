@@ -137,7 +137,10 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--command <command>", "Command to run (process action)")
     .option("--arg <arg>", "Command argument (repeatable)", collect, [])
     .option("--env-var <name>", "Env var to inject the secret into (process action)")
-    .option("--cwd <dir>", "Working directory (process action)")
+    .option(
+      "--cwd <dir>",
+      "Working directory (process action); working tree or clone destination (git action; a clone a daemon serves requires it)",
+    )
     // MCP action
     .option("--server <name>", "Configured downstream MCP server name (mcp action)")
     .option("--tool <name>", "Downstream tool to call (mcp action)")

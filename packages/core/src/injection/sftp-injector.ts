@@ -2,6 +2,7 @@ import type { ConnectionConfig, InjectionPolicy, SftpAction, SftpResult } from "
 import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
+import type { DaemonPaths } from "./local-path.js";
 import { resolveSftpLocalPath } from "./local-path.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
@@ -189,6 +190,12 @@ function requireLocalPath(action: SftpAction): string {
  */
 function buildBatchCommand(action: SftpAction, resolvedLocal: string | null): string {
   const remote = quotePath(action.remote_path);
+  if (
+    (action.operation === "upload" || action.operation === "download") &&
+    action.remote_path.includes("\\")
+  ) {
+    throw VaultError.invalidInput("sftp remote path must not contain a backslash");
+  }
   switch (action.operation) {
     case "upload":
       return `put ${quotePath(resolvedLocal)} ${remote}\n`;
@@ -264,7 +271,7 @@ export async function executeSftpAction(
   secretValue: Uint8Array,
   policy: InjectionPolicy,
   config: ConnectionConfig | undefined,
-  options?: { vaultFiles?: readonly string[] },
+  options?: { vaultFiles?: readonly string[]; daemon?: DaemonPaths },
 ): Promise<SftpExecution> {
   // Defense in depth beside the schema's first-character anchor (mirrors the
   // SSH context): host and user reach argv, so a leading dash must never
@@ -300,8 +307,9 @@ export async function executeSftpAction(
       ? await resolveSftpLocalPath({
           localPath: requireLocalPath(action),
           operation: action.operation,
-          allowedDirs: policy.sftp_local_dirs,
+          allowedDirs: policy.local_dirs,
           vaultFiles: options?.vaultFiles ?? [],
+          daemon: options?.daemon,
         })
       : null;
 
