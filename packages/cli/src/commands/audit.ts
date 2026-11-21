@@ -63,6 +63,15 @@ function parseEventTypeOption(
   return parsed.data;
 }
 
+function assertAnchorOut(out: string): void {
+  if (out.trim() === "") throw VaultError.invalidInput("--out: empty path");
+  if (out.startsWith("-")) {
+    throw VaultError.invalidInput(
+      "--out: a flag, not a path (give a path that starts with a dash as ./-name)",
+    );
+  }
+}
+
 /** A claimed token is refused the vault-wide chain, its governance row written first (C-12). */
 function refuseClaimedToken(
   engine: Pick<VaultEngine, "auditGovernanceRefusal">,
@@ -219,6 +228,7 @@ export function registerAuditCommand(program: Command): void {
       const json = Boolean(options.json ?? cmd.optsWithGlobals().json);
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
+        if (options.out !== undefined) assertAnchorOut(options.out);
         const engine = await loadUnlockedEngine(vaultDir);
         try {
           const tokenValue =
@@ -241,8 +251,16 @@ export function registerAuditCommand(program: Command): void {
             );
           }
           const payload = JSON.stringify(anchor, null, 2);
-          if (options.out) {
-            writeFileSync(options.out, payload + "\n", "utf8");
+          if (options.out !== undefined) {
+            try {
+              writeFileSync(options.out, payload + "\n", "utf8");
+            } catch (err) {
+              const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+              throw new VaultError(
+                ErrorCode.FILE_IO_ERROR,
+                `could not write the anchor file ${options.out} (${code ?? "unknown error"})`,
+              );
+            }
             console.error(`Anchor written to ${options.out} (row ${anchor.last_id}).`);
           } else {
             console.log(payload);

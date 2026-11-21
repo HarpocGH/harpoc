@@ -136,7 +136,12 @@ describe("brokered requests — the four placements", () => {
         interface: "proxy",
         remote_address: "127.0.0.1",
       },
-      { method: "GET", origin: upstream.origin, path: "/user" },
+      {
+        method: "GET",
+        origin: upstream.origin,
+        path: "/user",
+        plainOrigin: `http://127.0.0.1:${upstream.port}`,
+      },
     );
     const lease = double.leases[0];
     expect(lease?.complete).toHaveBeenCalledTimes(1);
@@ -174,10 +179,11 @@ describe("brokered requests — the four placements", () => {
       method: "GET",
       origin: upstream.origin,
       path: "/q",
+      plainOrigin: `http://127.0.0.1:${upstream.port}`,
     });
   });
 
-  it("an absolute http:// target is judged and sent as https — the rewrite mode's rule, not the engine's", async () => {
+  it("an absolute http:// target hands the engine both readings; a lease that names no plain reading is sent as https", async () => {
     const reply = await proxyRequest({
       port,
       path: `http://127.0.0.1:${upstream.port}/abs`,
@@ -192,6 +198,7 @@ describe("brokered requests — the four placements", () => {
       method: "GET",
       origin: `https://127.0.0.1:${upstream.port}`,
       path: "/abs",
+      plainOrigin: `http://127.0.0.1:${upstream.port}`,
     });
     expect(upstream.seen[0]?.headers.authorization).toBe(`Bearer ${SECRET_VALUE}`);
   });
@@ -293,11 +300,11 @@ describe.skipIf(!CAN_SET_DEFAULT_CA)("pass-through — no placeholder", () => {
 });
 
 describe("caller authentication — Proxy-Authorization on every request", () => {
-  it("a missing header is 407 with the Bearer challenge; nothing is verified or sent upstream", async () => {
+  it("a missing header is 407 with the Basic and the Bearer challenge; nothing is verified or sent upstream", async () => {
     const reply = await send("/user", { authorization: "Bearer harpoc:gh-pat" }, { token: null });
 
     expect(reply.status).toBe(407);
-    expect(reply.headers["proxy-authenticate"]).toBe('Bearer realm="harpoc"');
+    expect(reply.headers["proxy-authenticate"]).toBe('Basic realm="harpoc", Bearer realm="harpoc"');
     expect(JSON.parse(reply.body)).toEqual({
       error: ErrorCode.INVALID_TOKEN,
       message: "Missing Proxy-Authorization header",
@@ -306,8 +313,27 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
     expect(upstream.seen).toHaveLength(0);
   });
 
+  it("a plain request's 407 carries two Proxy-Authenticate fields, Basic first", async () => {
+    const answer = await rawProxyExchange(
+      port,
+      `GET /127.0.0.1:${upstream.port}/user HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`,
+    );
+
+    const lines = answer.slice(0, answer.indexOf("\r\n\r\n")).split("\r\n");
+    expect(lines[0]).toBe("HTTP/1.1 407 Proxy Authentication Required");
+    expect(lines.filter((line) => line.startsWith("proxy-authenticate: "))).toEqual([
+      'proxy-authenticate: Basic realm="harpoc"',
+      'proxy-authenticate: Bearer realm="harpoc"',
+    ]);
+  });
+
   it.each([
-    ["not a Bearer credential", 401, "Basic dXNlcjpwdw==", ErrorCode.INVALID_TOKEN],
+    [
+      "a Basic credential whose token does not verify",
+      401,
+      "Basic dXNlcjpwdw==",
+      ErrorCode.INVALID_TOKEN,
+    ],
     ["an invalid token", 401, "Bearer tok-bogus", ErrorCode.INVALID_TOKEN],
     ["an expired token", 401, `Bearer ${TOKENS.expired}`, ErrorCode.TOKEN_EXPIRED],
     ["a revoked token", 401, `Bearer ${TOKENS.revoked}`, ErrorCode.TOKEN_REVOKED],
@@ -328,23 +354,78 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
       expect(upstream.seen).toHaveLength(0);
     },
   );
-  it("a plain request stays Bearer-only: Basic base64(<user>:<valid token>) is 401 Malformed and nothing is verified (RQ-2)", async () => {
+  it.each(["/127.0.0.1:<p>/user", "http://127.0.0.1:<p>/user"])(
+    "Basic base64(<user>:<token>) authenticates a plain request (%s); the user is ignored",
+    async (form) => {
+      const reply = await proxyRequest({
+        port,
+        path: form.replace("<p>", String(upstream.port)),
+        headers: {
+          "proxy-authorization": BASIC(`anyone:${TOKENS.use}`),
+          authorization: "Bearer harpoc:gh-pat",
+        },
+      });
+
+      expect(reply.status).toBe(200);
+      expect(double.verifyToken).toHaveBeenNthCalledWith(1, TOKENS.use);
+      expect(upstream.seen[0]?.headers.authorization).toBe(`Bearer ${SECRET_VALUE}`);
+      expect(upstream.seen[0]?.headers["proxy-authorization"]).toBeUndefined();
+    },
+  );
+
+  it("a well-formed Basic header with a revoked token is the verification's 401", async () => {
     const reply = await send(
       "/user",
       {
-        "proxy-authorization": `Basic ${Buffer.from(`harpoc:${TOKENS.use}`).toString("base64")}`,
+        "proxy-authorization": BASIC(`harpoc:${TOKENS.revoked}`),
         authorization: "Bearer harpoc:gh-pat",
       },
       { token: null },
     );
 
     expect(reply.status).toBe(401);
-    expect(JSON.parse(reply.body)).toEqual({
-      error: ErrorCode.INVALID_TOKEN,
-      message: "Malformed Proxy-Authorization header",
-    });
-    expect(double.verifyToken).not.toHaveBeenCalled();
+    expect(JSON.parse(reply.body)).toMatchObject({ error: ErrorCode.TOKEN_REVOKED });
+    expect(double.verifyToken).toHaveBeenCalledWith(TOKENS.revoked);
+    expect(double.resolveForProxy).not.toHaveBeenCalled();
     expect(upstream.seen).toHaveLength(0);
+  });
+
+  it.each([
+    ["undecodable Basic", "Basic !!!!"],
+    ["Basic without a colon", BASIC(TOKENS.use)],
+    ["Basic with an empty token", BASIC("harpoc:")],
+    ["another scheme", `Negotiate ${TOKENS.use}`],
+  ])(
+    "a malformed credential (%s) on a plain request is 401 Malformed; nothing is verified",
+    async (_t, value) => {
+      const reply = await send(
+        "/user",
+        { "proxy-authorization": value, authorization: "Bearer harpoc:gh-pat" },
+        { token: null },
+      );
+
+      expect(reply.status).toBe(401);
+      expect(JSON.parse(reply.body)).toEqual({
+        error: ErrorCode.INVALID_TOKEN,
+        message: "Malformed Proxy-Authorization header",
+      });
+      expect(double.verifyToken).not.toHaveBeenCalled();
+      expect(upstream.seen).toHaveLength(0);
+    },
+  );
+
+  it("the 401 keeps its one WWW-Authenticate field", async () => {
+    const answer = await rawProxyExchange(
+      port,
+      `GET /127.0.0.1:${upstream.port}/user HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nProxy-Authorization: Basic !!!!\r\nConnection: close\r\n\r\n`,
+    );
+
+    const lines = answer.slice(0, answer.indexOf("\r\n\r\n")).split("\r\n");
+    expect(lines[0]).toBe("HTTP/1.1 401 Unauthorized");
+    expect(lines.filter((line) => line.startsWith("www-authenticate: "))).toEqual([
+      'www-authenticate: Bearer realm="harpoc"',
+    ]);
+    expect(lines.filter((line) => line.startsWith("proxy-authenticate: "))).toEqual([]);
   });
 });
 
@@ -849,7 +930,12 @@ describe("the upstream leg", () => {
 
   it.each([
     ["no Proxy-Authorization", null, 407, ErrorCode.INVALID_TOKEN],
-    ["a header that is no Bearer credential", "Basic dXNlcjpwdw==", 401, ErrorCode.INVALID_TOKEN],
+    [
+      "a Basic credential whose token does not verify",
+      "Basic dXNlcjpwdw==",
+      401,
+      ErrorCode.INVALID_TOKEN,
+    ],
     ["a sealed vault", `Bearer ${TOKENS.sealed}`, 503, ErrorCode.VAULT_LOCKED],
   ])(
     "onError receives the status the refusal answered: %s",

@@ -5,9 +5,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import {
+  allowlistNamesAuthority,
   controlledPathDirs,
   matchesHostAllowlist,
   matchesHostPortAllowlist,
+  matchesPlainUpstream,
   matchesUrlAllowlist,
   resolveAndMatchCommand,
   resolveAndMatchCommandPaths,
@@ -158,6 +160,64 @@ describe("matchesUrlAllowlist", () => {
     expect(matchesUrlAllowlist("https://\u212Araken.example/x", ["https://kraken.example/*"])).toBe(
       true,
     );
+  });
+});
+
+describe("allowlistNamesAuthority", () => {
+  const target = new URL("https://127.0.0.1:9000/x");
+
+  it("an https entry of the host and port names it, whatever its path", () => {
+    expect(allowlistNamesAuthority(target, ["https://127.0.0.1:9000/none/*"])).toBe(true);
+  });
+
+  it("a *. host pattern names it as matchesUrlAllowlist matches it", () => {
+    expect(allowlistNamesAuthority(target, ["https://*.0.0.1:9000/*"])).toBe(true);
+  });
+
+  it("a bracketed IPv6 entry names the host in its canonical form", () => {
+    expect(
+      allowlistNamesAuthority(new URL("https://[::1]:9000/x"), ["https://[0:0::1]:9000/*"]),
+    ).toBe(true);
+  });
+
+  it("another port, :443 against none, an http entry and an empty list do not", () => {
+    expect(allowlistNamesAuthority(target, ["https://127.0.0.1:9001/*"])).toBe(false);
+    expect(
+      allowlistNamesAuthority(new URL("https://127.0.0.1/x"), ["https://127.0.0.1:443/*"]),
+    ).toBe(false);
+    expect(allowlistNamesAuthority(target, ["http://127.0.0.1:9000/*"])).toBe(false);
+    expect(allowlistNamesAuthority(target, [])).toBe(false);
+  });
+});
+
+describe("matchesPlainUpstream", () => {
+  const target = new URL("http://127.0.0.1:9000/x");
+
+  it("an http entry spelling the host in full, its port and path matching, matches", () => {
+    expect(matchesPlainUpstream(target, ["http://127.0.0.1:9000/*"])).toBe(true);
+    expect(matchesPlainUpstream(new URL("http://[::1]:9000/x"), ["http://[0:0::1]:9000/*"])).toBe(
+      true,
+    );
+  });
+
+  it("a port-less entry matches a target on port 80", () => {
+    expect(matchesPlainUpstream(new URL("http://127.0.0.1/x"), ["http://127.0.0.1/*"])).toBe(true);
+  });
+
+  it("a *. host pattern never matches, though it matches by suffix", () => {
+    expect(matchesPlainUpstream(target, ["http://*.0.0.1:9000/*"])).toBe(false);
+  });
+
+  it("a path, port or :80 mismatch, an https entry and an https: target do not match", () => {
+    expect(matchesPlainUpstream(target, ["http://127.0.0.1:9000/api/*"])).toBe(false);
+    expect(matchesPlainUpstream(target, ["http://127.0.0.1:9001/*"])).toBe(false);
+    expect(matchesPlainUpstream(new URL("http://127.0.0.1/x"), ["http://127.0.0.1:80/*"])).toBe(
+      false,
+    );
+    expect(matchesPlainUpstream(target, ["https://127.0.0.1:9000/*"])).toBe(false);
+    expect(
+      matchesPlainUpstream(new URL("https://127.0.0.1:9000/x"), ["http://127.0.0.1:9000/*"]),
+    ).toBe(false);
   });
 });
 

@@ -45,19 +45,62 @@ export function matchesUrlAllowlist(url: string, patterns: string[]): boolean {
 // so wildcards survive intact.
 const PATTERN_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(\[[^\]/]+\]|[^/:]+)(?::(\d+))?(\/.*)?$/;
 
-function matchesUrlPattern(target: URL, pattern: string): boolean {
+interface UrlPattern {
+  protocol: string;
+  host: string;
+  port: string;
+  path: string;
+}
+
+function parseUrlPattern(pattern: string): UrlPattern | null {
   const match = PATTERN_RE.exec(pattern.trim());
-  if (!match) return false;
+  if (!match) return null;
   const scheme = match[1];
   const host = match[2];
-  if (scheme === undefined || host === undefined) return false;
-  const port = match[3] ?? "";
-  const path = match[4] ?? "/";
+  if (scheme === undefined || host === undefined) return null;
+  return {
+    protocol: `${scheme.toLowerCase()}:`,
+    host,
+    port: match[3] ?? "",
+    path: match[4] ?? "/",
+  };
+}
 
-  if (`${scheme.toLowerCase()}:` !== target.protocol) return false;
-  if (port !== target.port) return false;
-  if (!matchHost(host, target.hostname)) return false;
-  return globMatch(path, target.pathname);
+function matchesUrlPattern(target: URL, pattern: string): boolean {
+  const parsed = parseUrlPattern(pattern);
+  if (parsed === null) return false;
+  if (parsed.protocol !== target.protocol) return false;
+  if (parsed.port !== target.port) return false;
+  if (!matchHost(parsed.host, target.hostname)) return false;
+  return globMatch(parsed.path, target.pathname);
+}
+
+/** Whether an entry of the target's scheme and port names its host, a `*.` pattern taken as `matchHost` takes it; the path is not read. */
+export function allowlistNamesAuthority(target: URL, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => {
+    const parsed = parseUrlPattern(pattern);
+    return (
+      parsed !== null &&
+      parsed.protocol === target.protocol &&
+      parsed.port === target.port &&
+      matchHost(parsed.host, target.hostname)
+    );
+  });
+}
+
+/** Whether an `http` entry matches an `http:` target: the host by equality after canonicalisation (never a wildcard), the port and the path. */
+export function matchesPlainUpstream(target: URL, patterns: readonly string[]): boolean {
+  if (target.protocol !== "http:") return false;
+  return patterns.some((pattern) => {
+    const parsed = parseUrlPattern(pattern);
+    return (
+      parsed !== null &&
+      parsed.protocol === "http:" &&
+      parsed.port === target.port &&
+      canonicalPatternHost(parsed.host) === target.hostname &&
+      globMatch(parsed.path, target.pathname)
+    );
+  });
 }
 
 function matchHost(patternHost: string, host: string): boolean {

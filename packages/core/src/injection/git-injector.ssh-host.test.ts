@@ -449,9 +449,10 @@ describeGitSsh(
       spawnMock.mockReset();
       spawnMock.mockImplementation((_cmd, args) => {
         const sub = gitSubcommand(args);
-        const stdout =
-          sub === "rev-parse"
-            ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n`
+        const stdout = args.includes("--show-toplevel")
+          ? `${scratch}\n`
+          : sub === "rev-parse"
+            ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\n`
             : sub === "symbolic-ref"
               ? "refs/heads/main\n"
               : sub === "config"

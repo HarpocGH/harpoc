@@ -733,11 +733,12 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       const calls = spawnMock.mock.calls as SpawnCall[];
       expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
         "rev-parse",
+        "rev-parse",
         "for-each-ref",
         "fetch",
         "pull",
       ]);
-      const [, fetchArgs, fetchOpts] = calls[2] as SpawnCall;
+      const [, fetchArgs, fetchOpts] = calls[3] as SpawnCall;
       expect(fetchArgs).toEqual([
         "-c",
         "http.followRedirects=false",
@@ -754,7 +755,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(fetchOpts.cwd).toBe(relay);
       expect(fetchOpts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
 
-      const [, pullArgs, pullOpts] = calls[3] as SpawnCall;
+      const [, pullArgs, pullOpts] = calls[4] as SpawnCall;
       expect(pullArgs).toEqual([
         ...FORCED,
         // X2: the credential-free local hop speaks no transport but file.
@@ -764,12 +765,13 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
         "protocol.file.allow=always",
         "-c",
         `url.${relay.replace(/\\/g, "/")}.insteadOf=https://8.8.8.8/org/repo.git`,
+        `--work-tree=${realpathSync.native(wd)}`,
         "pull",
         "--ff-only",
         "--",
         "https://8.8.8.8/org/repo.git",
       ]);
-      for (const [, , opts] of [calls[0], calls[1], calls[3]] as SpawnCall[]) {
+      for (const [, , opts] of [calls[0], calls[1], calls[2], calls[4]] as SpawnCall[]) {
         expect(opts.cwd).toBe(realpathSync.native(wd));
         expect(opts.env.GIT_ASKPASS).toBeUndefined();
         expect(opts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
@@ -1263,14 +1265,14 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         undefined,
       );
       const calls = spawnMock.mock.calls as SpawnCall[];
-      expect(calls).toHaveLength(4);
+      expect(calls).toHaveLength(5);
       for (const [, args] of calls) {
         const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
         expect(at).toBeGreaterThan(0);
         expect(args[at - 1]).toBe("-c");
         expect(at).toBeLessThan(args.indexOf(gitSubcommand(args) as string));
       }
-      expect((calls[3] as SpawnCall)[2].cwd).toBe(realpathSync.native(wd));
+      expect((calls[4] as SpawnCall)[2].cwd).toBe(realpathSync.native(wd));
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -1529,7 +1531,11 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
   it.each([
     { operation: "clone", tree: false, steps: ["ls-remote", "fetch", "clone"] },
     { operation: "ls-remote", tree: false, steps: ["ls-remote"] },
-    { operation: "pull", tree: true, steps: ["rev-parse", "for-each-ref", "fetch", "pull"] },
+    {
+      operation: "pull",
+      tree: true,
+      steps: ["rev-parse", "rev-parse", "for-each-ref", "fetch", "pull"],
+    },
     {
       operation: "push",
       tree: true,

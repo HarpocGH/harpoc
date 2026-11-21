@@ -333,7 +333,7 @@ describeGit("RX-B9-12: a working-tree refusal writes one failed row in its funct
     [
       "push",
       (dir) => ({ working_directory: join(dir, "absent") }),
-      "working_directory does not exist: ",
+      "working_directory does not exist",
     ],
     [
       "ls-remote",
@@ -349,7 +349,7 @@ describeGit("RX-B9-12: a working-tree refusal writes one failed row in its funct
         () => injector.executeWithSecret(action, SECRET, httpsPolicy(), undefined, "secret-1"),
         ErrorCode.INVALID_GIT_CONFIG,
       );
-      expect(err.message.startsWith(message)).toBe(true);
+      expect(err.message).toBe(message);
       expect(log.mock.calls).toEqual([[failedRow({ operation, error: "INVALID_GIT_CONFIG" })]]);
       expect(spawnMock).not.toHaveBeenCalled();
     },

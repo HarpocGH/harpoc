@@ -24,7 +24,6 @@ import { SmtpInjector } from "./smtp-injector.js";
 const SECRET = "smtpuser:S3CRET-TOKEN-xyz";
 const B = "\\";
 const WIN32 = process.platform === "win32";
-const IN_VAULT = "Attachment rejected: an attachment path is inside the vault directory";
 const DEVICE = "Attachment rejected: an attachment path names a device";
 const SHARE = "Attachment rejected: an attachment path names a network share";
 const NOT_FILE = "Attachment rejected: an attachment path is not a regular file";
@@ -145,24 +144,48 @@ async function expectRejected(
 describe("SmtpInjector — attachments never come from the vault directory (B1)", () => {
   it("refuses the vault database file before any stat or read", async () => {
     const c = counted();
-    await expectRejected(c, vaultInjector(c), join(vaultDir, "default.vault.db"), IN_VAULT);
+    await expectRejected(
+      c,
+      vaultInjector(c),
+      join(vaultDir, "default.vault.db"),
+      NOT_LISTED,
+      policy(vaultDir),
+    );
   });
 
   it("refuses the session file in its own directory before any stat or read", async () => {
     const c = counted();
-    await expectRejected(c, vaultInjector(c), join(sessionDir, "session.json"), IN_VAULT);
+    await expectRejected(
+      c,
+      vaultInjector(c),
+      join(sessionDir, "session.json"),
+      NOT_LISTED,
+      policy(sessionDir),
+    );
   });
 
   it("refuses any file below the vault directory", async () => {
     const c = counted();
-    await expectRejected(c, vaultInjector(c), join(vaultDir, "sub", "note.txt"), IN_VAULT);
+    await expectRejected(
+      c,
+      vaultInjector(c),
+      join(vaultDir, "sub", "note.txt"),
+      NOT_LISTED,
+      policy(vaultDir),
+    );
   });
 
   it("refuses a vault file reached through a directory link outside the vault (realpath)", async () => {
     const link = join(outsideDir, "innocent");
     symlinkSync(vaultDir, link, "junction");
     const c = counted();
-    await expectRejected(c, vaultInjector(c), join(link, "default.vault.db"), IN_VAULT);
+    await expectRejected(
+      c,
+      vaultInjector(c),
+      join(link, "default.vault.db"),
+      NOT_LISTED,
+      policy(vaultDir),
+    );
   });
 
   it.skipIf(process.platform !== "win32")(
@@ -173,7 +196,8 @@ describe("SmtpInjector — attachments never come from the vault directory (B1)"
         c,
         vaultInjector(c),
         join(vaultDir, "default.vault.db").toUpperCase(),
-        IN_VAULT,
+        NOT_LISTED,
+        policy(vaultDir),
       );
     },
   );
@@ -185,10 +209,10 @@ describe("SmtpInjector — attachments never come from the vault directory (B1)"
     mkdirSync(late);
     writeFileSync(join(late, "default.vault.db"), "S3CRET-TOKEN-xyz-late");
 
-    await expectRejected(c, injector, join(late, "default.vault.db"), IN_VAULT);
+    await expectRejected(c, injector, join(late, "default.vault.db"), NOT_LISTED, policy(late));
   });
 
-  it("refuses as inside the vault directory when a vault directory cannot be resolved (EACCES), before any stat, read or send", async () => {
+  it("refuses with the list message when a vault directory cannot be resolved (EACCES), before any stat, read or send", async () => {
     const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
     const c = counted();
     const injector = new SmtpInjector({
@@ -197,7 +221,13 @@ describe("SmtpInjector — attachments never come from the vault directory (B1)"
       vaultFiles: [join(vaultDir, "default.vault.db"), join(sessionDir, "session.json")],
     });
 
-    await expectRejected(c, injector, join(outsideDir, "report.txt"), IN_VAULT, policy(outsideDir));
+    await expectRejected(
+      c,
+      injector,
+      join(outsideDir, "report.txt"),
+      NOT_LISTED,
+      policy(outsideDir),
+    );
   });
 
   it("sends a file outside a vault directory that does not exist yet (ENOENT falls back to the resolved string)", async () => {
@@ -296,23 +326,23 @@ describe("SmtpInjector — attachments never come from the vault directory (B1)"
     expect(refused.message).toBe(DEVICE);
   });
 
-  it("a missing file inside the vault's directory is refused with the in-vault message, as an existing one is", async () => {
+  it("a missing file inside the vault's directory is refused with the list message, as an existing one is", async () => {
     for (const name of ["missing.vault.db", "default.vault.db"]) {
       const c = counted();
-      await expectRejected(c, vaultInjector(c), join(vaultDir, name), IN_VAULT, policy(vaultDir));
+      await expectRejected(c, vaultInjector(c), join(vaultDir, name), NOT_LISTED, policy(vaultDir));
     }
   });
 
   // On win32 both spellings fail ENOENT; off win32 the path through the regular file fails ENOTDIR.
   it.skipIf(WIN32)(
-    "a path through a regular file inside the vault's directory is refused with the in-vault message, as one through a missing name is",
+    "a path through a regular file inside the vault's directory is refused with the list message, as one through a missing name is",
     async () => {
       for (const path of [
         join(vaultDir, "default.vault.db", "x"),
         join(vaultDir, "missing", "x"),
       ]) {
         const c = counted();
-        await expectRejected(c, vaultInjector(c), path, IN_VAULT, policy(vaultDir));
+        await expectRejected(c, vaultInjector(c), path, NOT_LISTED, policy(vaultDir));
       }
     },
   );
@@ -369,6 +399,36 @@ describe("SmtpInjector — attachments come only from a directory the secret's p
     );
   });
 
+  it("an attachment with a `..` segment gets the list message before any file-system call", async () => {
+    mkdirSync(join(listedDir, "sub"));
+    const c = counted();
+    await expectRejected(
+      c,
+      vaultInjector(c),
+      `${listedDir}/sub/../report.txt`,
+      NOT_LISTED,
+      policy(listedDir),
+    );
+    expect(c.realpaths).toEqual([]);
+  });
+
+  // Off win32 a backslash is a name character.
+  it.runIf(WIN32)(
+    "an attachment with a `..` segment between backslashes gets the list message before any file-system call (win32)",
+    async () => {
+      mkdirSync(join(listedDir, "sub"));
+      const c = counted();
+      await expectRejected(
+        c,
+        vaultInjector(c),
+        `${listedDir}${B}sub${B}..${B}report.txt`,
+        NOT_LISTED,
+        policy(listedDir),
+      );
+      expect(c.realpaths).toEqual([]);
+    },
+  );
+
   it("an attachment whose name holds a glob character is sent as named", async () => {
     // `*` and `?` are no file-name characters on win32.
     const names = WIN32 ? ["report[1].txt"] : ["report[1].txt", "a*.txt", "q?.txt"];
@@ -410,7 +470,7 @@ describe("SmtpInjector — attachments come only from a directory the secret's p
     }
   });
 
-  it("with a daemon an attachment in a declared directory refuses with the in-vault message", async () => {
+  it("with a daemon an attachment in a declared directory refuses with the list message", async () => {
     const given = join(listedDir, "report.txt");
     const sent = counted();
     await vaultInjector(sent).run(action(given), SECRET, policy(listedDir), undefined, undefined);
@@ -420,7 +480,7 @@ describe("SmtpInjector — attachments come only from a directory the secret's p
       c,
       vaultInjector(c, { protectedDirs: [listedDir], protectedFiles: [] }),
       given,
-      IN_VAULT,
+      NOT_LISTED,
       policy(listedDir),
     );
   });

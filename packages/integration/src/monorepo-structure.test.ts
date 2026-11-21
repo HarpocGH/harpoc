@@ -433,6 +433,19 @@ describe("turbo env pass-through (D5, 2026-09-08; the series file 2026-09-09)", 
   });
 });
 
+describe("ci.yml's triggers (L13)", () => {
+  it("ci.yml starts on a push to main, a pull request to main and a manual start, and on nothing else", () => {
+    const ci = readFileSync(resolve(monorepoRoot, ".github", "workflows", "ci.yml"), "utf-8");
+    expect(yamlBlock(ci, "on")).toEqual([
+      "  push:",
+      "    branches: [main]",
+      "  pull_request:",
+      "    branches: [main]",
+      "  workflow_dispatch:",
+    ]);
+  });
+});
+
 describe("turbo's global hash names the root files every package's tasks read (T7)", () => {
   it("globalDependencies names tsconfig.base.json and eslint.config.js", () => {
     const turbo = JSON.parse(readFileSync(resolve(monorepoRoot, "turbo.json"), "utf-8")) as {

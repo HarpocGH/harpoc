@@ -95,7 +95,8 @@ const ATTACHMENT_REFUSALS: Record<LocalPathRefusal, string> = {
   network_share: "an attachment path names a network share",
   glob: NOT_LISTED,
   win32_name: NOT_LISTED,
-  protected: "an attachment path is inside the vault directory",
+  dot_segment: NOT_LISTED,
+  protected: NOT_LISTED,
   not_allowed: NOT_LISTED,
   is_directory: NOT_LISTED,
 };

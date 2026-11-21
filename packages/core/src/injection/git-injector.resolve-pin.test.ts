@@ -106,7 +106,7 @@ function policy(repository: string): InjectionPolicy {
 const PLANS = [
   ["clone", ["network", "network", "local"]],
   ["ls-remote", ["network"]],
-  ["pull", ["local", "local", "network", "local"]],
+  ["pull", ["local", "local", "local", "network", "local"]],
   ["push", ["local", "local", "local", "network"]],
   ["fetch", ["local", "local", "local", "network", "local"]],
 ] as const;

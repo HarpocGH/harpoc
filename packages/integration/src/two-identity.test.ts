@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -328,6 +328,57 @@ describe.skipIf(process.platform !== "linux")(
       const rows = JSON.parse(audit.stdout) as AuditRow[];
       expect(rows).toHaveLength(1);
       expect(rows[0]?.detail).toMatchObject({ transport: "rest", trigger: "SIGTERM" });
+    }, 60_000);
+
+    it("(f) a backup directory inside a directory the agent can write is refused at the start; the agent can rename it — the right the judgement of the directories above rests on", async (ctx) => {
+      if (!available) return ctx.skip();
+      const made = await runAs(agent, [
+        "mktemp",
+        "-d",
+        join(tmpdir(), "harpoc-two-uid-agent-XXXXXX"),
+      ]);
+      expect(made.code, made.stderr).toBe(0);
+      const agentDir = realpathSync(made.stdout.trim());
+      const backups = join(agentDir, "backups");
+      const moved = join(agentDir, "moved");
+      let vaultOwned: string | undefined;
+      try {
+        const opened = await runAs(agent, ["chmod", "1777", agentDir]);
+        expect(opened.code, opened.stderr).toBe(0);
+        const placed = await runAs(vault, ["mkdir", "-m", "0700", "--", backups]);
+        expect(placed.code, placed.stderr).toBe(0);
+        vaultOwned = backups;
+
+        const start = await asVault([
+          "server",
+          "start",
+          "--rest",
+          "--session",
+          "memory",
+          "--backup-dir",
+          backups,
+          "--unlock-key-file",
+          join(agentDir, "absent.key"),
+        ]);
+        expect(start.code).toBe(1);
+        expect(start.stderr.trim()).toBe(
+          `Error: [${ErrorCode.INVALID_INPUT}] --backup-dir: a directory on its path can be changed by another account: ${backups}`,
+        );
+
+        const renamed = await runAs(agent, ["mv", "--", backups, moved]);
+        expect(renamed.code, renamed.stderr).toBe(0);
+        vaultOwned = moved;
+        const mode = await runAs(vault, ["stat", "-c", "%a %U", moved]);
+        expect(mode.stdout.trim()).toBe(`700 ${vault}`);
+        const taken = await runAs(agent, ["mkdir", backups]);
+        expect(taken.code, taken.stderr).toBe(0);
+      } finally {
+        const removed =
+          vaultOwned === undefined ? undefined : await runAs(vault, ["rmdir", "--", vaultOwned]);
+        const cleared = await runAs(agent, ["rm", "-rf", "--", agentDir]);
+        if (removed !== undefined) expect(removed.code, removed.stderr).toBe(0);
+        expect(cleared.code, cleared.stderr).toBe(0);
+      }
     }, 60_000);
   },
 );

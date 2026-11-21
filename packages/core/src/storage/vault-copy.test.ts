@@ -20,7 +20,8 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
-import { VAULT_COPY_TIMEOUT_MS, VAULT_COPY_WORKER_SOURCE, takeVaultCopy } from "./vault-copy.js";
+import * as vaultCopy from "./vault-copy.js";
+import { VAULT_COPY_WORKER_SOURCE, takeVaultCopy } from "./vault-copy.js";
 
 const started = vi.hoisted(
   () => [] as { threadId: number; execArgv: readonly string[] | undefined; exited: boolean }[],
@@ -64,6 +65,7 @@ const OTHER_META: readonly (readonly [string, string])[] = [
 ];
 const ROW_BODY = "r".repeat(200);
 const LARGE_SOURCE_MEGABYTES = 64;
+const DAY_MS = 24 * 60 * 60 * 1_000;
 const DRIVER = createRequire(import.meta.url).resolve("better-sqlite3");
 
 let dir: string;
@@ -360,18 +362,20 @@ describe("takeVaultCopy", () => {
     }
   });
 
-  it("the timeout ends the worker", async () => {
-    expect(VAULT_COPY_TIMEOUT_MS).toBe(600_000);
+  it("no clock ends a copy", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const before = started.length;
 
-    const copy = takeVaultCopy(request(), { timeoutMs: 1 });
-    vi.advanceTimersByTime(1);
-    const err = await expectVaultError(() => copy, ErrorCode.DATABASE_ERROR);
+    const copy = takeVaultCopy(request());
+    const armed = vi.getTimerCount();
+    vi.advanceTimersByTime(DAY_MS);
+    await copy;
 
-    expect(err.message).toBe("Database error: backup did not finish");
+    expect(armed).toBe(0);
+    expect(readCopy(tmpPath, (db) => db.pragma("integrity_check", { simple: true }))).toBe("ok");
     expect(started.length).toBe(before + 1);
     expect(liveThreadIds()).toEqual([]);
+    expect("VAULT_COPY_TIMEOUT_MS" in vaultCopy).toBe(false);
   });
 
   it("a worker that exits without an answer rejects as not finished", async () => {

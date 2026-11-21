@@ -950,6 +950,14 @@ describe("factory methods", () => {
     expect(err.details).toBeUndefined();
   });
 
+  it("workTreeHoldsProtectedPath() carries the same code and status with its own fixed message that names no path", () => {
+    const err = VaultError.workTreeHoldsProtectedPath();
+    expect(err.code).toBe(ErrorCode.LOCAL_PATH_NOT_ALLOWED);
+    expect(err.statusCode).toBe(403);
+    expect(err.message).toBe("git work tree holds a path the vault protects");
+    expect(err.details).toBeUndefined();
+  });
+
   it("invalidUnlockKey() maps to 401 like invalidPassword() and carries no detail", () => {
     const err = VaultError.invalidUnlockKey();
     expect(err.code).toBe(ErrorCode.INVALID_UNLOCK_KEY);

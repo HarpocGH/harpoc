@@ -95,11 +95,8 @@ export interface EgressProxy {
 
 const CHALLENGE = 'Bearer realm="harpoc"';
 
-/** A CONNECT's 407 offers both schemes, Basic first: curl's and git's `anyauth` answer a Basic challenge only. */
-const CONNECT_CHALLENGES: [string, string][] = [
-  ["proxy-authenticate", 'Basic realm="harpoc"'],
-  ["proxy-authenticate", CHALLENGE],
-];
+/** Every 407 offers both schemes, Basic first: curl's and git's `anyauth` answer a Basic challenge only. */
+const PROXY_CHALLENGES: string[] = ['Basic realm="harpoc"', CHALLENGE];
 
 const NO_CA_MESSAGE =
   "CONNECT is not enabled: no proxy CA is enrolled (harpoc proxy ca init, then restart server start --proxy); the plain-HTTP rewrite mode answers http://<proxy>/<host>/<path> and absolute http:// URIs";
@@ -107,7 +104,7 @@ const NO_CA_MESSAGE =
 interface Refusal {
   status: number;
   error: VaultError;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
   /** What `onError` receives instead of `error` — a post-lease refusal behind the generic 500. */
   reported?: VaultError;
   /** Not handed to `onError`. */
@@ -187,7 +184,7 @@ function hasBody(req: IncomingMessage): boolean {
 }
 
 /**
- * The token of a CONNECT's `Proxy-Authorization: Basic base64(<user>:<token>)`,
+ * The token of a request's `Proxy-Authorization: Basic base64(<user>:<token>)`,
  * the form clients build from `HTTPS_PROXY=http://harpoc:<token>@…`; the user is
  * ignored. `null` unless the credentials are canonical base64 of UTF-8 text
  * with a colon and a token without whitespace after it.
@@ -284,22 +281,22 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   /**
-   * `Proxy-Authorization: Bearer <jwt>` on every request (DB-14) — nothing else
-   * is read before it. A CONNECT also takes `Basic base64(<user>:<jwt>)`, the
-   * form clients build from a proxy URL's userinfo; a plain-HTTP request stays
-   * Bearer-only (RQ-2).
+   * `Proxy-Authorization: Bearer <jwt>` or `Basic base64(<user>:<jwt>)`, the
+   * user ignored — the form clients build from a proxy URL's userinfo — on
+   * every request outside a tunnel, a CONNECT included (DB-14); nothing else is
+   * read before it.
    */
-  function authenticate(req: IncomingMessage, connect = false): Authenticated | Refusal {
+  function authenticate(req: IncomingMessage): Authenticated | Refusal {
     const header = req.headers["proxy-authorization"];
     if (header === undefined) {
       return {
         status: 407,
         error: new VaultError(ErrorCode.INVALID_TOKEN, "Missing Proxy-Authorization header"),
-        headers: { "proxy-authenticate": CHALLENGE },
+        headers: { "proxy-authenticate": PROXY_CHALLENGES },
       };
     }
     const match = /^Bearer\s+(\S+)$/i.exec(header);
-    const basic = connect && match === null ? /^Basic\s+(\S+)$/i.exec(header) : null;
+    const basic = match === null ? /^Basic\s+(\S+)$/i.exec(header) : null;
     const raw = match ? (match[1] as string) : basic ? basicToken(basic[1] as string) : null;
     if (raw === null) {
       return {
@@ -425,6 +422,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       method: req.method ?? "GET",
       origin: target.url.origin,
       path: target.url.pathname,
+      ...(target.plain === undefined ? {} : { plainOrigin: target.plain.origin }),
     };
     let lease: ProxyLease;
     try {
@@ -459,8 +457,20 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     };
     let needles: Uint8Array[] = [];
     try {
+      let served = target;
+      if (lease.plainHttp === true) {
+        if (target.plain === undefined) {
+          throw VaultError.internalError(
+            "the lease names a plain reading the request does not have",
+          );
+        }
+        if (lease.caPem !== undefined) {
+          throw VaultError.internalError("the lease names a plain reading beside a pinned CA");
+        }
+        served = { url: target.plain, form: target.form };
+      }
       const swapped = swapCredential(
-        { headers: req.headers, url: target.url },
+        { headers: req.headers, url: served.url },
         match.placement,
         lease.value,
       );
@@ -469,7 +479,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       const headers = upstreamRequestHeaders(swapped.headers);
       headers["accept-encoding"] = "identity";
       complete(
-        await exchange(req, res, target, headers, {
+        await exchange(req, res, served, headers, {
           url: swapped.url,
           ...(lease.caPem === undefined ? {} : { caPem: lease.caPem }),
           needles,
@@ -551,8 +561,9 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
 
   function refuseConnect(socket: Socket, refusal: Refusal): void {
     if (refusal.silent !== true) report(refusal.reported ?? refusal.error, refusal.status);
-    const headers: [string, string][] =
-      refusal.status === 407 ? CONNECT_CHALLENGES : Object.entries(refusal.headers ?? {});
+    const headers = Object.entries(refusal.headers ?? {}).flatMap(([name, value]) =>
+      (Array.isArray(value) ? value : [value]).map((entry): [string, string] => [name, entry]),
+    );
     socket.end(connectReply(refusal.status, refusal.error, headers));
   }
 
@@ -577,7 +588,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
           error: VaultError.invalidInput(NO_CA_MESSAGE),
         });
       }
-      const auth = authenticate(req, true);
+      const auth = authenticate(req);
       if ("error" in auth) return refuseConnect(socket, auth);
       const key = refusalBudgetKey(auth.caller);
       if (budget.spent(key)) {

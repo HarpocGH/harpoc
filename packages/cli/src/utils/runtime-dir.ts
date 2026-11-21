@@ -1,6 +1,6 @@
-import { lstatSync, readdirSync, statSync, type Dirent, type Stats } from "node:fs";
-import { basename, join, posix, sep, win32 } from "node:path";
-import { listWindowsAclSync } from "@harpoc/core";
+import { readdirSync, statSync, type Dirent, type Stats } from "node:fs";
+import { basename, join, win32 } from "node:path";
+import { isLinkPath, listWindowsAclSync } from "@harpoc/core";
 import type { WindowsAclListing } from "@harpoc/core";
 import { agentNameSchema, maxUnixSocketPathBytes, VaultError } from "@harpoc/shared";
 
@@ -311,51 +311,13 @@ function judgeWindowsDirAcl(
   return { sid: grantee?.sid };
 }
 
-/** What `isLink` hands `lstat`: walking the path's segments from the end — separators and `.` skipped, each `..` consuming the next name to its left — the path exactly as given up to and including the first name no `..` consumes, else (no such name) the path with its trailing separators dropped, never below its root. */
-export function linkProbePath(
-  path: string,
-  flavour: typeof posix = sep === "\\" ? win32 : posix,
-): string {
-  const separators = flavour.sep === "\\" ? "\\/" : "/";
-  const { root } = flavour.parse(path);
-  let end = path.length;
-  let pending = 0;
-  while (end > root.length) {
-    if (separators.includes(path.charAt(end - 1))) {
-      end -= 1;
-      continue;
-    }
-    let start = end;
-    while (start > root.length && !separators.includes(path.charAt(start - 1))) start -= 1;
-    const segment = path.slice(start, end);
-    if (segment === "..") {
-      pending += 1;
-    } else if (segment !== ".") {
-      if (pending === 0) return path.slice(0, end);
-      pending -= 1;
-    }
-    end = start;
-  }
-  const trimmed = path.replace(flavour.sep === "\\" ? /[\\/]+$/ : /\/+$/, "");
-  return trimmed.length < root.length ? root : trimmed;
-}
-
-/** Whether the final component of the directory the path names is a symbolic link or a junction, read by `lstat` on `linkProbePath(path)` — the tail after the last name no `..` consumes canonicalised lexically, everything up to that name left to the kernel's own resolution; false where it cannot be read. */
-export function isLink(path: string): boolean {
-  try {
-    return lstatSync(linkProbePath(path), { throwIfNoEntry: false })?.isSymbolicLink() === true;
-  } catch {
-    return false;
-  }
-}
-
 /** The checks; on win32 returns the consumer's SID when a consumer was named. */
 function assertPrivateDir(
   path: string,
   label: string,
   reader: DirReader | undefined,
 ): string | undefined {
-  if (isLink(path)) {
+  if (isLinkPath(path)) {
     throw VaultError.invalidInput(
       `${label}: the path is a symbolic link or junction, not a directory: ${path}`,
     );

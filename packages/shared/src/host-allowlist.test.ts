@@ -5,6 +5,7 @@ import {
   buildAllowedHostSet,
   checkRequestHost,
   isLoopbackBindHost,
+  isPlainUpstreamHost,
   LOOPBACK_BIND_HOSTS,
   LOOPBACK_URL_HOSTS,
   normalizeAllowedHost,
@@ -35,6 +36,28 @@ describe("isLoopbackBindHost", () => {
     expect(
       [...LOOPBACK_URL_HOSTS].map((h) => (h.startsWith("[") ? h.slice(1, -1) : h)).sort(),
     ).toEqual([...LOOPBACK_BIND_HOSTS].sort());
+  });
+});
+
+describe("isPlainUpstreamHost", () => {
+  it.each(["127.0.0.1", "[::1]"])("%j is a plain upstream host", (hostname) => {
+    expect(isPlainUpstreamHost(hostname)).toBe(true);
+  });
+
+  it.each([
+    "localhost",
+    "LOCALHOST",
+    "::1",
+    "127.0.0.2",
+    "127.1",
+    "[::ffff:7f00:1]",
+    "[0:0:0:0:0:0:0:1]",
+    " 127.0.0.1",
+    "127.0.0.1 ",
+    "0.0.0.0",
+    "",
+  ])("%j is not", (hostname) => {
+    expect(isPlainUpstreamHost(hostname)).toBe(false);
   });
 });
 

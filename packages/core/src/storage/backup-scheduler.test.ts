@@ -307,6 +307,30 @@ describe("BackupScheduler", () => {
     expect(backup).toHaveBeenCalledTimes(2);
   });
 
+  it("a run that outlasts its interval is followed by the next", async () => {
+    holdNextRun();
+    const started = startScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    const run = heldRun(0);
+
+    await vi.advanceTimersByTimeAsync(150 * MINUTE_MS);
+    expect(backup).toHaveBeenCalledTimes(1);
+    expect(run.signal.aborted).toBe(false);
+    expect(onError).not.toHaveBeenCalled();
+    expect(started.isRunning).toBe(true);
+
+    run.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backup).toHaveBeenCalledTimes(2);
+    expect(backup.mock.calls[1]?.[1].at).toEqual(new Date(T0 + 150 * MINUTE_MS));
+
+    await vi.advanceTimersByTimeAsync(HOUR_MS - 1);
+    expect(backup).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(backup).toHaveBeenCalledTimes(3);
+    expect(backup.mock.calls[2]?.[1].at).toEqual(new Date(T0 + 150 * MINUTE_MS + HOUR_MS));
+  });
+
   it("stop waits for a running copy, then aborts it", async () => {
     holdNextRun();
     const started = startScheduler();

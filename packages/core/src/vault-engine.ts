@@ -79,6 +79,7 @@ import {
   injectionPolicyInputSchema,
   injectionPolicySchema,
   isAdminUserCaller,
+  isPlainUpstreamHost,
   isValidSecretNamePattern,
   isVaultVersionSupported,
   isWellFormedVaultVersion,
@@ -144,8 +145,10 @@ import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random
 import { actionShapeRefusal, imapOperationRefusal } from "./injection/action-shape.js";
 import { actionTimeoutRefusal } from "./injection/action-timeout.js";
 import {
+  allowlistNamesAuthority,
   controlledPathDirs,
   matchesHostAllowlist,
+  matchesPlainUpstream,
   matchesUrlAllowlist,
   resolveExecutable,
 } from "./injection/allowlist.js";
@@ -253,14 +256,17 @@ export interface AuditChainVerificationReport extends AuditChainVerification {
 
 /**
  * What one brokered request of the egress proxy targets (`resolveForProxy`):
- * its method, the upstream origin in the URL's own serialization
- * (`https://host[:port]`) and the path without the query — the query is a
- * credential placement, so it is neither matched nor recorded.
+ * its method, the upstream origin of its TLS reading in the URL's own
+ * serialization (`https://host[:port]`), beside it the origin of its plain
+ * reading where the proxy has one (`http://127.0.0.1:9000`), which the engine
+ * judges, and the path without the query — the query is a credential
+ * placement, so it is neither matched nor recorded.
  */
 export interface ProxyTarget {
   method: string;
   origin: string;
   path: string;
+  plainOrigin?: string;
 }
 
 /** How a brokered request ended: the upstream status and whether the redaction changed the response, or the code that ended it. */
@@ -269,13 +275,15 @@ export type ProxyOutcome = { status: number; sanitized: boolean } | { error: Err
 /**
  * The credential `resolveForProxy` hands the egress proxy for one request: a
  * copy of the value the proxy owns and zero-fills after the swap, the handle's
- * pinned HTTP CA when one is stored, and `complete`, which writes the
- * request's one `secret.use` row once the upstream exchange has ended — on the
- * first call only; a later call, or one after the vault sealed, does nothing.
+ * pinned HTTP CA when one is stored, `plainHttp` when the request is served on
+ * its plain reading, and `complete`, which writes the request's one
+ * `secret.use` row once the upstream exchange has ended — on the first call
+ * only; a later call, or one after the vault sealed, does nothing.
  */
 export interface ProxyLease {
   readonly value: Uint8Array;
   readonly caPem?: string;
+  readonly plainHttp?: true;
   complete(outcome: ProxyOutcome): void;
 }
 
@@ -581,7 +589,8 @@ const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
  * The URL a proxy target names, or null when it names none: an http(s)
  * origin in the URL's own serialization and a path the parser keeps as given,
  * so the origin the allowlist judges, the row records and the proxy connects
- * to are one, and no query, fragment or userinfo rides in.
+ * to are one — on a plain lease `plainOrigin`, which `plainTargetUrl` holds
+ * to the same rule — and no query, fragment or userinfo rides in.
  */
 function proxyTargetUrl(target: ProxyTarget): URL | null {
   if (!HTTP_METHOD_TOKEN.test(target.method) || !target.path.startsWith("/")) return null;
@@ -593,6 +602,24 @@ function proxyTargetUrl(target: ProxyTarget): URL | null {
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
   return url.origin === target.origin && url.pathname === target.path ? url : null;
+}
+
+function plainTargetUrl(target: ProxyTarget): URL | null {
+  const tls = proxyTargetUrl(target);
+  if (target.plainOrigin === undefined || tls === null) return null;
+  let url: URL;
+  try {
+    url = new URL(target.path, target.plainOrigin);
+  } catch {
+    return null;
+  }
+  return url.protocol === "http:" &&
+    url.origin === target.plainOrigin &&
+    isPlainUpstreamHost(url.hostname) &&
+    url.hostname === tls.hostname &&
+    url.pathname === target.path
+    ? url
+    : null;
 }
 
 /**
@@ -2076,13 +2103,18 @@ export class VaultEngine {
    * M4). `use_secret`'s ladder for a token caller — resolve the handle, the
    * caller's `use` grant, the secret's status, each refusal the failed
    * `secret.use` row `use_secret` writes, `context: "proxy"` — then the
-   * secret's `proxy` opt-in and its URL allowlist over the target's origin and
-   * path, both before the credential is decrypted or an OAuth token refreshed
-   * (no credential can satisfy either: the docker, SMTP and IMAP guards'
-   * placement), each refused with a failed row and a message naming the
-   * origin, never the query. The lease carries a copy of the value — the
-   * engine wipes its own before returning, the proxy wipes the copy after the
-   * swap and `complete` wipes it again — and the handle's `http.ca_pem` pin.
+   * secret's `proxy` opt-in, the judgement of the target's plain reading, and
+   * the URL allowlist over the origin and path of its TLS reading where the
+   * plain one does not hold, all before the credential is decrypted or an
+   * OAuth token refreshed (no credential can satisfy them: the docker, SMTP
+   * and IMAP guards' placement); the opt-in and the allowlist are each refused
+   * with a failed row and a message naming the TLS reading's origin, never the
+   * query. Once the plain reading holds, every later row of the request names
+   * its `http://` origin with `plain_http`; every row before it, and every row
+   * of a request on its TLS reading, names the TLS one. The lease carries a
+   * copy of the value — the engine wipes its own before returning, the proxy
+   * wipes the copy after the swap and `complete` wipes it again — the handle's
+   * `http.ca_pem` pin on the TLS reading, and `plainHttp` on the plain one.
    * The request's one success or failure row is `complete`'s, written after
    * the upstream exchange as the HTTP injector writes its row after the
    * response; a lease still open when the vault seals is recorded then,
@@ -2105,13 +2137,13 @@ export class VaultEngine {
       );
     }
     const s = this.assertUnlocked();
-    const request = {
+    let request: Record<string, unknown> = {
       context: "proxy",
       method: target.method,
       origin: target.origin,
       path: target.path,
     };
-    const denied = { handle, ...request };
+    let denied = { handle, ...request };
 
     let secret: Secret;
     try {
@@ -2164,7 +2196,16 @@ export class VaultEngine {
       );
       throw VaultError.proxyPlaceholderDenied(target.origin);
     }
-    if (!matchesUrlAllowlist(url.href, policy.url_allowlist)) {
+    const plainUrl = plainTargetUrl(target);
+    const plainHttp =
+      plainUrl !== null &&
+      !allowlistNamesAuthority(url, policy.url_allowlist) &&
+      matchesPlainUpstream(plainUrl, policy.url_allowlist) &&
+      this.showsNoHttpCa(s, secret.id);
+    if (plainHttp) {
+      request = { ...request, origin: plainUrl.origin, plain_http: true };
+      denied = { handle, ...request };
+    } else if (!matchesUrlAllowlist(url.href, policy.url_allowlist)) {
       this.auditUse(
         s,
         secret.id,
@@ -2175,7 +2216,7 @@ export class VaultEngine {
       throw VaultError.urlNotAllowed(target.origin);
     }
 
-    const caPem = this.loadConnectionConfig(s, secret.id)?.http?.ca_pem;
+    const caPem = plainHttp ? undefined : this.loadConnectionConfig(s, secret.id)?.http?.ca_pem;
 
     let value: Uint8Array;
     try {
@@ -2195,9 +2236,17 @@ export class VaultEngine {
       // A seal during the awaits above has drained the open leases already: no
       // lease opens on a sealed engine.
       this.assertUnlocked();
-      return this.openProxyLease(secret.id, value.slice(), caPem, request, attribution);
+      return this.openProxyLease(secret.id, value.slice(), caPem, request, attribution, plainHttp);
     } finally {
       wipeBuffer(value);
+    }
+  }
+
+  private showsNoHttpCa(s: UnlockedState, secretId: string): boolean {
+    try {
+      return this.loadConnectionConfig(s, secretId)?.http?.ca_pem === undefined;
+    } catch {
+      return false;
     }
   }
 
@@ -2215,6 +2264,7 @@ export class VaultEngine {
     caPem: string | undefined,
     request: Record<string, unknown>,
     attribution: AuditAttribution | undefined,
+    plainHttp: boolean,
   ): ProxyLease {
     const pinned = caPem === undefined ? {} : { ca_pinned: true };
     const close = (outcome: ProxyOutcome): boolean => {
@@ -2246,6 +2296,7 @@ export class VaultEngine {
     return {
       value,
       ...(caPem === undefined ? {} : { caPem }),
+      ...(plainHttp ? { plainHttp: true as const } : {}),
       complete: (outcome) => {
         // Completion slide, as useSecret's: the request ends with a fresh window.
         if (close(outcome)) this.touchSession();

@@ -2,8 +2,6 @@ import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
 import { VaultError } from "@harpoc/shared";
 
-export const VAULT_COPY_TIMEOUT_MS = 600_000;
-
 export const VAULT_COPY_WORKER_SOURCE = `"use strict";
 const { lstatSync } = require("node:fs");
 const { parentPort, workerData } = require("node:worker_threads");
@@ -61,9 +59,9 @@ function failureOf(answer: unknown): string | null {
 
 export function takeVaultCopy(
   request: { dbPath: string; tmpPath: string; slotKeys: readonly string[] },
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
-  const { timeoutMs = VAULT_COPY_TIMEOUT_MS, signal } = options;
+  const signal = options?.signal;
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted === true) {
       reject(VaultError.databaseError(NOT_FINISHED));
@@ -89,7 +87,6 @@ export function takeVaultCopy(
     const end = (failure: string | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       signal?.removeEventListener("abort", abandon);
       void worker.terminate().then(() => {
         if (failure === null) resolve();
@@ -97,7 +94,6 @@ export function takeVaultCopy(
       });
     };
     const abandon = (): void => end(NOT_FINISHED);
-    const timer = setTimeout(abandon, timeoutMs);
     signal?.addEventListener("abort", abandon, { once: true });
     worker.on("message", (answer: unknown) => end(failureOf(answer)));
     worker.on("error", abandon);

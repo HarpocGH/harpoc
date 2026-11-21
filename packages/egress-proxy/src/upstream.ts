@@ -1,5 +1,6 @@
 import type { Readable } from "node:stream";
 import { createPinnedLookup } from "@harpoc/core";
+import { isPlainUpstreamHost } from "@harpoc/shared";
 import type { ProxyUpstreamFailureReason } from "@harpoc/shared";
 import { Agent, request } from "undici";
 import { redactBytes } from "./redact.js";
@@ -8,16 +9,22 @@ import { redactBytes } from "./redact.js";
 export type ProxyHeaders = Record<string, string | string[]>;
 
 /**
- * How the client addressed the proxy. The upstream leg is TLS in every form
- * (design M4 (i): "the proxy opens the real TLS connection"); the form decides
- * only how a `Location` is mapped back for the client (`mapLocation`).
+ * How the client addressed the proxy. The form decides how a `Location` is
+ * mapped back for the client (`mapLocation`), and whether the request line has
+ * a plain reading beside its TLS one: an `absolute-https` line never has.
  */
 export type RequestForm = "path" | "absolute-http" | "absolute-https";
 
 export interface ParsedTarget {
-  /** Always `https:`; the default port elided as `URL` spells it. */
+  /**
+   * `https:` as `parseTarget` and `tunnelTarget` return it, `http:` in the
+   * target `broker` serves on a plain lease; the default port elided as `URL`
+   * spells it.
+   */
   url: URL;
   form: RequestForm;
+  /** The plain reading of a `path` or `absolute-http` line naming `127.0.0.1` or `[::1]`: `http:`, the port as the client wrote it. */
+  plain?: URL;
 }
 
 export type TargetParse = { ok: true; target: ParsedTarget } | { ok: false; message: string };
@@ -33,8 +40,9 @@ const HOST_SEGMENT = /^(?:[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*|\[[0-9A-Fa-f:.]+\]
  * (`/api.github.com/user?x=1`) names the host in its first segment; the
  * absolute form (`http://api.github.com/user`, as `HTTP_PROXY` clients send it,
  * or `https://…`) names it in the authority. The `Host` header is never read.
- * An `http://` target is upgraded: port 80 or none becomes 443, any other port
- * is kept — the credential never travels a plaintext upstream.
+ * The TLS reading upgrades an `http://` target: port 80 or none becomes 443,
+ * any other port is kept. A plain reading beside it is served only when the
+ * lease names it.
  */
 export function parseTarget(requestUrl: string): TargetParse {
   const refused: TargetParse = { ok: false, message: TARGET_REFUSAL };
@@ -46,14 +54,18 @@ export function parseTarget(requestUrl: string): TargetParse {
     if (!HOST_SEGMENT.test(segment)) return refused;
     // The remainder starts with "/" or "?", so it cannot reach the authority:
     // never resolved as a reference against the host (a "//x" would become x).
+    const path = `${remainder.startsWith("?") ? "/" : ""}${remainder}`;
     let url: URL;
     try {
-      url = new URL(`https://${segment}${remainder.startsWith("?") ? "/" : ""}${remainder}`);
+      url = new URL(`https://${segment}${path}`);
     } catch {
       return refused;
     }
     url.hash = "";
-    return { ok: true, target: { url, form: "path" } };
+    return {
+      ok: true,
+      target: withPlainReading({ url, form: "path" }, `http://${segment}${path}`),
+    };
   }
   if (!/^https?:\/\//i.test(requestUrl)) return refused;
   let given: URL;
@@ -64,10 +76,25 @@ export function parseTarget(requestUrl: string): TargetParse {
   }
   if (given.username !== "" || given.password !== "") return refused;
   const url = new URL(`https://${given.host}${given.pathname}${given.search}`);
+  if (given.protocol !== "http:") return { ok: true, target: { url, form: "absolute-https" } };
   return {
     ok: true,
-    target: { url, form: given.protocol === "http:" ? "absolute-http" : "absolute-https" },
+    target: withPlainReading(
+      { url, form: "absolute-http" },
+      `http://${given.host}${given.pathname}${given.search}`,
+    ),
   };
+}
+
+function withPlainReading(target: ParsedTarget, href: string): ParsedTarget {
+  let plain: URL;
+  try {
+    plain = new URL(href);
+  } catch {
+    return target;
+  }
+  plain.hash = "";
+  return isPlainUpstreamHost(plain.hostname) ? { ...target, plain } : target;
 }
 
 /**

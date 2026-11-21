@@ -260,6 +260,21 @@ describe("CONNECT — the tunnel", () => {
     expect(double.resolveForProxy).toHaveBeenCalledTimes(1);
   });
 
+  it("a Proxy-Authorization: Basic inside a tunnel is not read", async () => {
+    const answer = await exchangeInTunnel(
+      await tunnelToUpstream(),
+      `GET /user HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\n` +
+        `Proxy-Authorization: Basic ${Buffer.from(`harpoc:${TOKENS.revoked}`).toString("base64")}\r\n` +
+        `Authorization: Bearer harpoc:gh-pat\r\nConnection: close\r\n\r\n`,
+    );
+
+    expect(answer.startsWith("HTTP/1.1 200 ")).toBe(true);
+    expect(double.verifyToken).toHaveBeenCalledTimes(2);
+    expect(double.verifyToken.mock.calls.every(([token]) => token === TOKENS.use)).toBe(true);
+    expect(upstream.seen).toHaveLength(1);
+    expect(upstream.seen[0]?.headers["proxy-authorization"]).toBeUndefined();
+  });
+
   it("undici's ProxyAgent opens a tunnel per request: each CONNECT and each request verified", async () => {
     const agent = agentWith();
     await viaTunnel(agent, "/one", { authorization: "Bearer harpoc:gh-pat" });

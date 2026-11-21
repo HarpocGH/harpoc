@@ -6,9 +6,11 @@ import {
   realpathSync,
   rmdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { lstat, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +39,14 @@ vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
   return { ...actual, spawnCaptured: vi.fn() };
 });
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, statSync: vi.fn(actual.statSync) };
+});
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, realpath: vi.fn(actual.realpath), lstat: vi.fn(actual.lstat) };
+});
 
 // On win32 the git context accepts only the native Win32-OpenSSH client, so its
 // directory leads the PATH (as in git-injector.audit.test.ts).
@@ -60,6 +70,8 @@ const PINNED: ConnectionConfig = {
 const SECRET = new Uint8Array(Buffer.from("git-user:floor-token-value"));
 const PROTECTED = "git working directory is inside a directory the vault protects";
 const DAEMON_CLONE = "working_directory is required for clone in a daemon";
+const NAMES_A_SHARE = "working_directory names a network share";
+const DOT_SEGMENT = "working_directory must not hold a .. segment";
 const NO_PATHS: DaemonPaths = { protectedDirs: [], protectedFiles: [] };
 
 const FAILED_STEP: SpawnCapturedResult = {
@@ -76,8 +88,81 @@ const FAILED_STEP: SpawnCapturedResult = {
 const OK_STEP: SpawnCapturedResult = { ...FAILED_STEP, exit_code: 0 };
 
 const TREE_OPERATIONS = ["pull", "push", "fetch"] as const;
+const NAMED_OPERATIONS = ["clone", ...TREE_OPERATIONS] as const;
 const WIN32 = process.platform === "win32";
 const PATH_LIMITS = [1024, 4096];
+
+const SHARE_SPELLINGS = [
+  "\\\\server\\share\\repo",
+  "//server/share/repo",
+  "\\\\?\\UNC\\server\\share\\repo",
+  "\\\\wsl$\\Ubuntu\\home\\repo",
+  "\\\\.\\UNC\\server\\share\\repo",
+  "//./UNC/server/share/repo",
+  "\\\\?\\GLOBALROOT\\Device\\Mup\\server\\share\\repo",
+  "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\repo",
+  "\\\\.\\C:\\..\\UNC\\server\\share\\repo",
+];
+const SHARE_CASES = NAMED_OPERATIONS.flatMap((operation) =>
+  SHARE_SPELLINGS.map((spelled) => [operation, spelled] as const),
+);
+
+const DOT_SEGMENT_CASES: ReadonlyArray<
+  readonly [string, (typeof NAMED_OPERATIONS)[number], (root: string) => string]
+> = [
+  ...NAMED_OPERATIONS.flatMap((operation) => [
+    [
+      `${operation}, absolute`,
+      operation,
+      (r: string) => `${r}${sep}agent${sep}..${sep}tree`,
+    ] as const,
+    ...(WIN32
+      ? [
+          [
+            `${operation}, absolute, spelled with /`,
+            operation,
+            (r: string) => `${r}/agent/../tree`,
+          ] as const,
+        ]
+      : []),
+  ]),
+  ["clone, relative", "clone", () => `..${sep}tree`],
+  ...(WIN32 ? [["clone, relative, spelled with /", "clone", () => "../tree"] as const] : []),
+];
+
+const UNDER_THE_FLOOR = [
+  ["a file", "file"],
+  ["a missing name", "missing"],
+] as const;
+const UNDER_THE_FLOOR_CASES = TREE_OPERATIONS.flatMap((operation) =>
+  UNDER_THE_FLOOR.map(([label, name]) => [operation, label, name] as const),
+);
+
+const OUTSIDE_THE_FLOOR = [
+  ["a missing name", "absent", "working_directory does not exist"],
+  ["a file", "file", "working_directory is not a directory"],
+] as const;
+const OUTSIDE_THE_FLOOR_CASES = TREE_OPERATIONS.flatMap((operation) =>
+  OUTSIDE_THE_FLOOR.map(([label, name, message]) => [operation, label, name, message] as const),
+);
+
+function leadsWithTwoSeparators(path: unknown): boolean {
+  return /^[\\/]{2}/.test(String(path));
+}
+
+function notThere(): NodeJS.ErrnoException {
+  return Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+}
+
+function shareSpellingsTouched(): string[] {
+  return [
+    ...vi.mocked(statSync).mock.calls,
+    ...vi.mocked(realpath).mock.calls,
+    ...vi.mocked(lstat).mock.calls,
+  ]
+    .map(([path]) => String(path))
+    .filter(leadsWithTwoSeparators);
+}
 
 /** `<dir>/<name><behind>` with `.` steps in front of the name, `length` characters long: the name is "link", or "links" where that takes the odd character. */
 function padded(length: number, dir: string, behind = ""): { name: string; spelled: string } {
@@ -178,6 +263,33 @@ async function expectProtected(
   expect(spawnMock).not.toHaveBeenCalled();
 }
 
+async function expectInvalid(
+  action: GitAction,
+  message: string,
+  row: Record<string, unknown> = {},
+  daemon?: DaemonPaths,
+): Promise<void> {
+  const err = await expectVaultError(() => use(action, daemon), ErrorCode.INVALID_GIT_CONFIG);
+  expect(err.message).toBe(message);
+  expect(log.mock.calls).toEqual([
+    [
+      {
+        eventType: "secret.use",
+        secretId: "secret-1",
+        detail: {
+          context: "git",
+          operation: action.operation,
+          ...row,
+          error: "INVALID_GIT_CONFIG",
+        },
+        success: false,
+      },
+    ],
+  ]);
+  expect(readVersion).toHaveBeenCalledTimes(1);
+  expect(spawnMock).not.toHaveBeenCalled();
+}
+
 async function expectRefusedInDaemon(
   repository: string,
   row: Record<string, unknown> = {},
@@ -202,14 +314,20 @@ async function expectRefusedInDaemon(
   expect(spawnMock).not.toHaveBeenCalled();
 }
 
-async function cloneDestination(workingDirectory: string): Promise<string | undefined> {
+async function cloneDestination(
+  workingDirectory: string,
+  daemon?: DaemonPaths,
+): Promise<string | undefined> {
   spawnMock.mockResolvedValue(OK_STEP);
-  const result = await use({
-    type: "git",
-    operation: "clone",
-    repository: HTTPS_REPOSITORY,
-    working_directory: workingDirectory,
-  });
+  const result = await use(
+    {
+      type: "git",
+      operation: "clone",
+      repository: HTTPS_REPOSITORY,
+      working_directory: workingDirectory,
+    },
+    daemon,
+  );
   expect(result.exit_code).toBe(0);
   const calls = spawnMock.mock.calls as Parameters<typeof spawnCaptured>[];
   expect(calls.map(([, args]) => gitSubcommand(args))).toEqual(["ls-remote", "fetch", "clone"]);
@@ -419,13 +537,14 @@ describe.skipIf(GIT === null)(
         mkdirSync(join(root, "agent"));
         const link = join(root, "agent", "link");
         symlinkSync(vaultDir, link, "dir");
-        await expectProtected(
+        await expectInvalid(
           {
             type: "git",
             operation: "clone",
             repository: HTTPS_REPOSITORY,
             working_directory: `${link}/../declared/new`,
           },
+          DOT_SEGMENT,
           {},
           { protectedDirs: [declared], protectedFiles: [] },
         );
@@ -679,6 +798,7 @@ describe.skipIf(GIT === null)(
     it.runIf(WIN32).each([
       ["as it is", ""],
       ["in the \\\\?\\ namespace", "\\\\?\\"],
+      ["in the \\\\.\\ namespace", "\\\\.\\"],
     ])(
       "a clone whose destination is spelled through a junction into the vault's directory and `..`, %s, is read as Windows reads it: beside the junction, and git receives that path",
       async (_label, prefix) => {
@@ -954,6 +1074,250 @@ describe.skipIf(GIT === null)(
       expect(spawnMock).toHaveBeenCalledTimes(1);
       const [, args] = spawnMock.mock.calls[0] as Parameters<typeof spawnCaptured>;
       expect(gitSubcommand(args)).toBe("ls-remote");
+    });
+
+    // The rule reads win32 spellings only. A path that begins with two separators answers
+    // ENOENT here without calling through, so no row reaches the network.
+    describe.runIf(WIN32)("a share's spelling (win32 only)", () => {
+      beforeEach(async () => {
+        const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+        const promises =
+          await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        vi.mocked(statSync).mockClear();
+        vi.mocked(realpath).mockClear();
+        vi.mocked(lstat).mockClear();
+        vi.mocked(statSync).mockImplementation((path, options) => {
+          if (leadsWithTwoSeparators(path)) throw notThere();
+          return fs.statSync(path, options);
+        });
+        vi.mocked(realpath).mockImplementation(async (path, options) => {
+          if (leadsWithTwoSeparators(path)) throw notThere();
+          return promises.realpath(path, options);
+        });
+        vi.mocked(lstat).mockImplementation(async (path, options) => {
+          if (leadsWithTwoSeparators(path)) throw notThere();
+          return promises.lstat(path, options);
+        });
+      });
+
+      afterEach(() => {
+        vi.mocked(statSync).mockReset();
+        vi.mocked(realpath).mockReset();
+        vi.mocked(lstat).mockReset();
+      });
+
+      it.each(SHARE_CASES)(
+        "a working directory spelled as a share is refused before anything touches it: %s into %s over HTTPS",
+        async (operation, spelled) => {
+          await expectInvalid(
+            {
+              type: "git",
+              operation,
+              repository: HTTPS_REPOSITORY,
+              working_directory: spelled,
+            },
+            NAMES_A_SHARE,
+          );
+          expect(shareSpellingsTouched()).toEqual([]);
+        },
+      );
+
+      it.skipIf(SSH === null).each(SHARE_SPELLINGS)(
+        "a working directory spelled as a share is refused before anything touches it: pull in %s over SSH, the row naming the host (skipped where the native ssh client does not resolve)",
+        async (spelled) => {
+          await expectInvalid(
+            {
+              type: "git",
+              operation: "pull",
+              repository: SSH_REPOSITORY,
+              working_directory: spelled,
+            },
+            NAMES_A_SHARE,
+            { host: SSH_HOST },
+          );
+          expect(shareSpellingsTouched()).toEqual([]);
+        },
+      );
+
+      it.each([
+        ["without a working directory", undefined],
+        ["with a relative working directory", "clone"],
+      ])(
+        "the process's own directory is not judged as a share: a clone %s, the process's own spelled as a share, gets the floor's refusal",
+        async (_form, workingDirectory) => {
+          const cwd = vi.spyOn(process, "cwd").mockReturnValue("\\\\server\\share\\dir");
+          try {
+            await expectProtected({
+              type: "git",
+              operation: "clone",
+              repository: HTTPS_REPOSITORY,
+              ...(workingDirectory !== undefined ? { working_directory: workingDirectory } : {}),
+            });
+            expect(cwd).toHaveBeenCalled();
+          } finally {
+            cwd.mockRestore();
+          }
+        },
+      );
+    });
+
+    it.each(DOT_SEGMENT_CASES)(
+      "in a daemon a `..` segment is refused: %s",
+      async (_label, operation, spell) => {
+        mkdirSync(join(root, "agent"));
+        mkdirSync(join(root, "tree"));
+        const cwd = vi.spyOn(process, "cwd").mockReturnValue(join(root, "agent"));
+        try {
+          await expectInvalid(
+            {
+              type: "git",
+              operation,
+              repository: HTTPS_REPOSITORY,
+              working_directory: spell(root),
+            },
+            DOT_SEGMENT,
+            {},
+            NO_PATHS,
+          );
+        } finally {
+          cwd.mockRestore();
+        }
+      },
+    );
+
+    it("in a daemon a destination whose name holds `..` within it reaches git", async () => {
+      expect(await cloneDestination(join(root, "a..b"), NO_PATHS)).toBe(join(root, "a..b"));
+    });
+
+    it.each(UNDER_THE_FLOOR_CASES)(
+      "under the floor every spelling gets the floor's refusal: %s into %s over HTTPS",
+      async (operation, _label, name) => {
+        writeFileSync(join(vaultDir, "file"), "");
+        await expectProtected({
+          type: "git",
+          operation,
+          repository: HTTPS_REPOSITORY,
+          working_directory: join(vaultDir, name),
+        });
+      },
+    );
+
+    it.skipIf(SSH === null).each(UNDER_THE_FLOOR_CASES)(
+      "under the floor every spelling gets the floor's refusal: %s into %s over SSH, the row naming the host (skipped where the native ssh client does not resolve)",
+      async (operation, _label, name) => {
+        writeFileSync(join(vaultDir, "file"), "");
+        await expectProtected(
+          {
+            type: "git",
+            operation,
+            repository: SSH_REPOSITORY,
+            working_directory: join(vaultDir, name),
+          },
+          { host: SSH_HOST },
+        );
+      },
+    );
+
+    it.each(UNDER_THE_FLOOR_CASES)(
+      "under the floor every spelling gets the floor's refusal: %s into %s, spelled relative to the process's own directory",
+      async (operation, _label, name) => {
+        writeFileSync(join(vaultDir, "file"), "");
+        const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+        try {
+          await expectProtected({
+            type: "git",
+            operation,
+            repository: HTTPS_REPOSITORY,
+            working_directory: join("vault", name),
+          });
+          expect(cwd).toHaveBeenCalled();
+        } finally {
+          cwd.mockRestore();
+        }
+      },
+    );
+
+    // A symbolic link needs a privilege on win32.
+    it.skipIf(WIN32).each(UNDER_THE_FLOOR_CASES)(
+      "under the floor every spelling gets the floor's refusal: %s into %s, reached through a link outside the floor",
+      async (operation, _label, name) => {
+        writeFileSync(join(vaultDir, "file"), "");
+        const link = join(root, "link");
+        symlinkSync(join(vaultDir, name), link);
+        await expectProtected({
+          type: "git",
+          operation,
+          repository: HTTPS_REPOSITORY,
+          working_directory: link,
+        });
+      },
+    );
+
+    it.each(OUTSIDE_THE_FLOOR_CASES)(
+      "outside the floor the two messages name no path: %s into %s",
+      async (operation, _label, name, message) => {
+        writeFileSync(join(root, "file"), "");
+        await expectInvalid(
+          {
+            type: "git",
+            operation,
+            repository: HTTPS_REPOSITORY,
+            working_directory: join(root, name),
+          },
+          message,
+        );
+      },
+    );
+
+    it.skipIf(SSH === null)(
+      "outside the floor the two messages name no path: pull into a missing name over SSH, the row naming the host (skipped where the native ssh client does not resolve)",
+      async () => {
+        await expectInvalid(
+          {
+            type: "git",
+            operation: "pull",
+            repository: SSH_REPOSITORY,
+            working_directory: join(root, "absent"),
+          },
+          "working_directory does not exist",
+          { host: SSH_HOST },
+        );
+      },
+    );
+
+    it.each(TREE_OPERATIONS)(
+      "the directory check reads the resolved path: a relative working tree is read from the process's own, and %s goes on to its first probe there",
+      async (operation) => {
+        mkdirSync(join(root, "vault-beside"));
+        const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+        try {
+          expect(await treeDirectory(operation, "vault-beside")).toBe(join(root, "vault-beside"));
+          expect(cwd).toHaveBeenCalled();
+        } finally {
+          cwd.mockRestore();
+        }
+      },
+    );
+
+    it("required answers before the floor: a pull without a working directory, the process's own inside the vault's directory, is refused as required", async () => {
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultDir);
+      try {
+        await expectInvalid(
+          { type: "git", operation: "pull", repository: HTTPS_REPOSITORY },
+          "working_directory is required for pull",
+        );
+      } finally {
+        cwd.mockRestore();
+      }
+    });
+
+    it("the daemon's clone rule answers before the floor: a clone without a working directory, the process's own inside the vault's directory, is refused by the rule", async () => {
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(vaultDir);
+      try {
+        await expectRefusedInDaemon(HTTPS_REPOSITORY);
+      } finally {
+        cwd.mockRestore();
+      }
     });
   },
 );

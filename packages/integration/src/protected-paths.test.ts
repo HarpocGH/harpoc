@@ -76,7 +76,8 @@ const SSH_KEY_PEM = generateKeyPairSync("rsa", {
 const MAIL_CREDENTIAL = "mailer:protected-paths-mail-value";
 
 const GIT_CREDENTIAL = "x-access-token:protected-paths-git-value";
-const IN_VAULT = "Attachment rejected: an attachment path is inside the vault directory";
+const MAIL_NOT_LISTED =
+  "Attachment rejected: an attachment path is not inside a directory the secret's policy lists";
 const NOT_LISTED = "sftp local path is not inside a directory the secret's policy lists";
 const GIT_PROTECTED = "git working directory is inside a directory the vault protects";
 
@@ -389,7 +390,7 @@ describe("smtp attachments", () => {
       () => engine.useSecret(handle, send(target.file())),
       ErrorCode.ATTACHMENT_REJECTED,
     );
-    expect(err.message).toBe(IN_VAULT);
+    expect(err.message).toBe(MAIL_NOT_LISTED);
     const rows = await useRows(engine, handle);
     expect(rows.map(({ success, detail }) => ({ success, detail }))).toEqual([
       {
@@ -431,7 +432,7 @@ describe("smtp attachments", () => {
 
   describe("with the engine declared a daemon", () => {
     it.each(files(PROTECTED))(
-      "an attachment of %s is refused ATTACHMENT_REJECTED with the in-vault message and one failed secret.use row, nothing connected",
+      "an attachment of %s is refused ATTACHMENT_REJECTED with the list message and one failed secret.use row, nothing connected",
       (_label, target) => refused(daemon as VaultEngine, `smtp-${target.key}-daemon`, target),
     );
 
@@ -485,18 +486,30 @@ describe.skipIf(GIT === null)("git clones (skipped where no supported git resolv
     // A symbolic link needs a privilege on win32, and only off win32 does the system resolve a
     // `..` behind a link from the link's target.
     it.skipIf(process.platform === "win32")(
-      "a clone spelled through a link into the vault's directory and `..` into the backup directory is refused LOCAL_PATH_NOT_ALLOWED with one failed secret.use row naming no path, nothing written, nothing connected",
+      "a clone spelled through a link into the vault's directory and `..` into the backup directory is refused INVALID_GIT_CONFIG with one failed secret.use row naming no path, nothing written, nothing connected",
       async () => {
         const work = fixtureDir(join(root, "agent-work"), 0o755);
         const link = join(work, "to-vault");
         symlinkSync(join(root, "vault"), link, "dir");
         const held = readdirSync(backupDir);
         try {
-          await gitRefused(
-            daemon as VaultEngine,
-            "git-link-parent-daemon",
-            `${link}/../backups/planted`,
+          const engine = daemon as VaultEngine;
+          const handle = await gitSecret(engine, "git-link-parent-daemon");
+          const err = await expectVaultError(
+            () => engine.useSecret(handle, clone(`${link}/../backups/planted`)),
+            ErrorCode.INVALID_GIT_CONFIG,
           );
+          expect(err.message).toBe("working_directory must not hold a .. segment");
+          const rows = await useRows(engine, handle);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]?.success).toBe(false);
+          expect(rows[0]?.detail).toEqual({
+            context: "git",
+            operation: "clone",
+            error: ErrorCode.INVALID_GIT_CONFIG,
+          });
+          expect(JSON.stringify(rows).includes(JSON.stringify(root).slice(1, -1))).toBe(false);
+          expect(connections).toBe(0);
           expect(readdirSync(backupDir)).toEqual(held);
           expect(readdirSync(work)).toEqual(["to-vault"]);
         } finally {

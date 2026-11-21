@@ -17,6 +17,7 @@ import { isHeldPath } from "../session/path-trust.js";
 const GLOB_CHARACTERS = /[*?[]/;
 const GLOB_CHARACTERS_AND_ESCAPE = /[*?[\\]/;
 const WIN32_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³]|CONIN\$|CONOUT\$)$/i;
+const WIN32_DEVICE_NAMESPACE_DRIVE = /^\\\\[?.]\\[A-Za-z]:(?:\\|$)/;
 const NOT_WRITTEN_AS_STORED = /[\uFFFD\p{Cs}]/u;
 const POSIX_DEVICE_ROOTS = ["/dev", "/proc", "/sys"];
 
@@ -28,8 +29,9 @@ export interface DaemonPaths {
 
 /**
  * Why a local path is refused: `not_absolute`, `device`, `network_share`,
- * `glob` and `win32_name` before any file-system call; `protected` inside the
- * vault directory or a declared path, a path that does not resolve judged
+ * `glob`, `win32_name`, `dot_segment` and `is_directory` for a write whose
+ * spelling ends in a separator before any file-system call; `protected` inside
+ * the vault directory or a declared path, a path that does not resolve judged
  * through its nearest ancestor that resolves; `not_allowed` any other path that
  * does not resolve, a resolved name that is not handed on, one in no listed
  * directory or one not held; `is_directory` a write onto an existing directory
@@ -41,6 +43,7 @@ export type LocalPathRefusal =
   | "network_share"
   | "glob"
   | "win32_name"
+  | "dot_segment"
   | "protected"
   | "not_allowed"
   | "is_directory";
@@ -95,6 +98,15 @@ export function namesNetworkShare(path: string, platform: NodeJS.Platform): bool
 }
 
 /**
+ * Whether a win32 path is the device-namespace spelling of a drive letter:
+ * `\\?\X:` or `\\.\X:` as `win32.normalize` spells it, at its end or before a
+ * separator. Nothing else under the two namespaces is one.
+ */
+export function namesDeviceNamespaceDrive(path: string, platform: NodeJS.Platform): boolean {
+  return platform === "win32" && WIN32_DEVICE_NAMESPACE_DRIVE.test(win32.normalize(path));
+}
+
+/**
  * On win32 the normalized spelling must lead with a drive and a separator, or
  * with two separators (a device or a network share, refused next): `C:x`, `/x`
  * and `//server`, which `win32.normalize` reads as `\server`, are not absolute.
@@ -139,6 +151,14 @@ export function holdsNameWin32ReadsDifferently(path: string, platform: NodeJS.Pl
     platform === "win32" &&
     win32Names(path).some((name) => /[. ]$/.test(name) || name.includes(":"))
   );
+}
+
+export function holdsDotSegment(path: string, platform: NodeJS.Platform): boolean {
+  return path.split(platform === "win32" ? /[\\/]/ : "/").includes("..");
+}
+
+function endsInSeparator(path: string, platform: NodeJS.Platform): boolean {
+  return path.endsWith("/") || (platform === "win32" && path.endsWith("\\"));
 }
 
 /**
@@ -293,12 +313,15 @@ async function resolvedFloorPaths(
   return resolved;
 }
 
-async function isUnderFloor(
-  resolved: string,
+/**
+ * The floor's paths, resolved: the directories of `vaultFiles` and the declared
+ * directories, and the declared files. Null where one cannot be read.
+ */
+async function resolvedFloor(
   vaultFiles: readonly string[],
   daemon: DaemonPaths | undefined,
   realpathOf: FileSystem["realpath"],
-): Promise<boolean> {
+): Promise<{ dirs: string[]; files: string[] } | null> {
   const dirs = await resolvedFloorPaths(
     [
       ...new Set(vaultFiles.map((file) => dirname(resolve(file)))),
@@ -310,11 +333,20 @@ async function isUnderFloor(
     (daemon?.protectedFiles ?? []).map((file) => resolve(file)),
     realpathOf,
   );
+  return dirs === null || files === null ? null : { dirs, files };
+}
+
+async function isUnderFloor(
+  resolved: string,
+  vaultFiles: readonly string[],
+  daemon: DaemonPaths | undefined,
+  realpathOf: FileSystem["realpath"],
+): Promise<boolean> {
+  const floor = await resolvedFloor(vaultFiles, daemon, realpathOf);
   return (
-    dirs === null ||
-    files === null ||
-    dirs.some((dir) => isWithin(dir, resolved)) ||
-    files.some((file) => relative(file, resolved) === "")
+    floor === null ||
+    floor.dirs.some((dir) => isWithin(dir, resolved)) ||
+    floor.files.some((file) => relative(file, resolved) === "")
   );
 }
 
@@ -329,6 +361,22 @@ export async function isProtectedPath(
   daemon?: DaemonPaths,
 ): Promise<boolean> {
   return isUnderFloor(resolved, vaultFiles, daemon, realpath);
+}
+
+/**
+ * Whether a floor directory or a declared file, each resolved as the floor
+ * resolves it, lies inside a resolved directory. A floor path that cannot be
+ * read answers true.
+ */
+export async function holdsProtectedPath(
+  resolvedDir: string,
+  vaultFiles: readonly string[],
+  daemon?: DaemonPaths,
+): Promise<boolean> {
+  const floor = await resolvedFloor(vaultFiles, daemon, realpath);
+  return (
+    floor === null || [...floor.dirs, ...floor.files].some((path) => isWithin(resolvedDir, path))
+  );
 }
 
 async function resolvedListedDirs(
@@ -373,6 +421,10 @@ export async function judgeLocalPath(
   const lexical = lexicalRefusal(input.localPath, platform, input.refuseGlob);
   if (lexical !== null) return { refusal: lexical };
   const localPath = input.localPath as string;
+  if (holdsDotSegment(localPath, platform)) return { refusal: "dot_segment" };
+  if (input.access === "write" && endsInSeparator(localPath, platform)) {
+    return { refusal: "is_directory" };
+  }
 
   const target =
     input.access === "read"
@@ -422,6 +474,7 @@ const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
   glob: () => VaultError.invalidInput("sftp local path must not contain glob characters"),
   win32_name: () =>
     VaultError.invalidInput("sftp local path holds a name Windows reads differently"),
+  dot_segment: () => VaultError.invalidInput("sftp local path must not hold a .. segment"),
   protected: () => VaultError.localPathNotAllowed(),
   not_allowed: () => VaultError.localPathNotAllowed(),
   is_directory: () => VaultError.invalidInput("sftp download path must name a file"),
@@ -429,10 +482,11 @@ const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
 
 /**
  * Judges the local file of an sftp `upload` or `download` (`judgeLocalPath`)
- * and returns the resolved path the batch command names. Past the lexical
- * checks every refusal carries one code and one message, so a refusal never
- * tells whether a file exists; a download onto a directory is told so only
- * inside a listed directory.
+ * and returns the resolved path the batch command names. Past the checks of
+ * the spelling every refusal carries one code and one message, so a refusal
+ * never tells whether a file exists; a download is told it names no file where
+ * its spelling ends in a separator, and onto a directory only inside a listed
+ * directory.
  */
 export async function resolveSftpLocalPath(input: {
   localPath: unknown;

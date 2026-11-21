@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectAbsent } from "@harpoc/test-utils";
 import {
   JOB_WRAPPER_COMPILE_TIMEOUT_MS,
   JOB_WRAPPER_KEEP_FLAG,
@@ -30,7 +31,7 @@ import {
   setJobWrapperUnavailableHandler,
   wrapInJob,
 } from "./win32-job-wrapper.js";
-import type { JobWrap, JobWrapperSeams } from "./win32-job-wrapper.js";
+import type { JobWrap, JobWrapperResolution, JobWrapperSeams } from "./win32-job-wrapper.js";
 
 const TRICKY = [
   "a b",
@@ -47,6 +48,18 @@ const TRICKY = [
   "end\\",
   "trail\\\\ ",
 ];
+
+const HELPER_TEXT = "helper-text-marker-3f9c";
+
+function codedError(code: string, message: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function reasonOf(resolution: JobWrapperResolution): string | undefined {
+  return "unavailable" in resolution ? resolution.unavailable : undefined;
+}
 
 let dir: string;
 const calls: Array<{ command: string; args: string[]; timeoutMs: number }> = [];
@@ -158,11 +171,11 @@ describe("resolveJobWrapper", () => {
     const r = await resolveJobWrapper(
       seams({
         restrictDir: () => {
-          throw new Error("icacls exited 5");
+          throw new Error("ACL restriction failed (exit 5)");
         },
       }),
     );
-    expect(r).toEqual({ unavailable: expect.stringMatching(/icacls exited 5/) });
+    expect(r).toEqual({ unavailable: expect.stringMatching(/ACL restriction failed \(exit 5\)/) });
     expect(calls).toHaveLength(0);
   });
 
@@ -248,11 +261,11 @@ describe("resolveJobWrapper", () => {
     const r = await resolveJobWrapper(
       seams({
         restrictDir: () => {
-          throw new Error("icacls exited 5");
+          throw new Error("ACL restriction failed (exit 5)");
         },
       }),
     );
-    expect(r).toEqual({ unavailable: expect.stringMatching(/icacls exited 5/) });
+    expect(r).toEqual({ unavailable: expect.stringMatching(/ACL restriction failed \(exit 5\)/) });
     expect(existsSync(jobWrapperExePath(join(dir, "home-helpers")))).toBe(false);
   });
 
@@ -301,6 +314,50 @@ describe("resolveJobWrapper", () => {
       seams({ runHelper: () => Promise.reject(new Error("boom")) }),
     );
     expect(r).toEqual({ unavailable: "compile failed: csc did not complete: boom" });
+  });
+
+  it("a compiler that cannot be spawned is named by its errno code, never the spawn error's text (L9)", async () => {
+    const r = await resolveJobWrapper(
+      seams({
+        runHelper: () => Promise.reject(codedError("ENOENT", `spawn ${HELPER_TEXT} ENOENT`)),
+      }),
+    );
+    expectAbsent(reasonOf(r), HELPER_TEXT);
+    expect(r).toEqual({ unavailable: "compile failed: csc did not complete: ENOENT" });
+  });
+
+  it("a probe run that cannot be spawned is named by its errno code, never the spawn error's text (L9)", async () => {
+    const compile = fakeHelper() as NonNullable<JobWrapperSeams["runHelper"]>;
+    const r = await resolveJobWrapper(
+      seams({
+        runHelper: (command, args, timeoutMs) =>
+          command.endsWith("csc.exe")
+            ? compile(command, args, timeoutMs)
+            : Promise.reject(codedError("ENOENT", `spawn ${HELPER_TEXT} ENOENT`)),
+      }),
+    );
+    expectAbsent(reasonOf(r), HELPER_TEXT);
+    expect(r).toEqual({ unavailable: "probe run failed: ENOENT" });
+  });
+
+  it("a throw outside the compile is named by its errno code, never node's text (L9)", async () => {
+    const r = await resolveJobWrapper(
+      seams({
+        probeBinary: () => {
+          throw codedError("EACCES", `EACCES: permission denied, access '${HELPER_TEXT}'`);
+        },
+      }),
+    );
+    expectAbsent(reasonOf(r), HELPER_TEXT);
+    expect(r).toEqual({ unavailable: "resolution failed: EACCES" });
+  });
+
+  it("a cache directory that cannot be created is named by its errno code, never node's text with the path (L9)", async () => {
+    const blocked = join(dir, HELPER_TEXT);
+    writeFileSync(blocked, "a file where the dir should be");
+    const r = await resolveJobWrapper(seams({ cacheDirs: [blocked] }));
+    expectAbsent(reasonOf(r), HELPER_TEXT);
+    expect(r).toEqual({ unavailable: "compile failed: ENOTDIR" });
   });
 
   it("honours the forced-unavailable seam ahead of everything", async () => {
@@ -389,7 +446,7 @@ describe("restrictToOwner (note 3, 2026-09-10)", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("rethrows a spawn error, and turns a non-zero exit into a message with the capped detail", () => {
+  it("a spawn error and a non-zero exit become the step's own text, nothing of icacls' (L9)", () => {
     expect(() =>
       restrictToOwner("C:\\cache", {
         account: "alice",
@@ -398,7 +455,7 @@ describe("restrictToOwner (note 3, 2026-09-10)", () => {
           error: new Error("spawnSync icacls ENOENT"),
         })) as unknown as typeof spawnSync,
       }),
-    ).toThrow(/spawnSync icacls ENOENT/);
+    ).toThrow(/^ACL restriction failed to run$/);
     expect(() =>
       restrictToOwner("C:\\cache", {
         account: "alice",
@@ -408,7 +465,42 @@ describe("restrictToOwner (note 3, 2026-09-10)", () => {
           stderr: Buffer.from("x".repeat(300)),
         })) as unknown as typeof spawnSync,
       }),
-    ).toThrow(new RegExp(`^icacls exited 5: x{200}$`));
+    ).toThrow(/^ACL restriction failed \(exit 5\)$/);
+  });
+
+  it("reaches the wrapper's reason as the step and the exit status, never icacls' output or the spawn error (L9)", async () => {
+    writeFileSync(join(dir, "dist-win32"), "a file where the dir should be");
+    const icacls = (answer: object) => (target: string) =>
+      restrictToOwner(target, {
+        account: "alice",
+        spawnSync: (() => answer) as unknown as typeof spawnSync,
+      });
+    const exited = await resolveJobWrapper(
+      seams({
+        restrictDir: icacls({
+          ...ok,
+          status: 5,
+          stdout: Buffer.from(`${HELPER_TEXT} on stdout`),
+          stderr: Buffer.from(`${HELPER_TEXT} on stderr`),
+        }),
+      }),
+    );
+    resetJobWrapperProbeForTests();
+    const unrun = await resolveJobWrapper(
+      seams({
+        restrictDir: icacls({
+          ...ok,
+          status: null,
+          error: codedError("ETIMEDOUT", `spawnSync ${HELPER_TEXT} ETIMEDOUT`),
+        }),
+      }),
+    );
+    expectAbsent(reasonOf(exited), HELPER_TEXT);
+    expectAbsent(reasonOf(unrun), HELPER_TEXT);
+    expect([exited, unrun]).toEqual([
+      { unavailable: "compile failed: ACL restriction failed (exit 5)" },
+      { unavailable: "compile failed: ACL restriction failed to run" },
+    ]);
   });
 });
 

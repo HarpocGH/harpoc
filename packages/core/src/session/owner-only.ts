@@ -24,11 +24,8 @@ export function restrictWindowsAclToOwner(path: string): void {
     [path, "/inheritance:r", "/grant:r", `${account}:F`],
     { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
   );
-  if (res.error) throw res.error;
-  if (res.status !== 0) {
-    const detail = (res.stderr?.toString() || res.stdout?.toString() || "").trim().slice(0, 200);
-    throw new Error(`icacls exited ${String(res.status)}${detail ? `: ${detail}` : ""}`);
-  }
+  if (res.error) throw new Error("ACL restriction failed to run");
+  if (res.status !== 0) throw new Error(`ACL restriction failed (exit ${String(res.status)})`);
 }
 
 /**

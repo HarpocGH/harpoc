@@ -59,10 +59,12 @@ export interface RecordingLease extends ProxyLease {
 export function recordingLease(
   value: string = SECRET_VALUE,
   caPem: string | null = FIXTURE_CA_PEM,
+  plainHttp = false,
 ): RecordingLease {
   return {
     value: new Uint8Array(Buffer.from(value)),
     ...(caPem === null ? {} : { caPem }),
+    ...(plainHttp ? { plainHttp: true as const } : {}),
     complete: vi.fn<(outcome: ProxyOutcome) => void>(),
   };
 }

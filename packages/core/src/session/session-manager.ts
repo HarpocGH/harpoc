@@ -61,6 +61,12 @@ function isMissingFileError(err: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
+function failureReason(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown error";
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string" ? code : err.message;
+}
+
 /**
  * What a caller believes the session file on disk is. An absent field matches
  * anything; a `session_id` that differs means another process unlocked over
@@ -232,9 +238,7 @@ export class SessionManager {
       raw = await readFile(this.sessionPath, "utf8");
     } catch (err) {
       if (isMissingFileError(err)) return null;
-      throw VaultError.sessionFileError(
-        `Failed to read session: ${err instanceof Error ? err.message : "unknown"}`,
-      );
+      throw VaultError.sessionFileError(`Failed to read session: ${failureReason(err)}`);
     }
 
     // Parse JSON
@@ -409,7 +413,7 @@ export class SessionManager {
         await chmod(this.sessionPath, 0o600).catch((err: unknown) => {
           this.onPermissionRepairFailure(
             new Error(
-              `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
+              `failed to restrict session file permissions to owner-only (${failureReason(err)})`,
             ),
           );
         });
@@ -425,9 +429,7 @@ export class SessionManager {
       }
 
       if (err instanceof VaultError) throw err;
-      throw VaultError.sessionFileError(
-        `Failed to write session: ${err instanceof Error ? err.message : "unknown"}`,
-      );
+      throw VaultError.sessionFileError(`Failed to write session: ${failureReason(err)}`);
     }
   }
 
@@ -443,7 +445,7 @@ export class SessionManager {
     } catch (err) {
       this.onPermissionRepairFailure(
         new Error(
-          `failed to restrict session file permissions to owner-only (${err instanceof Error ? err.message : String(err)})`,
+          `failed to restrict session file permissions to owner-only (${failureReason(err)})`,
         ),
       );
     }
@@ -478,7 +480,7 @@ export class SessionManager {
         if (this.lastLockError) {
           this.onPermissionRepairFailure(
             new Error(
-              `skipping the session slide: the session lock at ${this.lockPath} could not be taken (${this.lastLockError.message})`,
+              `skipping the session slide: the session lock at ${this.lockPath} could not be taken (${failureReason(this.lastLockError)})`,
             ),
           );
         }
@@ -497,7 +499,7 @@ export class SessionManager {
       if (nonce === null && this.lastLockError) {
         this.onPermissionRepairFailure(
           new Error(
-            `proceeding without the session lock at ${this.lockPath} (${this.lastLockError.message})`,
+            `proceeding without the session lock at ${this.lockPath} (${failureReason(this.lastLockError)})`,
           ),
         );
       }
@@ -621,9 +623,10 @@ export class SessionManager {
   }
 
   private reportReleaseFailure(err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
     this.onPermissionRepairFailure(
-      new Error(`the session lock at ${this.lockPath} could not be released (${message})`),
+      new Error(
+        `the session lock at ${this.lockPath} could not be released (${failureReason(err)})`,
+      ),
     );
   }
 

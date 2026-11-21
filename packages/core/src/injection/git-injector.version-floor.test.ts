@@ -67,7 +67,7 @@ const OPERATIONS = ["clone", "pull", "push", "fetch", "ls-remote"] as const;
 const PLANS: Record<GitOperation, readonly string[]> = {
   clone: ["network", "network", "local"],
   "ls-remote": ["network"],
-  pull: ["local", "local", "network", "local"],
+  pull: ["local", "local", "local", "network", "local"],
   push: ["local", "local", "local", "network"],
   fetch: ["local", "local", "local", "network", "local"],
 };
@@ -206,9 +206,10 @@ beforeEach(() => {
   spawnMock.mockReset();
   spawnMock.mockImplementation((_cmd, args) => {
     const sub = gitSubcommand(args);
-    const stdout =
-      sub === "rev-parse"
-        ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n`
+    const stdout = args.includes("--show-toplevel")
+      ? `${scratch}\n`
+      : sub === "rev-parse"
+        ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\n`
         : sub === "symbolic-ref"
           ? "refs/heads/main\n"
           : sub === "config"

@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { chmod } from "node:fs/promises";
+import { chmod, readFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionFile } from "@harpoc/shared";
-import { DEFAULT_SESSION_TTL_MS, MAX_SESSION_TTL_MS } from "@harpoc/shared";
+import { DEFAULT_SESSION_TTL_MS, ErrorCode, MAX_SESSION_TTL_MS } from "@harpoc/shared";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { SessionManager } from "./session-manager.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -24,8 +25,16 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, chmod: vi.fn(actual.chmod) };
+  return { ...actual, chmod: vi.fn(actual.chmod), readFile: vi.fn(actual.readFile) };
 });
+
+const HELPER_TEXT = "helper-text-marker-3f9c";
+
+function codedError(code: string, message: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
 
 let sessionDir: string;
 let sessionPath: string;
@@ -87,7 +96,9 @@ describe("session file permissions (owner-only from creation)", () => {
 
   it("surfaces a failed permission repair via onPermissionRepairFailure (POSIX branch)", async () => {
     await withPlatform("linux", async () => {
-      vi.mocked(chmod).mockRejectedValueOnce(new Error("EPERM: operation not permitted"));
+      vi.mocked(chmod).mockRejectedValueOnce(
+        codedError("EPERM", `EPERM: operation not permitted, chmod '${HELPER_TEXT}'`),
+      );
       const failures: Error[] = [];
       const manager = new SessionManager(sessionPath, {
         onPermissionRepairFailure: (err) => failures.push(err),
@@ -96,7 +107,10 @@ describe("session file permissions (owner-only from creation)", () => {
       await manager.writeSession(makeValidSession());
 
       expect(failures).toHaveLength(1);
-      expect(failures[0]?.message).toContain("session file permissions");
+      expectAbsent(failures[0]?.message, HELPER_TEXT);
+      expect(failures[0]?.message).toBe(
+        "failed to restrict session file permissions to owner-only (EPERM)",
+      );
       expect(await manager.readSession()).not.toBeNull();
     });
   });
@@ -179,6 +193,43 @@ describe("session file permissions (owner-only from creation)", () => {
       });
     });
 
+    it("the report names the step and the exit status, never icacls' output or the spawn error", async () => {
+      await withPlatform("win32", async () => {
+        vi.mocked(spawnSync)
+          .mockReturnValueOnce({
+            status: 5,
+            signal: null,
+            output: [],
+            pid: 1,
+            stdout: Buffer.from(`${HELPER_TEXT} on stdout`),
+            stderr: Buffer.from(`${HELPER_TEXT} on stderr`),
+          } as unknown as ReturnType<typeof spawnSync>)
+          .mockReturnValueOnce({
+            status: null,
+            signal: "SIGTERM",
+            output: [],
+            pid: 1,
+            stdout: Buffer.from(""),
+            stderr: Buffer.from(""),
+            error: codedError("ETIMEDOUT", `spawnSync ${HELPER_TEXT} ETIMEDOUT`),
+          } as unknown as ReturnType<typeof spawnSync>);
+
+        const failures: Error[] = [];
+        const manager = new SessionManager(sessionPath, {
+          onPermissionRepairFailure: (err) => failures.push(err),
+        });
+        await manager.writeSession(makeValidSession());
+        await manager.writeSession(makeValidSession());
+
+        expectAbsent(failures[0]?.message, HELPER_TEXT);
+        expectAbsent(failures[1]?.message, HELPER_TEXT);
+        expect(failures.map((err) => err.message)).toEqual([
+          "failed to restrict session file permissions to owner-only (ACL restriction failed (exit 5))",
+          "failed to restrict session file permissions to owner-only (ACL restriction failed to run)",
+        ]);
+      });
+    });
+
     it.runIf(process.platform === "win32")(
       "real path: the ACL is reduced to the current user",
       async () => {
@@ -245,5 +296,39 @@ describe("session file atomic replace (M-T2b-12)", () => {
     );
     expect(existsSync(tmpPath)).toBe(false);
     expect(await manager.readSession()).not.toBeNull();
+  });
+});
+
+describe("session file errors name the errno code alone (L9)", () => {
+  it("a failed temp write is SESSION_FILE_ERROR naming ENOSPC, not node's text", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeFileSync).mockImplementation((path, data, options) => {
+      if (String(path).includes(".session.json.tmp.")) {
+        throw codedError("ENOSPC", `ENOSPC: no space left on device, write '${HELPER_TEXT}'`);
+      }
+      actualFs.writeFileSync(path, data, options);
+    });
+    try {
+      const error = await expectVaultError(
+        () => new SessionManager(sessionPath).writeSession(makeValidSession()),
+        ErrorCode.SESSION_FILE_ERROR,
+      );
+      expectAbsent(error.message, HELPER_TEXT);
+      expect(error.message).toBe("Session file error: Failed to write session: ENOSPC");
+    } finally {
+      vi.mocked(writeFileSync).mockReset();
+    }
+  });
+
+  it("a failed read is SESSION_FILE_ERROR naming EIO, not node's text", async () => {
+    vi.mocked(readFile).mockRejectedValueOnce(
+      codedError("EIO", `EIO: i/o error, read '${HELPER_TEXT}'`),
+    );
+    const error = await expectVaultError(
+      () => new SessionManager(sessionPath).readStoredSession(),
+      ErrorCode.SESSION_FILE_ERROR,
+    );
+    expectAbsent(error.message, HELPER_TEXT);
+    expect(error.message).toBe("Session file error: Failed to read session: EIO");
   });
 });

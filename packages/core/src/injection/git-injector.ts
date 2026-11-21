@@ -36,9 +36,13 @@ import {
   readGitVersion,
 } from "./git-injector-version.js";
 import {
+  holdsDotSegment,
   holdsNameNotWrittenAsStored,
   holdsNameWin32ReadsDifferently,
+  holdsProtectedPath,
   isProtectedPath,
+  namesDeviceNamespaceDrive,
+  namesNetworkShare,
   resolveSpelledDirectory,
 } from "./local-path.js";
 import type { DaemonPaths } from "./local-path.js";
@@ -566,6 +570,9 @@ export class GitInjector {
     try {
       assertWorkingTree(action, local);
       directory = await directoryOutsideFloor(action, local);
+      if (action.operation !== "clone" && action.operation !== "ls-remote") {
+        assertDirectory(directory as string);
+      }
     } catch (err) {
       hooks.dispose();
       if (err instanceof VaultError)
@@ -649,6 +656,7 @@ export class GitInjector {
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
+          floor: local,
         });
       } catch (err) {
         if (err instanceof VaultError) {
@@ -777,6 +785,9 @@ export class GitInjector {
     try {
       assertWorkingTree(action, local);
       directory = await directoryOutsideFloor(action, local);
+      if (action.operation !== "clone" && action.operation !== "ls-remote") {
+        assertDirectory(directory as string);
+      }
     } catch (err) {
       hooks.dispose();
       if (err instanceof VaultError)
@@ -836,6 +847,7 @@ export class GitInjector {
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
+          floor: local,
         });
       } catch (err) {
         if (err instanceof VaultError) {
@@ -1168,19 +1180,22 @@ function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): vo
     if (!action.working_directory && local?.daemon !== undefined) {
       throw VaultError.invalidGitConfig("working_directory is required for clone in a daemon");
     }
-    return;
-  }
-  if (action.operation === "ls-remote") {
+  } else if (action.operation === "ls-remote") {
     if (action.working_directory !== undefined) {
       throw VaultError.invalidGitConfig("working_directory is not accepted by ls-remote");
     }
     return;
-  }
-  const wd = action.working_directory;
-  if (!wd) {
+  } else if (!action.working_directory) {
     throw VaultError.invalidGitConfig(`working_directory is required for ${action.operation}`);
   }
-  assertDirectory(wd);
+  const wd = action.working_directory;
+  if (!wd) return;
+  if (namesNetworkShare(wd, process.platform) && !namesDeviceNamespaceDrive(wd, process.platform)) {
+    throw VaultError.invalidGitConfig("working_directory names a network share");
+  }
+  if (local?.daemon !== undefined && holdsDotSegment(wd, process.platform)) {
+    throw VaultError.invalidGitConfig("working_directory must not hold a .. segment");
+  }
 }
 
 /**
@@ -1203,11 +1218,13 @@ function spelledDirectory(action: GitAction): string | null {
 }
 
 /**
- * The one directory an operation is judged by and git is handed: the caller's
- * spelling resolved as the system resolves it, links followed, a part that
- * does not exist yet joined on. The floor's refusal where it lies inside the
- * floor, where it cannot be resolved so, and where git would read the resolved
- * spelling as another directory; undefined where git is handed none.
+ * The directory an operation names, as it is judged and git is handed it: the
+ * caller's spelling resolved as the system resolves it, links followed, a part
+ * that does not exist yet joined on. The floor's refusal where it lies inside
+ * the floor, where it cannot be resolved so, and where git would read the
+ * resolved spelling as another directory; undefined where git is handed none.
+ * A pull, a push and a fetch are judged by what git reports there as well
+ * (runRelayed).
  */
 async function directoryOutsideFloor(
   action: GitAction,
@@ -1245,6 +1262,7 @@ interface StepOptions {
   networkIsolation: boolean;
   fsIsolation: boolean;
   strictTreeExit: boolean;
+  floor: FloorPaths | undefined;
 }
 
 type GitStep = (
@@ -1344,6 +1362,7 @@ async function runPlan(
         localEnv,
         step,
         probeStep,
+        opts.floor,
       );
   }
 }
@@ -1579,15 +1598,16 @@ function remoteOf(listing: string, repository: string): string {
 /**
  * Pull, push and fetch (S1, face b): the credential never enters a git
  * process that reads the caller's repository config. The steps run in the
- * working tree — resolving its object directory, its HEAD and its refs (a
- * fetch also its remote for the repository), and on a pull or a fetch the
- * final `pull` or `fetch` from the relay — carry neither the credential nor
- * the agent socket; the one network step (`fetch` of the remote's HEAD or of
- * the fetch's refspecs, or the `push`) runs with `--git-dir` of the relay
- * repository the vault wrote (createRelayRepo). A step that fails ends the
- * operation with its result. The probes among them are read unredacted — the
- * vault parses their output and returns it only on a failure, redacted then
- * (RG-6).
+ * working tree — resolving its object directory, its shallow file, its git
+ * directory and its common directory (a pull also its top level), its HEAD
+ * and its refs (a fetch also its remote for the repository), and on a pull or
+ * a fetch the final `pull` or `fetch` from the relay — carry neither the
+ * credential nor the agent socket; the one network step (`fetch` of the
+ * remote's HEAD or of the fetch's refspecs, or the `push`) runs with
+ * `--git-dir` of the relay repository the vault wrote (createRelayRepo). A
+ * step that fails ends the operation with its result. The probes among them
+ * are read unredacted — the vault parses their output and returns it only on
+ * a failure, redacted then (RG-6).
  */
 async function runRelayed(
   action: GitAction,
@@ -1599,6 +1619,7 @@ async function runRelayed(
   localEnv: Record<string, string>,
   step: GitStep,
   probeStep: GitStep,
+  floor: FloorPaths | undefined,
 ): Promise<SpawnCapturedResult> {
   const forced = forcedGitConfig(hooksDir);
   const local = (args: string[]) => step([...forced, ...args], wd, localEnv);
@@ -1612,11 +1633,28 @@ async function runRelayed(
     "--git-path",
     "shallow",
     "--show-object-format",
+    "--absolute-git-dir",
+    "--git-common-dir",
   ]);
   if (!succeeded(probe)) return probe;
-  const [objectsDir, shallowFile, objectFormat] = probe.stdout.split(/\r?\n/);
-  if (!objectsDir || !shallowFile || (objectFormat !== "sha1" && objectFormat !== "sha256")) {
-    throw VaultError.gitOperationFailed("could not resolve the working tree's repository");
+  const [objectsDir, shallowFile, objectFormat, gitDir, commonDir] = probeLines(
+    probe.stdout,
+    5,
+  ) as [string, string, string, string, string];
+  if (objectFormat !== "sha1" && objectFormat !== "sha256") {
+    throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  }
+  if (floor !== undefined) {
+    for (const path of [gitDir, commonDir, objectsDir, shallowFile]) {
+      await resolvedOutsideFloor(path, floor);
+    }
+  }
+
+  let workTree: string | null = null;
+  if (action.operation === "pull") {
+    const topLevel = await localProbe(["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+    if (!succeeded(topLevel)) return topLevel;
+    workTree = await judgedWorkTree(probeLines(topLevel.stdout, 1)[0] as string, floor);
   }
 
   let head = `ref: ${RELAY_FETCHED_REF}`;
@@ -1686,6 +1724,7 @@ async function runRelayed(
       ...LOCAL_HOP_PROTOCOLS,
       "-c",
       `url.${relay.dir.replace(/\\/g, "/")}.insteadOf=${action.repository}`,
+      ...(workTree === null ? [] : [`--work-tree=${workTree}`]),
       ...(refspecs ? ["fetch", "--no-recurse-submodules", "--refmap="] : ["pull"]),
       ...(action.args ?? []),
       "--",
@@ -1702,6 +1741,54 @@ async function runRelayed(
   } finally {
     relay.dispose();
   }
+}
+
+const UNRESOLVED_REPOSITORY = "could not resolve the working tree's repository";
+
+/** A probe's answer, its final line feed removed: exactly `count` lines, none empty. */
+function probeLines(stdout: string, count: number): string[] {
+  const lines = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+  if (lines.length !== count || lines.includes("")) {
+    throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  }
+  return lines;
+}
+
+/**
+ * A path git names, resolved, one that does not exist yet through its nearest
+ * existing directory; the floor's refusal where it does not resolve or lies
+ * under the floor.
+ */
+async function resolvedOutsideFloor(printed: string, floor: FloorPaths): Promise<string> {
+  const resolved = await resolveSpelledDirectory(printed);
+  if (resolved === null || (await isProtectedPath(resolved, floor.vaultFiles, floor.daemon))) {
+    throw VaultError.localPathProtected();
+  }
+  return resolved;
+}
+
+/**
+ * The work tree a pull's local step is handed: the top level git names,
+ * resolved and, with a floor, outside it and holding no protected path, which
+ * a checkout could write. The floor's refusal where git would read the
+ * resolved spelling as another directory.
+ */
+async function judgedWorkTree(printed: string, floor: FloorPaths | undefined): Promise<string> {
+  const resolved =
+    floor === undefined
+      ? await resolveSpelledDirectory(printed)
+      : await resolvedOutsideFloor(printed, floor);
+  if (resolved === null) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  if (floor !== undefined && (await holdsProtectedPath(resolved, floor.vaultFiles, floor.daemon))) {
+    throw VaultError.workTreeHoldsProtectedPath();
+  }
+  if (
+    holdsNameWin32ReadsDifferently(resolved, process.platform) ||
+    holdsNameNotWrittenAsStored(resolved)
+  ) {
+    throw VaultError.localPathProtected();
+  }
+  return resolved;
 }
 
 /** `<oid> <refname>` lines of the caller's refs, renamed under `prefix` for packed-refs. */
@@ -1905,11 +1992,11 @@ function createRelayRepo(opts: {
 function assertDirectory(dir: string): void {
   try {
     if (!statSync(dir).isDirectory()) {
-      throw VaultError.invalidGitConfig(`working_directory is not a directory: ${dir}`);
+      throw VaultError.invalidGitConfig("working_directory is not a directory");
     }
   } catch (err) {
     if (err instanceof VaultError) throw err;
-    throw VaultError.invalidGitConfig(`working_directory does not exist: ${dir}`);
+    throw VaultError.invalidGitConfig("working_directory does not exist");
   }
 }
 

@@ -147,8 +147,22 @@ describe.skipIf(GIT === null)(
         symlinkSync(join(tempDir, "vault"), link, "dir");
         engine.declareDaemon({ protectedDirs: [declared], protectedFiles: [] });
 
-        await expectRefusedWithOneNewRow(handle, `${link}/../declared/clone`, 0);
+        const err = await expectVaultError(
+          () => engine.useSecret(handle, clone(`${link}/../declared/clone`)),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
 
+        expect(err.message).toBe("working_directory must not hold a .. segment");
+        const rows = await useRows(handle);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.success).toBe(false);
+        expect(rows[0]?.detail).toEqual({
+          context: "git",
+          operation: "clone",
+          error: ErrorCode.INVALID_GIT_CONFIG,
+        });
+        expect(JSON.stringify(rows).includes(JSON.stringify(tempDir).slice(1, -1))).toBe(false);
+        expect(spawnMock).not.toHaveBeenCalled();
         expect(readdirSync(declared)).toEqual([]);
         expect(readdirSync(join(tempDir, "agent"))).toEqual(["link"]);
       },

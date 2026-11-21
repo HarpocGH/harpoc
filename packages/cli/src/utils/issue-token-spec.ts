@@ -8,9 +8,10 @@ import {
   permissionSchema,
 } from "@harpoc/shared";
 import type { Permission } from "@harpoc/shared";
+import { isLinkPath } from "@harpoc/core";
 import type { TokenRotationSpec } from "@harpoc/core";
 import { parsePositiveInteger } from "./options.js";
-import { assertTokenDir, isLink } from "./runtime-dir.js";
+import { assertTokenDir } from "./runtime-dir.js";
 
 const REQUIRED_KEYS = ["agent", "file", "scope", "secrets"] as const;
 const KEYS: ReadonlySet<string> = new Set<string>([...REQUIRED_KEYS, "ttl"]);
@@ -114,13 +115,13 @@ function statOrUndefined(path: string): Stats | undefined {
  */
 export function assertIssueTokenFile(file: string, agent: string): void {
   const dir = dirname(file);
-  if (isLink(dir)) {
+  if (isLinkPath(dir)) {
     throw refuse(`file ${file}: the directory is a symbolic link or junction: ${dir}`);
   }
   const dirStat = statOrUndefined(dir);
   if (dirStat === undefined) throw refuse(`file ${file}: no such directory: ${dir}`);
   if (!dirStat.isDirectory()) throw refuse(`file ${file}: not a directory: ${dir}`);
-  if (isLink(file)) throw refuse(`file ${file} is a symbolic link or junction`);
+  if (isLinkPath(file)) throw refuse(`file ${file} is a symbolic link or junction`);
   if (statOrUndefined(file)?.isDirectory() === true) throw refuse(`file ${file} is a directory`);
   assertTokenDir(dir, `--issue-token: file ${file}`, agent);
 }

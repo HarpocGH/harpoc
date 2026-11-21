@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -431,6 +431,55 @@ describe("audit anchor / verify --anchor", () => {
     expect(spies.logSpy).not.toHaveBeenCalled();
     expect(spies.stderr()).toContain("Anchor written to");
     expect(spies.stderr()).toContain("OFF-HOST");
+  });
+
+  it.each([
+    {
+      label: "an empty --out",
+      args: ["anchor", "--out", ""],
+      line: "Error: [INVALID_INPUT] --out: empty path",
+    },
+    {
+      label: "a dash-led --out=--json value",
+      args: ["anchor", "--out=--json"],
+      line: "Error: [INVALID_INPUT] --out: a flag, not a path (give a path that starts with a dash as ./-name)",
+    },
+  ])("anchor refuses $label before the vault opens", async ({ args, line }) => {
+    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+    const stray = resolve("--json");
+    try {
+      await expect(run(args)).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+      expect(spies.logSpy).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(existsSync(stray)).toBe(false);
+    } finally {
+      rmSync(stray, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("anchor --out into a missing directory is FILE_IO_ERROR with the path and the errno code", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+    const out = join(tempDir, "missing", "vault.anchor");
+
+    await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
+    expect(spies.stderr()).not.toContain("no such file or directory");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the anchor file ${out} (ENOENT)`],
+    ]);
+    expect(loadUnlockedEngine).toHaveBeenCalledTimes(1);
+
+    spies.errorSpy.mockClear();
+    await expect(run(["anchor", "--out", out, "--json"])).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "FILE_IO_ERROR",
+          message: `could not write the anchor file ${out} (ENOENT)`,
+        }),
+      ],
+    ]);
+    expect(spies.logSpy).not.toHaveBeenCalled();
   });
 
   it("exits non-zero when there are no chained rows to anchor", async () => {

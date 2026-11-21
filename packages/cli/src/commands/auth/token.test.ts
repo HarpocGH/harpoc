@@ -1,14 +1,21 @@
 import {
+  chmodSync,
+  closeSync,
   existsSync,
+  fchmodSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ErrorCode, MAX_TOKEN_TTL_MS, VaultError } from "@harpoc/shared";
 
@@ -24,6 +31,18 @@ vi.mock("../../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    openSync: vi.fn(actual.openSync),
+    closeSync: vi.fn(actual.closeSync),
+    writeSync: vi.fn(actual.writeSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+    fchmodSync: vi.fn(actual.fchmodSync),
+  };
+});
+
 import { loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { registerAuthTokenCommand } from "./token.js";
 import { readLaunchTokenFile } from "@harpoc/mcp-server";
@@ -35,6 +54,24 @@ const run = buildCli(
   ["auth", "token"],
 );
 const MINTED_TOKEN = "jwt-token";
+const NODE_TEXT = "node-own-text-5b1d";
+const FLAG_AS_PATH =
+  "Error: [INVALID_INPUT] --out: a flag, not a path (give a path that starts with a dash as ./-name)";
+
+function codedError(code: string): NodeJS.ErrnoException {
+  const err: NodeJS.ErrnoException = new Error(`${code}: ${NODE_TEXT}`);
+  err.code = code;
+  return err;
+}
+
+/** The next `closeSync` closes the real descriptor and then throws: win32 removes no file a handle holds. */
+async function failCloseOnce(code: string): Promise<void> {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  vi.mocked(closeSync).mockImplementationOnce((fd) => {
+    actual.closeSync(fd);
+    throw codedError(code);
+  });
+}
 
 describe("auth token --principal-type", () => {
   let spies: CliSpies;
@@ -251,15 +288,240 @@ describe("auth token --out", () => {
     expect(readFileSync(out, "utf8")).toBe("keep-me\n");
   });
 
-  it("mints no token when the --out path cannot be opened (a missing directory)", async () => {
-    const out = join(dir, "no-such-dir", "launch-token");
+  it.each([
+    {
+      label: "an unknown --scope permission",
+      args: () => ["--scope", "use,bogus"],
+      line: () =>
+        'Error: [INVALID_INPUT] Invalid permission: "bogus". Valid: list, read, use, create, rotate, revoke, admin',
+    },
+    {
+      label: "an unknown --principal-type",
+      args: () => ["--principal-type", "robot"],
+      line: () =>
+        'Error: [INVALID_INPUT] Invalid principal type: "robot". Valid: agent, tool, user',
+    },
+    {
+      label: "an empty --out",
+      args: () => ["--out", ""],
+      line: () => "Error: [INVALID_INPUT] --out: empty path",
+    },
+    {
+      label: "a flag taken as the --out path",
+      args: () => ["--out", "--json"],
+      line: () => FLAG_AS_PATH,
+    },
+    { label: "a dash-led --out= value", args: () => ["--out=-k"], line: () => FLAG_AS_PATH },
+    {
+      label: "an --out whose directory does not exist",
+      args: () => ["--out", join(dir, "no-such-dir", "launch-token")],
+      line: () => `Error: [INVALID_INPUT] --out: no such directory: ${join(dir, "no-such-dir")}`,
+    },
+    {
+      label: "an existing --out file",
+      args: () => {
+        writeFileSync(join(dir, "already-there"), "keep-me\n", "utf8");
+        return ["--out", join(dir, "already-there")];
+      },
+      line: () =>
+        `Error: [INVALID_INPUT] --out: ${join(dir, "already-there")} exists; the token is written to a new file only`,
+    },
+  ])("refuses $label before the vault opens", async ({ args, line }) => {
+    vi.mocked(loadUnlockedEngine).mockRejectedValueOnce(
+      new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked"),
+    );
+    try {
+      await expect(run(["--agent", "bot-1", ...args()])).rejects.toThrow("process.exit");
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([[line()]]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(mockEngine.createToken).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(loadUnlockedEngine).mockReset();
+      vi.mocked(loadUnlockedEngine).mockResolvedValue(mockEngine as never);
+    }
+  });
+
+  it("--out --json writes no file named --json", async () => {
+    const stray = resolve("--json");
+    try {
+      await expect(run(["--agent", "bot-1", "--out", "--json"])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([[FLAG_AS_PATH]]);
+      expect(existsSync(stray)).toBe(false);
+      expect(mockEngine.createToken).not.toHaveBeenCalled();
+    } finally {
+      rmSync(stray, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  it("a failed create carries the path and the errno code", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(openSync).mockImplementationOnce(() => {
+      throw codedError("EACCES");
+    });
 
     await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-    expect(spies.exitSpy).toHaveBeenCalledWith(1);
-    expect(spies.stderr()).toContain("ENOENT");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (EACCES)`],
+    ]);
     expect(mockEngine.createToken).not.toHaveBeenCalled();
-    expectAbsent(spies.stdout(), MINTED_TOKEN);
+
+    spies.errorSpy.mockClear();
+    vi.mocked(openSync).mockImplementationOnce(() => {
+      throw codedError("EACCES");
+    });
+    await expect(run(["--agent", "bot-1", "--out", out, "--json"])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "FILE_IO_ERROR",
+          message: `could not write the token file ${out} (EACCES)`,
+        }),
+      ],
+    ]);
+    expect(mockEngine.createToken).not.toHaveBeenCalled();
   });
+
+  it("a failed write after the mint carries the path and the errno code, the token in neither stream", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
+    ]);
+    expect(mockEngine.createToken).toHaveBeenCalledTimes(1);
+
+    spies.errorSpy.mockClear();
+    const jsonOut = join(dir, "launch-token.json-mode");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+    await expect(run(["--agent", "bot-1", "--out", jsonOut, "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "FILE_IO_ERROR",
+          message: `could not write the token file ${jsonOut} (ENOSPC)`,
+        }),
+      ],
+    ]);
+  });
+
+  it("a failed close after the write carries the path and the errno code", async () => {
+    const out = join(dir, "launch-token");
+    await failCloseOnce("EDQUOT");
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (EDQUOT)`],
+    ]);
+    expect(closeSync).toHaveBeenCalledTimes(1);
+
+    spies.errorSpy.mockClear();
+    const jsonOut = join(dir, "launch-token.json-mode");
+    await failCloseOnce("EDQUOT");
+    await expect(run(["--agent", "bot-1", "--out", jsonOut, "--json"])).rejects.toThrow(
+      "process.exit",
+    );
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          error: "FILE_IO_ERROR",
+          message: `could not write the token file ${jsonOut} (EDQUOT)`,
+        }),
+      ],
+    ]);
+    expect(closeSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed close behind a failed write leaves the write's errno code", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+    await failCloseOnce("EIO");
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
+    ]);
+    expect(closeSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed removal after a refused mint warns with the path and the errno code", async () => {
+    const out = join(dir, "refused-mint");
+    mockEngine.createToken.mockImplementationOnce(() => {
+      throw VaultError.agentNotFound("bot-1");
+    });
+    vi.mocked(unlinkSync).mockImplementationOnce(() => {
+      throw codedError("EPERM");
+    });
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Warning: could not remove the empty ${out} after the token was refused (EPERM)`],
+      [
+        'Error: [AGENT_NOT_FOUND] Agent not registered: "bot-1". Register it with: harpoc agent register bot-1',
+      ],
+    ]);
+  });
+
+  it("a failed close after a refused mint does not hide the refusal", async () => {
+    const out = join(dir, "refused-mint");
+    mockEngine.createToken.mockImplementationOnce(() => {
+      throw VaultError.agentNotFound("bot-1");
+    });
+    await failCloseOnce("EIO");
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        'Error: [AGENT_NOT_FOUND] Agent not registered: "bot-1". Register it with: harpoc agent register bot-1',
+      ],
+    ]);
+    expect(closeSync).toHaveBeenCalledTimes(1);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  // The owner-only repair is skipped on win32 (the file inherits the directory's ACL there).
+  it.runIf(process.platform !== "win32")(
+    "a failed owner-only repair warns with the path and the errno code",
+    async () => {
+      const out = join(dir, "mode-repair");
+      vi.mocked(fchmodSync).mockImplementationOnce(() => {
+        throw codedError("EPERM");
+      });
+
+      await run(["--agent", "bot-1", "--out", out]);
+      expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [`Warning: could not restrict ${out} to owner-only access (EPERM)`],
+        [`Token written to ${out}`],
+      ]);
+    },
+  );
 
   it("removes the opened file when the mint itself is refused", async () => {
     const out = join(dir, "refused-mint");
@@ -282,19 +544,45 @@ describe("auth token --out", () => {
     expect(statSync(out).mode & 0o777).toBe(0o600);
   });
 
-  it.runIf(process.platform !== "win32")(
-    "refuses a dangling symlink at --out and writes nothing through it",
+  // Symbolic links: win32 refuses one without a privilege (EPERM); POSIX makes one freely.
+  it.skipIf(process.platform === "win32")(
+    "refuses a dangling symlink at --out as an existing entry before the vault opens and writes nothing through it",
     async () => {
       const out = join(dir, "planted-link");
       const target = join(dir, "missing-target");
       symlinkSync(target, out);
 
       await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
-      expect(spies.exitSpy).toHaveBeenCalledWith(1);
-      expect(spies.stderr()).toContain("EEXIST");
+      expectAbsent(spies.stdout(), MINTED_TOKEN);
+      expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [`Error: [INVALID_INPUT] --out: ${out} exists; the token is written to a new file only`],
+      ]);
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
       expect(existsSync(target)).toBe(false);
       expect(mockEngine.createToken).not.toHaveBeenCalled();
-      expectAbsent(spies.stdout(), MINTED_TOKEN);
+    },
+  );
+
+  // POSIX modes: win32 has none, and root searches a 0600 directory regardless.
+  it.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "refuses an --out it cannot check (its directory not searchable) before the vault opens, without errno text (POSIX)",
+    async () => {
+      const locked = join(dir, "locked");
+      const out = join(locked, "launch-token");
+      mkdirSync(locked);
+      chmodSync(locked, 0o600);
+      try {
+        await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [`Error: [INVALID_INPUT] --out: cannot check ${out} (is its directory searchable?)`],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        expect(mockEngine.createToken).not.toHaveBeenCalled();
+      } finally {
+        chmodSync(locked, 0o700);
+      }
     },
   );
 

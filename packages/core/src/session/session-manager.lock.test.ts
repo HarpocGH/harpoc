@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionFile } from "@harpoc/shared";
+import { expectAbsent } from "@harpoc/test-utils";
 import { SessionManager } from "./session-manager.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -47,6 +48,16 @@ async function waitOnRealClock(done: () => boolean, budgetMs = 5_000): Promise<v
 function ioError(code: string): NodeJS.ErrnoException {
   const err = new Error(`${code}: injected`) as NodeJS.ErrnoException;
   err.code = code;
+  return err;
+}
+
+const HELPER_TEXT = "helper-text-marker-3f9c";
+
+function markedError(syscall: string): NodeJS.ErrnoException {
+  const err = new Error(
+    `EACCES: permission denied, ${syscall} '${HELPER_TEXT}'`,
+  ) as NodeJS.ErrnoException;
+  err.code = "EACCES";
   return err;
 }
 
@@ -379,5 +390,62 @@ describe("session.json.lock (R8/D56)", () => {
 
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(join(lockPath, "owner"), "utf8")).toBe(foreignNonce);
+  });
+});
+
+describe("the lock warnings name the errno code alone (L9)", () => {
+  it("the skipped slide's warning ends (EACCES), not node's text", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    await manager.writeSession(sessionExpiringSoon());
+    vi.mocked(mkdirSync).mockImplementation(() => {
+      throw markedError("mkdir");
+    });
+
+    await manager.extendSession(60_000, true);
+
+    expectAbsent(failures[0]?.message, HELPER_TEXT);
+    expect(failures.map((err) => err.message)).toEqual([
+      `skipping the session slide: the session lock at ${lockPath} could not be taken (EACCES)`,
+    ]);
+  });
+
+  it("the erase that proceeds unlocked warns ending (EACCES), not node's text", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      lockStaleMs: 50,
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    await manager.writeSession(sessionExpiringSoon());
+    vi.mocked(mkdirSync).mockImplementation(() => {
+      throw markedError("mkdir");
+    });
+
+    await manager.eraseSession();
+
+    expectAbsent(failures[0]?.message, HELPER_TEXT);
+    expect(failures.map((err) => err.message)).toEqual([
+      `proceeding without the session lock at ${lockPath} (EACCES)`,
+    ]);
+    expect(existsSync(sessionPath)).toBe(false);
+  });
+
+  it("the release's warning ends (EACCES), not node's text", async () => {
+    const failures: Error[] = [];
+    const manager = new SessionManager(sessionPath, {
+      onPermissionRepairFailure: (err) => failures.push(err),
+    });
+    vi.mocked(rmdirSync).mockImplementationOnce(() => {
+      throw markedError("rmdir");
+    });
+
+    await manager.writeSession(sessionExpiringSoon());
+
+    expectAbsent(failures[0]?.message, HELPER_TEXT);
+    expect(failures.map((err) => err.message)).toEqual([
+      `the session lock at ${lockPath} could not be released (EACCES)`,
+    ]);
   });
 });

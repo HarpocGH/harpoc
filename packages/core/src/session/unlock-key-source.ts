@@ -455,6 +455,12 @@ export async function writeUnlockKeyDpapi(path: string, key: Uint8Array): Promis
   }
 }
 
+function failureReason(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown error";
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string" ? code : err.message;
+}
+
 /** The owner-only, exclusive, `fsync`ed write both unlock key writers share. */
 function writeOwnerOnlyNewFile(path: string, bytes: Uint8Array, what: string): void {
   let fd: number;
@@ -488,7 +494,7 @@ function writeOwnerOnlyNewFile(path: string, bytes: Uint8Array, what: string): v
   } catch (err) {
     throw new VaultError(
       ErrorCode.FILE_IO_ERROR,
-      `could not write ${what} ${path} (${err instanceof Error ? err.message : String(err)})`,
+      `could not write ${what} ${path} (${failureReason(err)})`,
     );
   } finally {
     closeSync(fd);

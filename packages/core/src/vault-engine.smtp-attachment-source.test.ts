@@ -13,7 +13,6 @@ vi.mock("./crypto/argon2.js", async (importOriginal) =>
 
 const B = "\\";
 const WIN32 = process.platform === "win32";
-const IN_VAULT = "Attachment rejected: an attachment path is inside the vault directory";
 const DEVICE = "Attachment rejected: an attachment path names a device";
 const SHARE = "Attachment rejected: an attachment path names a network share";
 const NOT_LISTED =
@@ -77,7 +76,7 @@ describe("useSecret (smtp) — the engine's injector refuses the vault's own fil
     it(`refuses ${file} as an attachment with a failed secret.use row`, async () => {
       const dir = join(tempDir, "vault");
       mkdirSync(dir);
-      const vault = await mailVault(join(dir, "test.vault.db"), join(dir, "session.json"));
+      const vault = await mailVault(join(dir, "test.vault.db"), join(dir, "session.json"), [dir]);
       const path = join(dir, file);
 
       const err = await expectVaultError(
@@ -85,9 +84,7 @@ describe("useSecret (smtp) — the engine's injector refuses the vault's own fil
         ErrorCode.ATTACHMENT_REJECTED,
       );
 
-      expect(err.message).toBe(
-        "Attachment rejected: an attachment path is inside the vault directory",
-      );
+      expect(err.message).toBe(NOT_LISTED);
       expect(failedUseRows(vault)).toEqual([
         {
           context: "smtp",
@@ -107,16 +104,16 @@ describe("useSecret (smtp) — the engine's injector refuses the vault's own fil
     const sessionDir = join(tempDir, "session");
     mkdirSync(dbDir);
     mkdirSync(sessionDir);
-    const vault = await mailVault(join(dbDir, "test.vault.db"), join(sessionDir, "session.json"));
+    const vault = await mailVault(join(dbDir, "test.vault.db"), join(sessionDir, "session.json"), [
+      sessionDir,
+    ]);
 
     const err = await expectVaultError(
       () => vault.useSecret("secret://mail", send(join(sessionDir, "session.json"))),
       ErrorCode.ATTACHMENT_REJECTED,
     );
 
-    expect(err.message).toBe(
-      "Attachment rejected: an attachment path is inside the vault directory",
-    );
+    expect(err.message).toBe(NOT_LISTED);
   });
 
   it("lets a file outside the vault directory past the source checks (refused later by the SSRF floor)", async () => {
@@ -195,9 +192,9 @@ describe("useSecret (smtp) — an attachment comes only from a directory the sec
     [
       "a missing file inside the vault directory",
       () => ({
-        listedDirs: [listed],
+        listedDirs: [join(tempDir, "vault")],
         path: join(tempDir, "vault", "missing.db"),
-        message: IN_VAULT,
+        message: NOT_LISTED,
       }),
     ],
   ];
@@ -234,10 +231,10 @@ describe("useSecret (smtp) — an attachment comes only from a directory the sec
     refusesWithOneRow,
   );
 
-  it("after declareDaemon an attachment in a declared directory refuses with the in-vault message and one failed row", async () => {
+  it("after declareDaemon an attachment in a declared directory refuses with the list message and one failed row", async () => {
     const vault = await vaultListing(listed);
     vault.declareDaemon({ protectedDirs: [listed], protectedFiles: [] });
-    await expectOneRefusal(vault, join(listed, "report.txt"), IN_VAULT);
+    await expectOneRefusal(vault, join(listed, "report.txt"), NOT_LISTED);
   });
 
   it.skipIf(process.platform === "win32")(

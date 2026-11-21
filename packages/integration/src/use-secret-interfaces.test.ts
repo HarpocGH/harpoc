@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createApp } from "@harpoc/rest-api";
@@ -363,6 +364,7 @@ describe("use_secret smtp through REST — the vault's own files are no attachme
     await vault.engine.setInjectionPolicy(handle, {
       host_allowlist: [`${HOST}:${String(smtp.port)}`],
       smtp_recipient_allowlist: ["*@example.com"],
+      local_dirs: [dirname(vault.dbPath)],
     });
     await vault.engine.setConnectionConfig(handle, { mail: { tls: { ca: FIXTURE_CA_PEM } } });
     await grantOn(vault.engine, handle, REST_AGENT, ["use"]);
@@ -383,7 +385,8 @@ describe("use_secret smtp through REST — the vault's own files are no attachme
     expect(rendered.status).toBe(400);
     expect(JSON.parse(rendered.text)).toEqual({
       error: ErrorCode.ATTACHMENT_REJECTED,
-      message: "Attachment rejected: an attachment path is inside the vault directory",
+      message:
+        "Attachment rejected: an attachment path is not inside a directory the secret's policy lists",
     });
     expect(smtp.wire()).toEqual(wireBefore);
     const secretId = await vault.engine.resolveSecretId(handle);

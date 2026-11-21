@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AuditEventType, SESSION_FILE_NAME, VaultState } from "@harpoc/shared";
 import { getPkgRoot } from "@harpoc/test-utils";
@@ -68,6 +68,23 @@ function unitSandbox(): string[] {
   return service
     .filter((l) => /^[A-Za-z]+=/.test(l) && !NOT_TAKEN_OVER.has(l.slice(0, l.indexOf("="))))
     .map((l) => `--property=${l}`);
+}
+
+function unitProperties(keys: readonly string[]): string[] {
+  const lines = readFileSync(UNIT, "utf8").split("\n");
+  const service = lines.slice(lines.indexOf("[Service]") + 1, lines.indexOf("[Install]"));
+  return service
+    .filter((l) => /^[A-Za-z]+=/.test(l) && keys.includes(l.slice(0, l.indexOf("="))))
+    .map((l) => `--property=${l}`);
+}
+
+function unitBackupDir(): string {
+  const execStart = readFileSync(UNIT, "utf8")
+    .split("\n")
+    .find((l) => l.startsWith("ExecStart="));
+  const dir = / --backup-dir (\S+)/.exec(execStart ?? "")?.[1];
+  if (dir === undefined) throw new Error(`${UNIT}: ExecStart= names no --backup-dir`);
+  return dir;
 }
 
 interface AuditRow {
@@ -312,5 +329,41 @@ describe.skipIf(process.platform !== "linux")(
         trigger: "SIGTERM",
       });
     }, 420_000);
+
+    it("systemd creates the directory the unit's --backup-dir names from the unit's own StateDirectory= and StateDirectoryMode=: 0700, the vault user's", async (ctx) => {
+      if (!available) return ctx.skip();
+      const dir = unitBackupDir();
+      const parent = await asRoot(["stat", "-c", "%a %U", dirname(dir)]);
+      expect(parent.code, parent.stderr).toBe(0);
+      expect(parent.stdout.trim()).toBe(`700 ${vault}`);
+      const before = await asRoot(["test", "-e", dir]);
+      expect(before.code, `${dir} exists before the unit runs`).toBe(1);
+      try {
+        const ran = await asRoot([
+          "systemd-run",
+          "--quiet",
+          "--wait",
+          "--pipe",
+          "--collect",
+          "--property=Type=exec",
+          `--uid=${vault}`,
+          ...unitProperties(["StateDirectory", "StateDirectoryMode"]),
+          "--",
+          "/usr/bin/test",
+          "-d",
+          dir,
+        ]);
+        expect(ran.code, ran.stderr).toBe(0);
+        const made = await asRoot(["stat", "-c", "%a %U", dir]);
+        expect(made.code, made.stderr).toBe(0);
+        expect(made.stdout.trim()).toBe(`700 ${vault}`);
+      } finally {
+        const left = await asRoot(["test", "-e", dir]);
+        if (left.code === 0) {
+          const removed = await asRoot(["rmdir", "--", dir]);
+          expect(removed.code, removed.stderr).toBe(0);
+        }
+      }
+    }, 60_000);
   },
 );

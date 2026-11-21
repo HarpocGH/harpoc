@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  fsyncSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -34,7 +35,16 @@ import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+  return {
+    ...actual,
+    readFileSync: vi.fn(actual.readFileSync),
+    fsyncSync: vi.fn(actual.fsyncSync),
+  };
+});
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
 });
 
 vi.mock("./owner-only.js", async (importOriginal) => {
@@ -62,6 +72,7 @@ const KEY_FORMS = [
   Buffer.from(KEY).toString("base64url"),
 ];
 const USER_SID = "S-1-5-21-1000-2000-3000-1001";
+const HELPER_TEXT = "helper-text-marker-3f9c";
 
 let dir: string;
 
@@ -549,15 +560,53 @@ describe("writeUnlockKeyFile", () => {
   it("a failed access-list reduction removes the file and refuses FILE_IO_ERROR — nothing of the key reaches the disk", async () => {
     const path = join(dir, "unlock.key");
     vi.mocked(restrictWindowsAclToOwner).mockImplementationOnce(() => {
-      throw new Error("icacls exited 5: Access is denied.");
+      throw new Error("ACL restriction failed (exit 5)");
     });
     const error = await withPlatform("win32", () =>
       expectVaultError(() => writeUnlockKeyFile(path, KEY), ErrorCode.FILE_IO_ERROR),
     );
     expectNoKeyIn(error.message);
     expect(error.message).toBe(
-      `could not write the unlock key file ${path} (icacls exited 5: Access is denied.)`,
+      `could not write the unlock key file ${path} (ACL restriction failed (exit 5))`,
     );
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("the access-list step's refusal names its exit status, never icacls' output (L9)", async () => {
+    const path = join(dir, "unlock.key");
+    vi.mocked(spawnSync).mockReturnValueOnce({
+      status: 5,
+      signal: null,
+      output: [],
+      pid: 1,
+      stdout: Buffer.from(`${HELPER_TEXT} on stdout`),
+      stderr: Buffer.from(`${HELPER_TEXT} on stderr`),
+    } as unknown as ReturnType<typeof spawnSync>);
+    const error = await withPlatform("win32", () =>
+      expectVaultError(() => writeUnlockKeyFile(path, KEY), ErrorCode.FILE_IO_ERROR),
+    );
+    expectAbsent(error.message, HELPER_TEXT);
+    expectNoKeyIn(error.message);
+    expect(error.message).toBe(
+      `could not write the unlock key file ${path} (ACL restriction failed (exit 5))`,
+    );
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("a failed fsync names its errno code, never node's text (L9)", async () => {
+    const path = join(dir, "unlock.key");
+    vi.mocked(fsyncSync).mockImplementationOnce(() => {
+      const err = new Error(`EIO: i/o error, fsync '${HELPER_TEXT}'`) as NodeJS.ErrnoException;
+      err.code = "EIO";
+      throw err;
+    });
+    const error = await expectVaultError(
+      () => writeUnlockKeyFile(path, KEY),
+      ErrorCode.FILE_IO_ERROR,
+    );
+    expectAbsent(error.message, HELPER_TEXT);
+    expectNoKeyIn(error.message);
+    expect(error.message).toBe(`could not write the unlock key file ${path} (EIO)`);
     expect(existsSync(path)).toBe(false);
   });
 
@@ -771,13 +820,13 @@ describe("writeUnlockKeyDpapi", () => {
     const path = join(dir, "unlock.key.dpapi");
     vi.mocked(dpapiProtect).mockResolvedValueOnce(blobHeader(262, 0));
     vi.mocked(restrictWindowsAclToOwner).mockImplementationOnce(() => {
-      throw new Error("icacls exited 5: Access is denied.");
+      throw new Error("ACL restriction failed (exit 5)");
     });
     const error = await withPlatform("win32", () =>
       expectVaultError(() => writeUnlockKeyDpapi(path, KEY), ErrorCode.FILE_IO_ERROR),
     );
     expect(error.message).toBe(
-      `could not write the sealed unlock key file ${path} (icacls exited 5: Access is denied.)`,
+      `could not write the sealed unlock key file ${path} (ACL restriction failed (exit 5))`,
     );
     expect(existsSync(path)).toBe(false);
   });

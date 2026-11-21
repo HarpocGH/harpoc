@@ -899,6 +899,13 @@ export class VaultError extends Error {
     );
   }
 
+  static workTreeHoldsProtectedPath(): VaultError {
+    return new VaultError(
+      ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      "git work tree holds a path the vault protects",
+    );
+  }
+
   static dockerOperationFailed(exitCode: number): VaultError {
     return new VaultError(
       ErrorCode.DOCKER_OPERATION_FAILED,

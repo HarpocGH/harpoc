@@ -43,11 +43,7 @@ export type {
   IssuedTokenRow,
   IssuedTokenFilter,
 } from "./storage/sqlite-store.js";
-export {
-  VAULT_COPY_TIMEOUT_MS,
-  VAULT_COPY_WORKER_SOURCE,
-  takeVaultCopy,
-} from "./storage/vault-copy.js";
+export { VAULT_COPY_WORKER_SOURCE, takeVaultCopy } from "./storage/vault-copy.js";
 export {
   backupFileName,
   isBackupTempName,

@@ -31,19 +31,62 @@ function target(requestUrl: string): ParsedTarget {
 
 describe("parseTarget", () => {
   it.each([
-    ["/api.github.com/user?x=1", "https://api.github.com/user?x=1", "path"],
-    ["/api.github.com", "https://api.github.com/", "path"],
-    ["/api.github.com?x=1", "https://api.github.com/?x=1", "path"],
-    ["/api.github.com:8443/a", "https://api.github.com:8443/a", "path"],
-    ["/api.github.com:443/a", "https://api.github.com/a", "path"],
-    ["/[::1]:8443/a", "https://[::1]:8443/a", "path"],
-    ["/api.github.com//evil.example/x", "https://api.github.com//evil.example/x", "path"],
-    ["http://api.github.com/user", "https://api.github.com/user", "absolute-http"],
-    ["http://api.github.com:80/user", "https://api.github.com/user", "absolute-http"],
-    ["http://api.github.com:8443/user", "https://api.github.com:8443/user", "absolute-http"],
-    ["https://api.github.com/user?x=1", "https://api.github.com/user?x=1", "absolute-https"],
-  ])("%s → %s (%s)", (requestUrl, url, form) => {
-    expect(parseTarget(requestUrl)).toEqual({ ok: true, target: { url: new URL(url), form } });
+    ["/api.github.com/user?x=1", "https://api.github.com/user?x=1", "path", undefined],
+    ["/api.github.com", "https://api.github.com/", "path", undefined],
+    ["/api.github.com?x=1", "https://api.github.com/?x=1", "path", undefined],
+    ["/api.github.com:8443/a", "https://api.github.com:8443/a", "path", undefined],
+    ["/api.github.com:443/a", "https://api.github.com/a", "path", undefined],
+    ["/[::1]:8443/a", "https://[::1]:8443/a", "path", "http://[::1]:8443/a"],
+    [
+      "/api.github.com//evil.example/x",
+      "https://api.github.com//evil.example/x",
+      "path",
+      undefined,
+    ],
+    ["http://api.github.com/user", "https://api.github.com/user", "absolute-http", undefined],
+    ["http://api.github.com:80/user", "https://api.github.com/user", "absolute-http", undefined],
+    [
+      "http://api.github.com:8443/user",
+      "https://api.github.com:8443/user",
+      "absolute-http",
+      undefined,
+    ],
+    [
+      "https://api.github.com/user?x=1",
+      "https://api.github.com/user?x=1",
+      "absolute-https",
+      undefined,
+    ],
+    [
+      "/127.0.0.1:9000/x?y=1",
+      "https://127.0.0.1:9000/x?y=1",
+      "path",
+      "http://127.0.0.1:9000/x?y=1",
+    ],
+    ["/127.0.0.1/x", "https://127.0.0.1/x", "path", "http://127.0.0.1/x"],
+    ["/127.0.0.1:80/x", "https://127.0.0.1:80/x", "path", "http://127.0.0.1/x"],
+    ["/127.0.0.1:443/x", "https://127.0.0.1/x", "path", "http://127.0.0.1:443/x"],
+    ["/127.1:9000/x", "https://127.0.0.1:9000/x", "path", "http://127.0.0.1:9000/x"],
+    [
+      "http://127.0.0.1:9000/x",
+      "https://127.0.0.1:9000/x",
+      "absolute-http",
+      "http://127.0.0.1:9000/x",
+    ],
+    ["http://127.0.0.1:80/x", "https://127.0.0.1/x", "absolute-http", "http://127.0.0.1/x"],
+    ["/localhost:9000/x", "https://localhost:9000/x", "path", undefined],
+    ["/127.0.0.2:9000/x", "https://127.0.0.2:9000/x", "path", undefined],
+    ["/[::ffff:127.0.0.1]:9000/x", "https://[::ffff:7f00:1]:9000/x", "path", undefined],
+    ["https://127.0.0.1:9000/x", "https://127.0.0.1:9000/x", "absolute-https", undefined],
+  ])("%s → %s (%s)", (requestUrl, url, form, plain) => {
+    expect(parseTarget(requestUrl)).toEqual({
+      ok: true,
+      target: {
+        url: new URL(url),
+        form,
+        ...(plain === undefined ? {} : { plain: new URL(plain) }),
+      },
+    });
   });
 
   it.each([

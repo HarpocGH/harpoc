@@ -252,15 +252,18 @@ export function restrictToOwner(dir: string, seams: RestrictSeams = {}): void {
       timeout: 15_000,
     },
   );
-  if (res.error) throw res.error;
-  if (res.status !== 0) {
-    const detail = (res.stderr?.toString() || res.stdout?.toString() || "").trim().slice(0, 200);
-    throw new Error(`icacls exited ${String(res.status)}${detail ? `: ${detail}` : ""}`);
-  }
+  if (res.error) throw new Error("ACL restriction failed to run");
+  if (res.status !== 0) throw new Error(`ACL restriction failed (exit ${String(res.status)})`);
 }
 
 /** A compiler that ran and failed, or did not complete: host-wide, so the candidate loop stops (minor 2). */
 class CompilerFailure extends Error {}
+
+function failureReason(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown error";
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string" ? code : err.message;
+}
 
 /** EPERM-tolerant: a tmp exe still mapped by a rejected helper's process cannot be unlinked on win32 (minor 1). */
 function removeQuietly(path: string): void {
@@ -294,9 +297,7 @@ async function compileInto(
   } catch (err) {
     removeQuietly(tmp);
     removeQuietly(source);
-    throw new CompilerFailure(
-      `csc did not complete: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw new CompilerFailure(`csc did not complete: ${failureReason(err)}`);
   }
   if (code !== 0) {
     removeQuietly(tmp);
@@ -349,7 +350,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
       try {
         restrictDir(dir);
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
+        lastError = failureReason(err);
         continue;
       }
     }
@@ -374,7 +375,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
         exe = candidate;
         break;
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
+        lastError = failureReason(err);
         // The source was written, so this directory is writable: a compiler
         // that then fails or hangs is the host's, not the directory's.
         if (err instanceof CompilerFailure) break;
@@ -393,7 +394,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
       )
     ).code;
   } catch (err) {
-    return { unavailable: `probe run failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { unavailable: `probe run failed: ${failureReason(err)}` };
   }
   if (probeCode !== 0) return { unavailable: `probe run exited ${String(probeCode)}` };
   return { exe };
@@ -446,7 +447,7 @@ export async function resolveJobWrapper(
     if (now() < unavailableUntil) return { unavailable: lastUnavailable };
     const attempt: Promise<JobWrapperResolution> = resolve(seams)
       .catch((err: unknown): JobWrapperResolution => ({
-        unavailable: `resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+        unavailable: `resolution failed: ${failureReason(err)}`,
       }))
       .then((result) => {
         if ("unavailable" in result && cachedResolution === attempt) {

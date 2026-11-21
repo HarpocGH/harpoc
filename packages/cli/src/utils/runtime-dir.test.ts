@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join, parse, posix, sep, win32 } from "node:path";
+import { join, parse, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TestContext } from "vitest";
 import { ErrorCode, maxUnixSocketPathBytes } from "@harpoc/shared";
@@ -21,7 +21,6 @@ import {
   consumerDirs,
   consumerSocketPaths,
   isPrivateDirMode,
-  linkProbePath,
   resolveRuntimeDir,
   WINDOWS_CONSUMER_DIR_RIGHTS,
   windowsDirAclRefusal,
@@ -156,57 +155,6 @@ describe("isPrivateDirMode", () => {
     { mode: 0o720, octal: "0720 (group write alone)" },
   ])("refuses mode $octal", ({ mode }) => {
     expect(isPrivateDirMode(mode)).toBe(false);
-  });
-});
-
-describe("linkProbePath (the tail walk on the text alone, every platform)", () => {
-  it.each([
-    ["/srv/link", "/srv/link"],
-    ["/srv/link/", "/srv/link"],
-    ["/srv/link/.", "/srv/link"],
-    ["/srv/link/./", "/srv/link"],
-    ["/srv/link/sub/..", "/srv/link"],
-    ["/srv/link/sub/../.", "/srv/link"],
-    ["/srv/a/../run", "/srv/a/../run"],
-    ["/srv/a/../x/sub/..", "/srv/a/../x"],
-    ["/var/run/../x", "/var/run/../x"],
-    ["./run", "./run"],
-    ["run/", "run"],
-    ["/", "/"],
-    ["//", "/"],
-    ["/.", "/."],
-    ["", ""],
-    ["/x/..", "/x/.."],
-    ["..", ".."],
-    ["../..", "../.."],
-    ["a/../..", "a/../.."],
-  ])("POSIX: %j is read at %j", (path, probe) => {
-    expect(linkProbePath(path, posix)).toBe(probe);
-  });
-
-  it.each([
-    ["C:\\srv\\link\\.", "C:\\srv\\link"],
-    ["C:\\srv/link/.", "C:\\srv/link"],
-    ["C:/srv/link/./", "C:/srv/link"],
-    ["C:\\srv\\link\\sub\\..", "C:\\srv\\link"],
-    ["C:\\srv\\a\\..\\run", "C:\\srv\\a\\..\\run"],
-    ["C:\\", "C:\\"],
-    ["C:/", "C:/"],
-    ["C:\\x\\..", "C:\\x\\.."],
-    ["C:", "C:"],
-    ["C:..", "C:.."],
-    ["C:rel\\.", "C:rel"],
-    ["\\\\server\\share", "\\\\server\\share"],
-    ["\\\\server\\share\\", "\\\\server\\share\\"],
-    ["\\\\server\\share\\x\\.", "\\\\server\\share\\x"],
-    ["//server/share/x/./", "//server/share/x"],
-    ["..\\..", "..\\.."],
-  ])("win32: %j is read at %j", (path, probe) => {
-    expect(linkProbePath(path, win32)).toBe(probe);
-  });
-
-  it("defaults to this platform's path flavour", () => {
-    expect(linkProbePath(`${join("srv", "link")}${sep}.`)).toBe(join("srv", "link"));
   });
 });
 

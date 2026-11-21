@@ -48,7 +48,7 @@ async function assertBackupTarget(file: string): Promise<string> {
   return real;
 }
 
-const INTERRUPTIONS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+const INTERRUPTIONS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const;
 
 export function registerBackupCommand(program: Command): void {
   program

@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -101,11 +102,15 @@ describe("a scheduled copy taken under load, restored on a fresh install by the 
     return dir;
   }
 
-  function placeCopy(copy: string, name: string): string {
-    const dir = ownDirectory(name);
+  function placeCopyIn(copy: string, dir: string): void {
     const db = join(dir, VAULT_DB_NAME);
     copyFileSync(copy, db);
     chmodSync(db, 0o600);
+  }
+
+  function placeCopy(copy: string, name: string): string {
+    const dir = ownDirectory(name);
+    placeCopyIn(copy, dir);
     return dir;
   }
 
@@ -348,6 +353,135 @@ describe("a scheduled copy taken under load, restored on a fresh install by the 
       await started.server.stop();
     }
   }, 180_000);
+
+  it(
+    "restored over an existing vault by the page's steps, with the suite's paths: the daemon stopped, the replaced database kept with its side files, the copy placed, the unlock by password, a new key, audit verify, the start",
+    async () => {
+      const existing = placeCopy(scheduledCopy, "existing");
+      const existingKeyFile = join(root, "existing.key");
+      const engine = new VaultEngine({
+        dbPath: join(existing, VAULT_DB_NAME),
+        sessionPath: join(existing, SESSION_FILE_NAME),
+        sessionMode: "memory",
+      });
+      let existingKey: Uint8Array = new Uint8Array(0);
+      try {
+        await engine.unlock(PASSWORD);
+        existingKey = await engine.enrollUnlockKey();
+        await writeUnlockKeyFile(existingKeyFile, existingKey);
+      } finally {
+        existingKey.fill(0);
+        await engine.destroy();
+      }
+      const serving = await startCliServerOnFreePort(
+        (port) => [
+          "server",
+          "start",
+          "--rest",
+          "--port",
+          String(port),
+          "--session",
+          "memory",
+          "--unlock-key-file",
+          existingKeyFile,
+        ],
+        { vaultDir: existing, env: withoutCredentialsDirectory() },
+      );
+      daemons.push(serving.server);
+      const served = await fetch(`http://127.0.0.1:${String(serving.port)}/api/v1/health`);
+      expect(((await served.json()) as { data: { state: string } }).data.state).toBe(
+        VaultState.UNLOCKED,
+      );
+
+      await serving.server.stop();
+      // Windows delivers no SIGTERM: kill() ends the child there without its shutdown path.
+      expect([serving.server.child.exitCode, serving.server.child.signalCode]).toEqual(
+        process.platform === "win32" ? [null, "SIGTERM"] : [0, null],
+      );
+
+      const replaced = join(existing, "replaced");
+      mkdirSync(replaced, { mode: 0o700 });
+      chmodSync(replaced, 0o700);
+      const found = readdirSync(existing)
+        .filter((name) => name.startsWith(VAULT_DB_NAME))
+        .sort();
+      expect(found).toContain(VAULT_DB_NAME);
+      for (const name of found) renameSync(join(existing, name), join(replaced, name));
+      expect(readdirSync(replaced).sort()).toEqual(found);
+      expect(readdirSync(existing).filter((name) => name.startsWith(VAULT_DB_NAME))).toEqual([]);
+
+      placeCopyIn(scheduledCopy, existing);
+
+      await cli(existing, ["unlock"], `${PASSWORD}\n`, ARGON2_TIMEOUT_MS);
+      const status = JSON.parse(await cli(existing, ["unlock-key", "status", "--json"])) as {
+        enrolled: boolean;
+      };
+      expect(status).toEqual({ enrolled: false });
+      const refused = startCliServer(
+        [
+          "server",
+          "start",
+          "--rest",
+          "--port",
+          String(await freePort()),
+          "--session",
+          "memory",
+          "--unlock-key-file",
+          existingKeyFile,
+        ],
+        { vaultDir: existing, env: withoutCredentialsDirectory() },
+      );
+      daemons.push(refused);
+      expect((await refused.closed()).code).toBe(1);
+      expect(refused.stderrSoFar()).toContain(`[${ErrorCode.UNLOCK_KEY_NOT_ENROLLED}]`);
+
+      const restoredKeyFile = join(root, "restored.key");
+      await cli(
+        existing,
+        ["unlock-key", "enroll", "--out", restoredKeyFile],
+        `${PASSWORD}\n`,
+        ARGON2_TIMEOUT_MS,
+      );
+      expect(statSync(restoredKeyFile).size).toBe(32);
+
+      const report = JSON.parse(await cli(existing, ["audit", "verify", "--json"])) as {
+        valid: boolean;
+      };
+      expect(report.valid).toBe(true);
+      const rows = JSON.parse(
+        await cli(existing, ["audit", "--event", AuditEventType.VAULT_BACKUP, "--json"]),
+      ) as AuditRow[];
+      expect(rows.map(({ success, detail }) => ({ success, detail }))).toEqual([
+        { success: true, detail: { trigger: "schedule", file: basename(scheduledCopy) } },
+      ]);
+
+      const restarted = await startCliServerOnFreePort(
+        (port) => [
+          "server",
+          "start",
+          "--rest",
+          "--port",
+          String(port),
+          "--session",
+          "memory",
+          "--unlock-key-file",
+          restoredKeyFile,
+        ],
+        { vaultDir: existing, env: withoutCredentialsDirectory() },
+      );
+      daemons.push(restarted.server);
+      try {
+        const res = await fetch(`http://127.0.0.1:${String(restarted.port)}/api/v1/health`);
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as { data: { state: string } }).data.state).toBe(
+          VaultState.UNLOCKED,
+        );
+      } finally {
+        await restarted.server.stop();
+      }
+    },
+    4 * ARGON2_TIMEOUT_MS,
+  );
 
   describe("harpoc backup <file>", () => {
     let attendedFile = "";

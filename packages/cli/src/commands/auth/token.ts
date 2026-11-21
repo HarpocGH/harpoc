@@ -1,7 +1,17 @@
-import { closeSync, existsSync, fchmodSync, openSync, unlinkSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  fchmodSync,
+  lstatSync,
+  openSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
 import type { Permission } from "@harpoc/shared";
 import {
+  ErrorCode,
   MAX_TOKEN_TTL_MS,
   VaultError,
   permissionSchema,
@@ -10,6 +20,37 @@ import {
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printRecord } from "../../utils/output.js";
 import { parsePositiveInteger } from "../../utils/options.js";
+
+function assertTokenOut(out: string): void {
+  if (out.trim() === "") throw VaultError.invalidInput("--out: empty path");
+  if (out.startsWith("-")) {
+    throw VaultError.invalidInput(
+      "--out: a flag, not a path (give a path that starts with a dash as ./-name)",
+    );
+  }
+  const parent = dirname(resolve(out));
+  let isDirectory = false;
+  try {
+    isDirectory = statSync(parent).isDirectory();
+  } catch {
+    // Refused below with the path, never the errno's text.
+  }
+  if (!isDirectory) throw VaultError.invalidInput(`--out: no such directory: ${parent}`);
+  let exists: boolean;
+  try {
+    exists = lstatSync(out, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    throw VaultError.invalidInput(`--out: cannot check ${out} (is its directory searchable?)`);
+  }
+  if (exists) {
+    throw VaultError.invalidInput(`--out: ${out} exists; the token is written to a new file only`);
+  }
+}
+
+function errnoCode(err: unknown): string {
+  const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+  return code ?? "unknown error";
+}
 
 export function registerAuthTokenCommand(auth: Command): void {
   auth
@@ -63,49 +104,57 @@ export function registerAuthTokenCommand(auth: Command): void {
           }
           const ttlMs = ttlMinutes * 60 * 1000;
 
+          const scopeStrings = options.scope
+            ? options.scope.split(",").map((s) => s.trim())
+            : ["use", "list"];
+          for (const s of scopeStrings) {
+            const result = permissionSchema.safeParse(s);
+            if (!result.success) {
+              throw VaultError.invalidInput(
+                `Invalid permission: "${s}". Valid: list, read, use, create, rotate, revoke, admin`,
+              );
+            }
+          }
+          const scope = scopeStrings as Permission[];
+
+          const subject = options.agent ?? "cli-user";
+
+          const parsedPrincipalType = tokenPrincipalTypeSchema.safeParse(
+            options.principalType ?? "agent",
+          );
+          if (!parsedPrincipalType.success) {
+            throw VaultError.invalidInput(
+              `Invalid principal type: "${options.principalType}". Valid: agent, tool, user`,
+            );
+          }
+          const principalType = parsedPrincipalType.data;
+          // Checked before the vault opens, so before the mint: a refused write
+          // must not leave a row in the issued-token registry for a token nobody
+          // ever received. No --force — the flag writes a credential, and
+          // silently replacing one is how a live launch token gets orphaned.
+          const out = options.out;
+          if (out !== undefined) assertTokenOut(out);
+
           const engine = await loadUnlockedEngine(vaultDir);
           try {
-            const scopeStrings = options.scope
-              ? options.scope.split(",").map((s) => s.trim())
-              : ["use", "list"];
-            for (const s of scopeStrings) {
-              const result = permissionSchema.safeParse(s);
-              if (!result.success) {
-                throw VaultError.invalidInput(
-                  `Invalid permission: "${s}". Valid: list, read, use, create, rotate, revoke, admin`,
-                );
-              }
-            }
-            const scope = scopeStrings as Permission[];
-
-            const subject = options.agent ?? "cli-user";
-
-            const parsedPrincipalType = tokenPrincipalTypeSchema.safeParse(
-              options.principalType ?? "agent",
-            );
-            if (!parsedPrincipalType.success) {
-              throw VaultError.invalidInput(
-                `Invalid principal type: "${options.principalType}". Valid: agent, tool, user`,
-              );
-            }
-            const principalType = parsedPrincipalType.data;
-            // Checked before the mint: a refused write must not leave a row in
-            // the issued-token registry for a token nobody ever received. No
-            // --force — the flag writes a credential, and silently replacing
-            // one is how a live launch token gets orphaned.
-            const out = options.out;
-            if (out !== undefined && existsSync(out)) {
-              throw VaultError.invalidInput(
-                `--out ${out} already exists; remove it or choose another path`,
-              );
-            }
             // Opened before the mint as well (R3, 2026-09-07): 0600 at
             // creation, like the session file beside it — open(2) applies the
             // mode and umask can only tighten it — and "wx" (O_EXCL) refuses
-            // any existing path, a symlink included, so the check above can be
-            // neither raced nor redirected. A path that cannot be opened (a
-            // missing directory, a permission) therefore mints nothing.
-            const outFd = out === undefined ? undefined : openSync(out, "wx", 0o600);
+            // any existing path, a symlink included, so the check before the
+            // vault opened can be neither raced nor redirected. A path that
+            // cannot be opened (a directory gone since that check, a
+            // permission) therefore mints nothing.
+            let outFd: number | undefined;
+            if (out !== undefined) {
+              try {
+                outFd = openSync(out, "wx", 0o600);
+              } catch (err) {
+                throw new VaultError(
+                  ErrorCode.FILE_IO_ERROR,
+                  `could not write the token file ${out} (${errnoCode(err)})`,
+                );
+              }
+            }
 
             const project = options.project;
             const secrets = options.secrets
@@ -121,12 +170,16 @@ export function registerAuthTokenCommand(auth: Command): void {
               });
             } catch (err) {
               if (out !== undefined && outFd !== undefined) {
-                closeSync(outFd);
+                try {
+                  closeSync(outFd);
+                } catch {
+                  // The refusal is what is reported; a file left behind is warned of below.
+                }
                 try {
                   unlinkSync(out);
                 } catch (unlinkErr) {
                   console.error(
-                    `Warning: could not remove the empty ${out} after the token was refused (${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)})`,
+                    `Warning: could not remove the empty ${out} after the token was refused (${errnoCode(unlinkErr)})`,
                   );
                 }
               }
@@ -134,6 +187,7 @@ export function registerAuthTokenCommand(auth: Command): void {
             }
 
             if (out !== undefined && outFd !== undefined) {
+              let failedWith: string | undefined;
               try {
                 writeSync(outFd, token + "\n");
                 // The POSIX chmod repair mirrors init.ts and is skipped on
@@ -144,12 +198,23 @@ export function registerAuthTokenCommand(auth: Command): void {
                     fchmodSync(outFd, 0o600);
                   } catch (err) {
                     console.error(
-                      `Warning: could not restrict ${out} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+                      `Warning: could not restrict ${out} to owner-only access (${errnoCode(err)})`,
                     );
                   }
                 }
-              } finally {
+              } catch (err) {
+                failedWith = errnoCode(err);
+              }
+              try {
                 closeSync(outFd);
+              } catch (err) {
+                failedWith ??= errnoCode(err);
+              }
+              if (failedWith !== undefined) {
+                throw new VaultError(
+                  ErrorCode.FILE_IO_ERROR,
+                  `could not write the token file ${out} (${failedWith})`,
+                );
               }
               console.error(`Token written to ${out}`);
             }

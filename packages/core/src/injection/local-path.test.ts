@@ -20,7 +20,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { system32Path } from "../win32-paths.js";
 import type { DaemonPaths, LocalPathInput } from "./local-path.js";
-import { judgeLocalPath, resolveSftpLocalPath } from "./local-path.js";
+import { judgeLocalPath, namesDeviceNamespaceDrive, resolveSftpLocalPath } from "./local-path.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -39,6 +39,7 @@ const NAMES_A_SHARE = "sftp local path names a network share";
 const NO_GLOB = "sftp local path must not contain glob characters";
 const MUST_NAME_A_FILE = "sftp download path must name a file";
 const READ_DIFFERENTLY = "sftp local path holds a name Windows reads differently";
+const DOT_SEGMENT = "sftp local path must not hold a .. segment";
 const WIN32 = process.platform === "win32";
 const NO_PATHS: DaemonPaths = { protectedDirs: [], protectedFiles: [] };
 const USERS = "S-1-5-32-545";
@@ -152,10 +153,6 @@ function onWin32(
 const NOT_ALLOWED: readonly Case[] = [
   ["a file outside every listed directory", () => ({ localPath: join(fx.outside, "secret.txt") })],
   ["a file that does not exist", () => ({ localPath: join(fx.listed, "missing.pdf") })],
-  [
-    "a .. path that leaves the directory",
-    () => ({ localPath: `${fx.listed}${sep}..${sep}outside${sep}secret.txt` }),
-  ],
   ["the listed directory itself", () => ({ localPath: fx.listed })],
   ["an empty list", () => ({ allowedDirs: [] })],
   ["a listed directory that does not exist", () => ({ allowedDirs: [join(fx.root, "nowhere")] })],
@@ -249,6 +246,11 @@ const INVALID: ReadonlyArray<readonly [string, () => Partial<Input>, string]> = 
   ["a number", () => ({ localPath: 5 }), MUST_BE_ABSOLUTE],
   ["a glob character", () => ({ localPath: join(fx.listed, "*.pdf") }), NO_GLOB],
   [
+    "a .. path that leaves the directory",
+    () => ({ localPath: `${fx.listed}${sep}..${sep}outside${sep}secret.txt` }),
+    DOT_SEGMENT,
+  ],
+  [
     "a download onto an existing directory",
     () => ({ operation: "download", localPath: join(fx.listed, "sub") }),
     MUST_NAME_A_FILE,
@@ -308,6 +310,57 @@ const INVALID: ReadonlyArray<readonly [string, () => Partial<Input>, string]> = 
   ].map((name) => onWin32(name, NAMES_A_DEVICE)),
 ];
 
+const TRANSFERS = ["upload", "download"] as const;
+
+const FOREIGN_DOT_SEGMENTS: ReadonlyArray<readonly [string, NodeJS.Platform]> = [
+  ["/srv/r/sub/../f", "linux"],
+  ["/srv/r/..", "linux"],
+  [`C:${B}d${B}sub${B}..${B}f`, "win32"],
+  ["C:/d/sub/../f", "win32"],
+];
+
+const DOT_SEGMENTS: readonly Case[] = [
+  [
+    "an upload of <listed>/sub/../report.pdf",
+    () => ({ localPath: viaSub(fx.listed, "report.pdf") }),
+  ],
+  [
+    "a download to <listed>/sub/../new.pdf",
+    () => ({ operation: "download", localPath: viaSub(fx.listed, "new.pdf") }),
+  ],
+  ...TRANSFERS.flatMap((operation) =>
+    FOREIGN_DOT_SEGMENTS.map(([localPath, platform]): Case => [
+      `${operation} of ${localPath} on ${platform}`,
+      () => ({ operation, localPath, platform }),
+    ]),
+  ),
+];
+
+const DOWNLOADS_ENDING_IN_A_SEPARATOR: readonly Case[] = [
+  ["<listed>/new.pdf/", () => ({ localPath: `${join(fx.listed, "new.pdf")}${sep}` })],
+  ["<outside>/new.pdf/", () => ({ localPath: `${join(fx.outside, "new.pdf")}${sep}` })],
+  ["/srv/r/new.pdf/ on linux", () => ({ localPath: "/srv/r/new.pdf/", platform: "linux" })],
+  [
+    `C:${B}d${B}new.pdf${B} on win32`,
+    () => ({ localPath: `C:${B}d${B}new.pdf${B}`, platform: "win32" }),
+  ],
+  ["C:/d/new.pdf/ on win32", () => ({ localPath: "C:/d/new.pdf/", platform: "win32" })],
+];
+
+async function expectRefusedBeforeAnyCall(overrides: Partial<Input>, message: string) {
+  vi.mocked(realpath).mockClear();
+  vi.mocked(lstat).mockClear();
+  vi.mocked(stat).mockClear();
+  const err = await expectVaultError(
+    () => resolveSftpLocalPath(input(overrides)),
+    ErrorCode.INVALID_INPUT,
+  );
+  expect(err.message).toBe(message);
+  expect(realpath).not.toHaveBeenCalled();
+  expect(lstat).not.toHaveBeenCalled();
+  expect(stat).not.toHaveBeenCalled();
+}
+
 const WIN32_DOWNLOADS_WITH_A_TRAILING_DOT: readonly Case[] = [
   [
     "the vault directory, whose parent is listed,",
@@ -319,9 +372,7 @@ const WIN32_DOWNLOADS_WITH_A_TRAILING_DOT: readonly Case[] = [
 
 describe("resolveSftpLocalPath", () => {
   it("an upload inside a listed directory returns its resolved path", async () => {
-    await expect(
-      resolveSftpLocalPath(input({ localPath: viaSub(fx.listed, "report.pdf") })),
-    ).resolves.toBe(join(fx.listed, "report.pdf"));
+    await expect(resolveSftpLocalPath(input())).resolves.toBe(join(fx.listed, "report.pdf"));
   });
 
   it.skipIf(process.platform === "win32")("a listed directory given by a link", async () => {
@@ -334,9 +385,7 @@ describe("resolveSftpLocalPath", () => {
 
   it("a download to a new file returns the resolved directory joined with the name", async () => {
     await expect(
-      resolveSftpLocalPath(
-        input({ operation: "download", localPath: viaSub(fx.listed, "new.pdf") }),
-      ),
+      resolveSftpLocalPath(input({ operation: "download", localPath: join(fx.listed, "new.pdf") })),
     ).resolves.toBe(join(fx.listed, "new.pdf"));
   });
 
@@ -714,6 +763,52 @@ describe("resolveSftpLocalPath", () => {
   );
 });
 
+describe("resolveSftpLocalPath: a `..` segment and a trailing separator, judged by the spelling", () => {
+  it.each(DOT_SEGMENTS)(
+    "a `..` segment is refused before any file-system call: %s",
+    async (_label, overrides) => {
+      await expectRefusedBeforeAnyCall(overrides(), DOT_SEGMENT);
+    },
+  );
+
+  it("a name that merely holds two dots is no segment", async () => {
+    for (const name of ["a..b", "..x"]) {
+      const localPath = join(fx.listed, name);
+      writeFileSync(localPath, name);
+      await expect(resolveSftpLocalPath(input({ localPath }))).resolves.toBe(localPath);
+    }
+  });
+
+  it.each(DOWNLOADS_ENDING_IN_A_SEPARATOR)(
+    "a download whose spelling ends in a separator names no file, before any call: %s",
+    async (_label, overrides) => {
+      await expectRefusedBeforeAnyCall({ operation: "download", ...overrides() }, MUST_NAME_A_FILE);
+    },
+  );
+
+  // The dangling link of the fixture needs a privilege a win32 host may not grant.
+  it.skipIf(WIN32)("`<listed>/<dead link>/` is refused before any call", async () => {
+    await expectRefusedBeforeAnyCall(
+      { operation: "download", localPath: `${join(fx.listed, "dangling")}/` },
+      MUST_NAME_A_FILE,
+    );
+  });
+
+  it("an upload's trailing separator is not judged by that rule", async () => {
+    await expect(
+      resolveSftpLocalPath(input({ localPath: `${join(fx.listed, "sub")}${sep}` })),
+    ).resolves.toBe(join(fx.listed, "sub"));
+  });
+
+  it("a listed directory's spelling is read as before", async () => {
+    for (const listed of [`${fx.listed}${sep}`, `${fx.listed}${sep}sub${sep}..`]) {
+      await expect(resolveSftpLocalPath(input({ allowedDirs: [listed] })), listed).resolves.toBe(
+        join(fx.listed, "report.pdf"),
+      );
+    }
+  });
+});
+
 function judgement(overrides: Partial<LocalPathInput>): LocalPathInput {
   return {
     localPath: join(fx.listed, "report.pdf"),
@@ -796,4 +891,48 @@ describe("judgeLocalPath: a path that names a device", () => {
       ).resolves.toEqual({ refusal: "not_allowed" });
     },
   );
+});
+
+describe("judgeLocalPath: a `..` segment", () => {
+  it("a backslash is a separator on win32 alone", async () => {
+    await expect(
+      judgeLocalPath(
+        judgement({ localPath: `/srv/a${B}..${B}b`, refuseGlob: false, platform: "linux" }),
+      ),
+    ).resolves.toEqual({ refusal: "not_allowed" });
+    await expect(
+      judgeLocalPath(
+        judgement({ localPath: `C:${B}srv${B}a${B}..${B}b`, refuseGlob: false, platform: "win32" }),
+      ),
+    ).resolves.toEqual({ refusal: "dot_segment" });
+  });
+});
+
+describe("namesDeviceNamespaceDrive", () => {
+  const drives = [`${B}${B}?${B}C:${B}x`, `${B}${B}.${B}c:${B}x`, "//?/C:/x", `${B}${B}?${B}C:`];
+  const others = [
+    `${B}${B}?${B}UNC${B}s${B}h`,
+    `${B}${B}.${B}UNC${B}s${B}h`,
+    `${B}${B}?${B}GLOBALROOT${B}x`,
+    `${B}${B}?${B}Volume{01234567-89ab-cdef-0123-456789abcdef}${B}x`,
+    `${B}${B}.${B}pipe${B}x`,
+    `${B}${B}server${B}share`,
+    `C:${B}x`,
+    `${B}${B}?${B}C:x`,
+    `${B}${B}.${B}C:${B}..${B}UNC${B}s${B}h`,
+  ];
+
+  it("on win32 a drive letter spelled through the device namespace, at its end or before a separator, in either slash form, on any host", () => {
+    for (const path of drives) expect(namesDeviceNamespaceDrive(path, "win32"), path).toBe(true);
+  });
+
+  it("on win32 nothing else under the two namespaces, no share and no plain drive path, on any host: the spelling is read as win32.normalize spells it, a `..` that climbs off the drive included", () => {
+    for (const path of others) expect(namesDeviceNamespaceDrive(path, "win32"), path).toBe(false);
+  });
+
+  it("off win32 no spelling", () => {
+    for (const path of [...drives, ...others]) {
+      expect(namesDeviceNamespaceDrive(path, "linux"), path).toBe(false);
+    }
+  });
 });

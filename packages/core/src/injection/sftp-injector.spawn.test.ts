@@ -434,7 +434,7 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       });
 
       await executeSftpAction(
-        { ...UPLOAD_ACTION, local_path: `${listedDir}${sep}sub${sep}..${sep}report.pdf` },
+        { ...UPLOAD_ACTION, local_path: `${listedDir}${sep}.${sep}report.pdf` },
         new Uint8Array(Buffer.from(makeKeyPem())),
         allowedPolicy({ local_dirs: [listedDir] }),
         SFTP_CONFIG,

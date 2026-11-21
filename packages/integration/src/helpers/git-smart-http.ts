@@ -29,8 +29,8 @@ export const GIT_SMART_HTTPS_CA_PEM = SECOND_CA_CERT_PEM;
  * `packages/core/src/injection/__fixtures__/git-smart-http.ts` (integration
  * cannot import a module out of core's `src/` — see the SMTP fake's header).
  * A trimmed copy: it always serves TLS with core's `second-ca` pair (self-signed,
- * SAN `IP:127.0.0.1`), because the egress proxy's upstream is HTTPS by
- * construction; it has no `startRecorder`, and `SeenRequest` keeps the method,
+ * SAN `IP:127.0.0.1`), because the egress-proxy suite pins it by `--http-ca`;
+ * it has no `startRecorder`, and `SeenRequest` keeps the method,
  * the URL and the headers. Every request must carry the Basic credential
  * `user:token`; any other is answered 401, so a fetch or a push succeeds only
  * when the credential reached the fixture.

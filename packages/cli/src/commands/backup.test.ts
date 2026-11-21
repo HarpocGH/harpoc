@@ -177,7 +177,7 @@ describe("harpoc backup <file>", () => {
     expect(existsSync(target)).toBe(false);
   });
 
-  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)(
+  it.each(["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const)(
     "%s during the copy aborts the engine's signal and the command ends only once the engine has answered",
     async (signal) => {
       const before = new Set(process.listeners(signal));

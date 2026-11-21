@@ -20,7 +20,8 @@ export const LOOPBACK_BIND_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", ":
  * The same three names as `URL.hostname` spells them — the IPv6 literal
  * bracketed — for every "plain http(s)/ws for loopback only" URL refinement
  * (the OAuth endpoint and WebSocket schemas, the ACME directory check, core's
- * `isLoopback`): the one declaration since 2026-09-23 (CM-2).
+ * `isLoopback`) but `isPlainUpstreamHost`, which leaves `localhost` out: the
+ * one declaration since 2026-09-23 (CM-2).
  */
 export const LOOPBACK_URL_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -30,6 +31,11 @@ const PORT = /^\d{1,5}$/;
 
 export function isLoopbackBindHost(host: string): boolean {
   return LOOPBACK_BIND_HOSTS.has(host.trim().toLowerCase());
+}
+
+/** Exactly the two literals `127.0.0.1` and `[::1]`, as `URL.hostname` spells them; `localhost` is left out because the system resolves it at connect. */
+export function isPlainUpstreamHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
 /**

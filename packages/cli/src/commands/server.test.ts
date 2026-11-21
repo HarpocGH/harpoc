@@ -167,35 +167,43 @@ vi.mock("@harpoc/egress-proxy", () => ({
   createEgressProxy: vi.fn().mockReturnValue(mockEgressProxy),
 }));
 
-// server.ts reaches core only for AgentSocketServer, the unlock key's three readers, the token
-// rotation's scheduler, the backup directory's judgement and the backup scheduler (vault-loader.js,
-// the engine's one other path, is mocked above).
-vi.mock("@harpoc/core", () => ({
-  AgentSocketServer: mockAgentSocketServer,
-  readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
-  readUnlockCredential: mockUnlockKeySource.readUnlockCredential,
-  readUnlockKeyDpapi: mockUnlockKeySource.readUnlockKeyDpapi,
-  // runtime-dir.ts's win32 access-list read (B7): a listing that fails, so the real ladder on
-  // win32 refuses fail-closed unless a row stubs the ladder.
-  listWindowsAclSync: vi.fn(() => {
-    throw new Error("ACL listing failed (exit 1)");
-  }),
-  TokenRotationScheduler: vi.fn().mockImplementation(function (
-    engine: unknown,
-    specs: unknown,
-    options: unknown,
-  ) {
-    rotationSchedulerCtorCalls.push({ engine, specs, options: options as Record<string, unknown> });
-    return mockRotationScheduler;
-  }),
-  assertUnlinkedDir: vi.fn(),
-  assertOwnerOnlyDir: vi.fn(),
-  assertHeldDir: vi.fn(async (path: string) => path),
-  BackupScheduler: vi.fn().mockImplementation(function (engine: unknown, options: unknown) {
-    backupSchedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
-    return mockBackupScheduler;
-  }),
-}));
+// server.ts reaches core only for AgentSocketServer, the unlock key's three readers, the link
+// probe, the token rotation's scheduler, the backup directory's judgement and the backup scheduler
+// (vault-loader.js, the engine's one other path, is mocked above).
+vi.mock("@harpoc/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@harpoc/core")>();
+  return {
+    AgentSocketServer: mockAgentSocketServer,
+    readUnlockKeyFile: mockUnlockKeySource.readUnlockKeyFile,
+    readUnlockCredential: mockUnlockKeySource.readUnlockCredential,
+    readUnlockKeyDpapi: mockUnlockKeySource.readUnlockKeyDpapi,
+    isLinkPath: actual.isLinkPath,
+    // runtime-dir.ts's win32 access-list read (B7): a listing that fails, so the real ladder on
+    // win32 refuses fail-closed unless a row stubs the ladder.
+    listWindowsAclSync: vi.fn(() => {
+      throw new Error("ACL listing failed (exit 1)");
+    }),
+    TokenRotationScheduler: vi.fn().mockImplementation(function (
+      engine: unknown,
+      specs: unknown,
+      options: unknown,
+    ) {
+      rotationSchedulerCtorCalls.push({
+        engine,
+        specs,
+        options: options as Record<string, unknown>,
+      });
+      return mockRotationScheduler;
+    }),
+    assertUnlinkedDir: vi.fn(),
+    assertOwnerOnlyDir: vi.fn(),
+    assertHeldDir: vi.fn(async (path: string) => path),
+    BackupScheduler: vi.fn().mockImplementation(function (engine: unknown, options: unknown) {
+      backupSchedulerCtorCalls.push({ engine, options: options as Record<string, unknown> });
+      return mockBackupScheduler;
+    }),
+  };
+});
 
 // Spy wrapper around the real implementation: the assertion's argument and its
 // order against loadUnlockedEngine are observable.

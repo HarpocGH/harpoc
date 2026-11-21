@@ -377,7 +377,9 @@ describe.skipIf(GIT === null)(
       const basic = `Basic ${Buffer.from(`${USER}:${PLACEHOLDER}`).toString("base64")}`;
       const missing = await rawGet(proxyPort, path, { authorization: basic });
       expect(missing.status).toBe(407);
-      expect(missing.headers["proxy-authenticate"]).toBe('Bearer realm="harpoc"');
+      expect(missing.headers["proxy-authenticate"]).toBe(
+        'Basic realm="harpoc", Bearer realm="harpoc"',
+      );
       const invalid = await rawGet(proxyPort, path, {
         authorization: basic,
         "proxy-authorization": "Bearer not-a-token",

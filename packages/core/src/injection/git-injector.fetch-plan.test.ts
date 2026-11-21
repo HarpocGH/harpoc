@@ -484,6 +484,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "pull",
       [
         ["rev-parse", "none"],
+        ["rev-parse", "none"],
         ["for-each-ref", "none"],
         ["fetch", "list"],
         ["pull", "list"],
