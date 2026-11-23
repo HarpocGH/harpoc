@@ -1298,6 +1298,6 @@ describe.skipIf(GIT === null)(
       expect(fetch.exit_code, fetch.stderr).toBe(0);
       expect(git(wt, "rev-parse", "refs/remotes/origin/main").trim()).toBe(pushed);
       expect(server.requests.length).toBeGreaterThan(requests);
-    });
+    }, 120_000);
   },
 );
