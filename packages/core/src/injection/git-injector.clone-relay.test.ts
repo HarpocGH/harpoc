@@ -295,16 +295,31 @@ describeGit("Git clone through the relay — today's clone semantics on real git
     },
   );
 
-  // A symbolic link needs a privilege on win32. Plain git 2.39 writes a bare clone through a
-  // link that leads nowhere, into the link's target.
-  it.skipIf(process.platform === "win32").each(["--bare", "--mirror"])(
-    "a %s clone whose destination is a link that leads nowhere is refused, and nothing is made at the link's target",
+  it.each(["--bare", "--naked", "--mirror"])(
+    "a clone with %s is refused before git runs",
     async (option) => {
+      const requests = [...server.requests];
+      const dest = join(out, "bare");
+      const err = await expectVaultError(
+        () => clone("repo.git", { args: [option], working_directory: dest }),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe(`disallowed git argument: ${option}`);
+      expect(server.requests).toEqual(requests);
+      expect(existsSync(dest)).toBe(false);
+    },
+  );
+
+  // A symbolic link needs a privilege on win32. Plain git makes no clone through a link that
+  // leads nowhere either: it stops on `File exists` and writes nothing at the link's target.
+  it.skipIf(process.platform === "win32")(
+    "a clone whose destination is a link that leads nowhere is refused, and nothing is made at the link's target",
+    async () => {
       mkdirSync(join(out, "elsewhere"));
       const link = join(out, "link");
       symlinkSync(join(out, "elsewhere", "planted"), link, "dir");
       const err = await expectVaultError(
-        () => clone("repo.git", { args: [option], working_directory: link }),
+        () => clone("repo.git", { working_directory: link }),
         ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       );
       expect(err.message).toBe("git working directory is inside a directory the vault protects");
@@ -316,13 +331,13 @@ describeGit("Git clone through the relay — today's clone semantics on real git
   // A symbolic link needs a privilege on win32. Darwin's realpath takes a `..` off the name of
   // a file where Linux answers ENOTDIR: on either, the link behind it is not handed to git.
   it.skipIf(process.platform === "win32")(
-    "a --bare clone whose destination is a link that leads nowhere, spelled behind a file and `..`, is refused, and nothing is made at the link's target",
+    "a clone whose destination is a link that leads nowhere, spelled behind a file and `..`, is refused, and nothing is made at the link's target",
     async () => {
       mkdirSync(join(out, "elsewhere"));
       writeFileSync(join(out, "file"), "");
       symlinkSync(join(out, "elsewhere", "planted"), join(out, "link"), "dir");
       await expectVaultError(
-        () => clone("repo.git", { args: ["--bare"], working_directory: `${out}/file/../link` }),
+        () => clone("repo.git", { working_directory: `${out}/file/../link` }),
         ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       );
       expect(readdirSync(join(out, "elsewhere"))).toEqual([]);
@@ -333,7 +348,7 @@ describeGit("Git clone through the relay — today's clone semantics on real git
   // A symbolic link needs a privilege on win32. Off win32 the system refuses to read a
   // spelling at its length limit, 1024 bytes on macOS and 4096 on Linux, the link included.
   it.skipIf(process.platform === "win32").each([1024, 4096])(
-    "a --bare clone whose destination is a link that leads nowhere, behind a spelling of %i characters of `.` steps, is refused, and nothing is made at the link's target",
+    "a clone whose destination is a link that leads nowhere, behind a spelling of %i characters of `.` steps, is refused, and nothing is made at the link's target",
     async (length) => {
       mkdirSync(join(out, "elsewhere"));
       const room = length - out.length - 1 - "link".length;
@@ -342,7 +357,7 @@ describeGit("Git clone through the relay — today's clone semantics on real git
       const spelled = `${out}/${"./".repeat(Math.floor(room / 2))}${name}`;
       expect(spelled).toHaveLength(length);
       await expectVaultError(
-        () => clone("repo.git", { args: ["--bare"], working_directory: spelled }),
+        () => clone("repo.git", { working_directory: spelled }),
         ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       );
       expect(readdirSync(join(out, "elsewhere"))).toEqual([]);

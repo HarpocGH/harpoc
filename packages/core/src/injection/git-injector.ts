@@ -8,9 +8,10 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { isIPv4, isIPv6 } from "node:net";
 import { devNull, tmpdir } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
 import {
   DEFAULT_GIT_TIMEOUT_MS,
@@ -32,15 +33,34 @@ import {
   formatGitVersion,
   GIT_MIN_VERSION,
   GIT_PIN_MIN_VERSION,
+  GIT_WIN32_OWNER_MIN_VERSION,
   gitVersionAtLeast,
   readGitVersion,
 } from "./git-injector-version.js";
+import {
+  judgeOwnConfig,
+  LOCAL_FETCH_SWITCHES,
+  LOCAL_PULL_SWITCHES,
+  localStepConfig,
+  NO_ALTERNATE_REFS,
+  ownConfigListingArgs,
+  removeRepositoryVariables,
+  writeLocalStepVariables,
+} from "./git-injector-local-steps.js";
+import {
+  assertRepositoryOwned,
+  derivedCloneDirectory,
+  findServedRepository,
+} from "./git-injector-repository.js";
+import type { ServedRepository } from "./git-injector-repository.js";
+import { holdsDotGitName, isDotGitName } from "./local-path-git.js";
 import {
   holdsDotSegment,
   holdsNameNotWrittenAsStored,
   holdsNameWin32ReadsDifferently,
   holdsProtectedPath,
   isProtectedPath,
+  liesInGitDirectory,
   namesDeviceNamespaceDrive,
   namesNetworkShare,
   resolveSpelledDirectory,
@@ -60,7 +80,7 @@ import {
   writeKnownHosts,
   writeTempSshFile,
 } from "./ssh-common.js";
-import type { TempSshFile } from "./ssh-common.js";
+import type { KnownHostsFiles, TempSshFile } from "./ssh-common.js";
 import { validateUrl } from "./url-validator.js";
 
 /** git args that turn data into an instruction vehicle (config/hook/transport execution).
@@ -74,6 +94,8 @@ const DANGEROUS_ARG_PREFIXES = [
   "--config",
   "--config-env",
   "--upload-pack",
+  // The negation would cancel the vault's own `--upload-pack=git-upload-pack` on a local step.
+  "--no-upload-pack",
   "--receive-pack",
   "--exec",
   "--template",
@@ -97,7 +119,19 @@ const CLONE_DANGEROUS_ARG_PREFIXES = [
   "--also-filter-submodules",
   // Fetches bundles from an arbitrary URI the URL allowlist never saw.
   "--bundle-uri",
+  // The vault makes no repository without a work tree (`--naked` is git's
+  // hidden `--bare`), and a clone borrows objects from no local repository.
+  "--bare",
+  "--naked",
+  "--mirror",
+  "--reference",
+  "--reference-if-able",
+  "--shared",
+  "-s",
 ];
+
+/** A pull opens no editor (A8). */
+const PULL_DANGEROUS_ARG_PREFIXES = ["--edit", "-e"];
 
 /** A relayed push cannot record an upstream in the caller's tree: git writes
  *  the `[branch]` section into the relay's config, which the after-check then
@@ -136,7 +170,7 @@ const LS_REMOTE_DANGEROUS_ARG_PREFIXES = ["-u", "-4", "-6", "--ipv4", "--ipv6"];
 /** The denied options beside DANGEROUS_ARG_PREFIXES, per operation. */
 const OPERATION_DANGEROUS_ARG_PREFIXES: Record<GitAction["operation"], readonly string[]> = {
   clone: CLONE_DANGEROUS_ARG_PREFIXES,
-  pull: [],
+  pull: PULL_DANGEROUS_ARG_PREFIXES,
   push: PUSH_DANGEROUS_ARG_PREFIXES,
   fetch: FETCH_DANGEROUS_ARG_PREFIXES,
   "ls-remote": LS_REMOTE_DANGEROUS_ARG_PREFIXES,
@@ -264,17 +298,6 @@ interface RelayRepo {
   /** Rewrites HEAD (a `ref: <name>` or an oid); the checks expect the new value. */
   setHead: (value: string) => void;
 }
-
-/**
- * The credential-free local hops — the local `pull`, the fetch's local `fetch`
- * and the clone's local `clone` — read the relay and nothing else: the flags
- * refuse every transport but file for what the vault's argv and a default
- * tree ask for (`transport '<x>' not allowed`), such as a submodule fetch or a
- * partial-clone caller's lazy fetch during a pull. A tree's own
- * `protocol.<name>.allow` still applies to that step, which carries no
- * credential.
- */
-const LOCAL_HOP_PROTOCOLS = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always"];
 
 /** The relay HEAD before (or without) the remote's: git's own default branch. */
 const RELAY_DEFAULT_HEAD = "ref: refs/heads/master";
@@ -795,7 +818,7 @@ export class GitInjector {
       throw err;
     }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
-    let kh: TempSshFile;
+    let kh: KnownHostsFiles;
     try {
       kh = writeKnownHosts(knownHosts);
     } catch (err) {
@@ -831,7 +854,7 @@ export class GitInjector {
         "-o",
         `HostName=${dialHost}`,
         ...(address.user !== null ? ["-o", `User=${address.user}`] : []),
-        ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+        ...sshHardeningArgs(kh, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ]);
       env.GIT_TERMINAL_PROMPT = "0";
       const networkIsolation = policy.network_isolation === true;
@@ -937,6 +960,15 @@ export class GitInjector {
     } else if (pinned && !gitVersionAtLeast(version, GIT_PIN_MIN_VERSION)) {
       refusal = VaultError.gitOperationFailed(
         `git ${formatGitVersion(version)} is older than ${GIT_PIN_MIN_VERSION.join(".")} and would ignore the addresses the vault judged for the repository host`,
+      );
+    } else if (
+      process.platform === "win32" &&
+      action.operation !== "clone" &&
+      action.operation !== "ls-remote" &&
+      !gitVersionAtLeast(version, GIT_WIN32_OWNER_MIN_VERSION)
+    ) {
+      refusal = VaultError.gitOperationFailed(
+        `git ${formatGitVersion(version)} is older than ${GIT_WIN32_OWNER_MIN_VERSION.join(".")}, which a pull, a push and a fetch need on Windows`,
       );
     } else {
       return;
@@ -1049,6 +1081,61 @@ function deniedOptionReached(
   return denied.find((p) => p.startsWith("--") && p.startsWith(optionName)) ?? null;
 }
 
+interface DeniedOptionValue {
+  entry: string;
+  long: string;
+  short: string;
+  values: readonly string[];
+}
+
+/** The values denied to an option that is itself taken, per operation (A8). */
+const OPERATION_DENIED_OPTION_VALUES: Record<GitAction["operation"], readonly DeniedOptionValue[]> =
+  {
+    clone: [],
+    push: [],
+    fetch: [],
+    "ls-remote": [],
+    pull: [
+      { entry: "--rebase=interactive", long: "--rebase", short: "r", values: ["interactive", "i"] },
+    ],
+  };
+
+/**
+ * The entry of `denied` that `arg` reaches with a denied value, or null:
+ * `--<name>=<value>` where the name is the option or git's abbreviation of
+ * it, or a single-dash cluster walked as deniedOptionReached walks it, in
+ * which the rest of the token behind the option's letter is its value. A
+ * value is compared as git compares it, exactly.
+ */
+function deniedOptionValueReached(
+  arg: string,
+  denied: readonly DeniedOptionValue[],
+  shortWithValue: ReadonlySet<string>,
+): string | null {
+  const a = arg.trim();
+  const eq = a.indexOf("=");
+  for (const option of denied) {
+    if (
+      a.startsWith("--") &&
+      eq > 2 &&
+      option.long.startsWith(a.slice(0, eq)) &&
+      option.values.includes(a.slice(eq + 1))
+    ) {
+      return option.entry;
+    }
+    if (!/^-[^-]/.test(a)) continue;
+    for (let i = 1; i < a.length; i++) {
+      const letter = a.charAt(i);
+      if (letter === option.short) {
+        if (option.values.includes(a.slice(i + 1))) return option.entry;
+        break;
+      }
+      if (shortWithValue.has(letter)) break;
+    }
+  }
+  return null;
+}
+
 /**
  * An operation the schema never parsed may be anything (RX-B9-13): it must be
  * a string and an own key of the per-operation table — never an inherited name
@@ -1063,7 +1150,13 @@ function assertKnownOperation(action: GitAction): void {
 function assertSafeArgs(operation: GitAction["operation"], args: string[] | undefined): void {
   const denied = [...DANGEROUS_ARG_PREFIXES, ...OPERATION_DANGEROUS_ARG_PREFIXES[operation]];
   for (const arg of args ?? []) {
-    const entry = deniedOptionReached(arg, denied, SHORT_WITH_VALUE[operation]);
+    const entry =
+      deniedOptionReached(arg, denied, SHORT_WITH_VALUE[operation]) ??
+      deniedOptionValueReached(
+        arg,
+        OPERATION_DENIED_OPTION_VALUES[operation],
+        SHORT_WITH_VALUE[operation],
+      );
     if (entry !== null) {
       throw VaultError.invalidGitConfig(`disallowed git argument: ${entry}`);
     }
@@ -1162,7 +1255,8 @@ function parseGitCredential(value: Uint8Array): { user: string; password: string
  * (N11, S1): no hook of the caller's tree runs (an empty vault-authored
  * core.hooksPath), no configured credential helper is asked or told anything
  * (an empty credential.helper resets every helper, URL-scoped ones included),
- * and core.fsmonitor does not run.
+ * core.fsmonitor does not run, and git takes no bare repository it would
+ * have to discover.
  */
 function forcedGitConfig(hooksDir: string): string[] {
   return [
@@ -1172,8 +1266,16 @@ function forcedGitConfig(hooksDir: string): string[] {
     "credential.helper=",
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "safe.bareRepository=explicit",
   ];
 }
+
+const DOT_GIT_SEGMENT = "working_directory must not hold a .git segment";
+const CLONE_DERIVES_DOT_GIT =
+  "a clone without working_directory must not derive a .git directory from the repository";
+const CLONE_DERIVES_NO_NAME =
+  "a clone without working_directory needs a repository address that names a directory";
 
 function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): void {
   if (action.operation === "clone") {
@@ -1189,13 +1291,19 @@ function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): vo
     throw VaultError.invalidGitConfig(`working_directory is required for ${action.operation}`);
   }
   const wd = action.working_directory;
-  if (!wd) return;
+  if (!wd) {
+    const derived = derivedCloneDirectory(action.repository, process.platform);
+    if (derived === null) throw VaultError.invalidGitConfig(CLONE_DERIVES_NO_NAME);
+    if (isDotGitName(derived)) throw VaultError.invalidGitConfig(CLONE_DERIVES_DOT_GIT);
+    return;
+  }
   if (namesNetworkShare(wd, process.platform) && !namesDeviceNamespaceDrive(wd, process.platform)) {
     throw VaultError.invalidGitConfig("working_directory names a network share");
   }
   if (local?.daemon !== undefined && holdsDotSegment(wd, process.platform)) {
     throw VaultError.invalidGitConfig("working_directory must not hold a .. segment");
   }
+  if (holdsDotGitName(wd)) throw VaultError.invalidGitConfig(DOT_GIT_SEGMENT);
 }
 
 /**
@@ -1221,28 +1329,39 @@ function spelledDirectory(action: GitAction): string | null {
  * The directory an operation names, as it is judged and git is handed it: the
  * caller's spelling resolved as the system resolves it, links followed, a part
  * that does not exist yet joined on. The floor's refusal where it lies inside
- * the floor, where it cannot be resolved so, and where git would read the
- * resolved spelling as another directory; undefined where git is handed none.
- * A pull, a push and a fetch are judged by what git reports there as well
- * (runRelayed).
+ * the floor, where it cannot be resolved so, where git would read the resolved
+ * spelling as another directory, where it holds a `.git` name, and for a clone
+ * where its destination lies inside a directory with a git directory's shape;
+ * undefined where git is handed none. A pull, a push and a fetch are judged by
+ * what git reports there as well (runRelayed).
  */
 async function directoryOutsideFloor(
   action: GitAction,
   local: FloorPaths | undefined,
 ): Promise<string | undefined> {
   if (action.operation === "ls-remote") return undefined;
-  if (local === undefined && !action.working_directory) return undefined;
   const spelled = spelledDirectory(action);
   const resolved =
     spelled === null || holdsNameWin32ReadsDifferently(spelled, process.platform)
       ? null
       : await resolveSpelledDirectory(spelled);
+  if (local === undefined && !action.working_directory) {
+    if (
+      resolved !== null &&
+      (holdsDotGitName(resolved) || (await cloneLiesInGitDirectory(action, resolved)))
+    ) {
+      throw VaultError.localPathProtected();
+    }
+    return undefined;
+  }
   if (
     resolved === null ||
+    holdsDotGitName(resolved) ||
     (local !== undefined && (await isProtectedPath(resolved, local.vaultFiles, local.daemon)))
   ) {
     throw VaultError.localPathProtected();
   }
+  if (await cloneLiesInGitDirectory(action, resolved)) throw VaultError.localPathProtected();
   if (!action.working_directory) return undefined;
   if (
     holdsNameWin32ReadsDifferently(resolved, process.platform) ||
@@ -1251,6 +1370,19 @@ async function directoryOutsideFloor(
     throw VaultError.localPathProtected();
   }
   return resolved;
+}
+
+/**
+ * Whether a clone would make its directory inside one with a git directory's
+ * shape: walked from the parent of the destination it names, and without
+ * `working_directory` from the process's directory, where git makes the
+ * derived one.
+ */
+async function cloneLiesInGitDirectory(action: GitAction, resolved: string): Promise<boolean> {
+  return (
+    action.operation === "clone" &&
+    (await liesInGitDirectory(action.working_directory ? dirname(resolved) : resolved))
+  );
 }
 
 interface StepOptions {
@@ -1332,7 +1464,7 @@ async function runPlan(
       redacted: r.redacted || stdout !== r.stdout || stderr !== r.stderr,
     };
   };
-  const localEnv = baseGitEnv(policy.env_allowlist);
+  const localEnv = writeLocalStepVariables(baseGitEnv(policy.env_allowlist));
   localEnv.GIT_TERMINAL_PROMPT = "0";
   switch (action.operation) {
     case "clone":
@@ -1437,7 +1569,7 @@ function parseRemoteHead(stdout: string): {
  * it. Two credential-bearing steps run against a vault-written relay:
  * `ls-remote --symref` learns the remote's HEAD and object format (a sha256
  * remote gets a sha256 relay — a fetch across formats fails), and `fetch`
- * takes every branch and tag (`+refs/*:refs/*` under `--mirror`; the remote's
+ * takes every branch and tag (the remote's
  * detached HEAD as well). The caller's clone is then made from the relay by a
  * credential-free `git clone <args> -- <repository> [dest]` with the relay
  * standing in for the repository (`url.<file://relay>.insteadOf`), so git
@@ -1479,16 +1611,13 @@ async function runRelayedClone(
       relay = relayFor("sha256");
     }
     if (remote.symref) relay.setHead(`ref: ${remote.symref}`);
-    const mirror = args.some((a) => matchesOption(optionName(a), "--mirror"));
     const noTags = args.some((a) => matchesOption(optionName(a), "--no-tags"));
     const detached = remote.symref === null && remote.oid !== null;
-    const refspecs = mirror
-      ? ["+refs/*:refs/*"]
-      : [
-          "+refs/heads/*:refs/heads/*",
-          ...(noTags ? [] : ["+refs/tags/*:refs/tags/*"]),
-          ...(detached ? [`+HEAD:${RELAY_REMOTE_HEAD_REF}`] : []),
-        ];
+    const refspecs = [
+      "+refs/heads/*:refs/heads/*",
+      ...(noTags ? [] : ["+refs/tags/*:refs/tags/*"]),
+      ...(detached ? [`+HEAD:${RELAY_REMOTE_HEAD_REF}`] : []),
+    ];
     const fetched = await networkStep(
       relay,
       [
@@ -1510,7 +1639,7 @@ async function runRelayedClone(
     const cloned = await step(
       [
         ...forced,
-        ...LOCAL_HOP_PROTOCOLS,
+        ...localStepConfig(NULL_GIT_CONFIG),
         "-c",
         `url.${fileUrl(relay.dir)}.insteadOf=${action.repository}`,
         "clone",
@@ -1598,16 +1727,18 @@ function remoteOf(listing: string, repository: string): string {
 /**
  * Pull, push and fetch (S1, face b): the credential never enters a git
  * process that reads the caller's repository config. The steps run in the
- * working tree — resolving its object directory, its shallow file, its git
- * directory and its common directory (a pull also its top level), its HEAD
- * and its refs (a fetch also its remote for the repository), and on a pull or
- * a fetch the final `pull` or `fetch` from the relay — carry neither the
- * credential nor the agent socket; the one network step (`fetch` of the
- * remote's HEAD or of the fetch's refspecs, or the `push`) runs with
- * `--git-dir` of the relay repository the vault wrote (createRelayRepo). A
- * step that fails ends the operation with its result. The probes among them
- * are read unredacted — the vault parses their output and returns it only on
- * a failure, redacted then (RG-6).
+ * top level of the repository the vault found — resolving its object
+ * directory, its shallow file, its git directory and its common directory (a
+ * pull also its top level), its HEAD and its refs (a fetch also its remote
+ * for the repository), and on a pull or a fetch the final `pull` or `fetch`
+ * from the relay — carry neither the credential nor the agent socket; the one
+ * network step (`fetch` of the remote's HEAD or of the fetch's refspecs, or
+ * the `push`) runs with `--git-dir` of the relay repository the vault wrote
+ * (createRelayRepo). A step that fails ends the operation with its result,
+ * the first probe, a pull's top level and the listing of the repository's own
+ * configuration before the local step with the vault's refusal. The probes
+ * among them are read unredacted — the vault parses their output and returns
+ * it only on a failure, redacted then (RG-6).
  */
 async function runRelayed(
   action: GitAction,
@@ -1621,9 +1752,11 @@ async function runRelayed(
   probeStep: GitStep,
   floor: FloorPaths | undefined,
 ): Promise<SpawnCapturedResult> {
+  const repo = await findServedRepository(wd);
+  await assertRepositoryOwned(repo, floor?.daemon !== undefined);
   const forced = forcedGitConfig(hooksDir);
-  const local = (args: string[]) => step([...forced, ...args], wd, localEnv);
-  const localProbe = (args: string[]) => probeStep([...forced, ...args], wd, localEnv);
+  const local = (args: string[]) => step([...forced, ...args], repo.top, localEnv);
+  const localProbe = (args: string[]) => probeStep([...forced, ...args], repo.top, localEnv);
 
   const probe = await localProbe([
     "rev-parse",
@@ -1635,26 +1768,34 @@ async function runRelayed(
     "--show-object-format",
     "--absolute-git-dir",
     "--git-common-dir",
+    "--is-bare-repository",
   ]);
-  if (!succeeded(probe)) return probe;
-  const [objectsDir, shallowFile, objectFormat, gitDir, commonDir] = probeLines(
+  if (!succeeded(probe)) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  const [objectsDir, shallowFile, objectFormat, gitDir, commonDir, bare] = probeLines(
     probe.stdout,
-    5,
-  ) as [string, string, string, string, string];
+    6,
+  ) as [string, string, string, string, string, string];
   if (objectFormat !== "sha1" && objectFormat !== "sha256") {
     throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   }
-  if (floor !== undefined) {
-    for (const path of [gitDir, commonDir, objectsDir, shallowFile]) {
-      await resolvedOutsideFloor(path, floor);
-    }
+  if (bare !== "false") throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  const answered: string[] = [];
+  for (const path of floor === undefined
+    ? [gitDir, commonDir]
+    : [gitDir, commonDir, objectsDir, shallowFile]) {
+    answered.push(await resolvedAnswer(path, floor));
+  }
+  const [answeredGitDir, answeredCommonDir] = answered as [string, string, ...string[]];
+  if (answeredGitDir !== repo.gitDir || answeredCommonDir !== (repo.commonDir ?? repo.gitDir)) {
+    throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   }
 
   let workTree: string | null = null;
   if (action.operation === "pull") {
     const topLevel = await localProbe(["rev-parse", "--path-format=absolute", "--show-toplevel"]);
-    if (!succeeded(topLevel)) return topLevel;
+    if (!succeeded(topLevel)) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
     workTree = await judgedWorkTree(probeLines(topLevel.stdout, 1)[0] as string, floor);
+    if (workTree !== repo.top) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   }
 
   let head = `ref: ${RELAY_FETCHED_REF}`;
@@ -1720,12 +1861,21 @@ async function runRelayed(
       ...(refspecs ? refspecs.network : [`+HEAD:${RELAY_FETCHED_REF}`]),
     ]);
     if (!succeeded(fetched)) return fetched;
+    const listingEnv = withCLocale(localEnv);
+    await refuseOwnConfiguration(
+      (args) => probeStep([...forced, ...args], repo.top, listingEnv),
+      action.repository,
+      floor?.daemon !== undefined,
+    );
+    if (floor?.daemon !== undefined && (await holdsLegacyRemoteFile(repo, action.repository))) {
+      throw VaultError.invalidGitConfig(OWN_CONFIGURATION);
+    }
     const merged = await local([
-      ...LOCAL_HOP_PROTOCOLS,
+      ...localStepConfig(NULL_GIT_CONFIG),
       "-c",
       `url.${relay.dir.replace(/\\/g, "/")}.insteadOf=${action.repository}`,
       ...(workTree === null ? [] : [`--work-tree=${workTree}`]),
-      ...(refspecs ? ["fetch", "--no-recurse-submodules", "--refmap="] : ["pull"]),
+      ...(refspecs ? ["fetch", ...LOCAL_FETCH_SWITCHES] : ["pull", ...LOCAL_PULL_SWITCHES]),
       ...(action.args ?? []),
       "--",
       action.repository,
@@ -1744,14 +1894,88 @@ async function runRelayed(
 }
 
 const UNRESOLVED_REPOSITORY = "could not resolve the working tree's repository";
+const OWN_CONFIGURATION =
+  "working_directory's repository configures a program or an address rewrite of its own";
+const UNLISTED_CONFIGURATION = "the repository's configuration could not be listed";
+
+/**
+ * A copy of `env` with `LC_ALL=C` written last, no other spelling of the name
+ * beside it where the platform reads names in any case: under a UTF-8 locale
+ * git's regex leaves out a key whose subsection holds a byte that is no UTF-8.
+ */
+function withCLocale(env: Record<string, string>): Record<string, string> {
+  const copy: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    const same = process.platform === "win32" ? name.toUpperCase() === "LC_ALL" : name === "LC_ALL";
+    if (!same) copy[name] = value;
+  }
+  copy.LC_ALL = "C";
+  return copy;
+}
+
+/**
+ * A7: the repository's own configuration, listed as the last act before the
+ * local step. A hook defined in `config` and a remote group named like the
+ * repository refuse in both models, the pattern's other hits in a daemon; a
+ * listing that fails or is cut refuses and returns nothing of its output,
+ * which can hold an address.
+ */
+async function refuseOwnConfiguration(
+  localProbe: (args: string[]) => Promise<SpawnCapturedResult>,
+  repository: string,
+  daemon: boolean,
+): Promise<void> {
+  const r = await localProbe(ownConfigListingArgs());
+  const answered =
+    !r.timed_out &&
+    !r.spawn_failed &&
+    !r.truncated &&
+    (r.exit_code === 0 || (r.exit_code === 1 && r.stdout === ""));
+  if (!answered) throw VaultError.gitOperationFailed(UNLISTED_CONFIGURATION);
+  const { hookCommand, remoteGroup, programOrRewrite } = judgeOwnConfig(r.stdout, repository);
+  if (hookCommand || remoteGroup || (daemon && programOrRewrite)) {
+    throw VaultError.invalidGitConfig(OWN_CONFIGURATION);
+  }
+}
+
+/**
+ * P-4: git reads `remotes/<repository>` and `branches/<repository>` of the git
+ * directory and the common directory as that remote where the address holds
+ * no directory separator (`\` one on win32 alone). An entry there, or one that
+ * cannot be read, is a find.
+ */
+async function holdsLegacyRemoteFile(repo: ServedRepository, repository: string): Promise<boolean> {
+  if (repository.includes("/") || (process.platform === "win32" && repository.includes("\\"))) {
+    return false;
+  }
+  for (const dir of repo.commonDir === null ? [repo.gitDir] : [repo.gitDir, repo.commonDir]) {
+    for (const kind of ["remotes", "branches"]) {
+      try {
+        await lstat(join(dir, kind, repository));
+        return true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") return true;
+      }
+    }
+  }
+  return false;
+}
 
 /** A probe's answer, its final line feed removed: exactly `count` lines, none empty. */
 function probeLines(stdout: string, count: number): string[] {
-  const lines = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+  const lines =
+    process.platform === "win32"
+      ? stdout.replace(/\r?\n$/, "").split(/\r?\n/)
+      : stdout.replace(/\n$/, "").split("\n");
   if (lines.length !== count || lines.includes("")) {
     throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   }
   return lines;
+}
+
+function hostSpelling(printed: string): string {
+  return process.platform === "win32" ? printed.replaceAll("/", "\\") : printed;
 }
 
 /**
@@ -1760,10 +1984,17 @@ function probeLines(stdout: string, count: number): string[] {
  * under the floor.
  */
 async function resolvedOutsideFloor(printed: string, floor: FloorPaths): Promise<string> {
-  const resolved = await resolveSpelledDirectory(printed);
+  const resolved = await resolveSpelledDirectory(hostSpelling(printed));
   if (resolved === null || (await isProtectedPath(resolved, floor.vaultFiles, floor.daemon))) {
     throw VaultError.localPathProtected();
   }
+  return resolved;
+}
+
+async function resolvedAnswer(printed: string, floor: FloorPaths | undefined): Promise<string> {
+  if (floor !== undefined) return resolvedOutsideFloor(printed, floor);
+  const resolved = await resolveSpelledDirectory(hostSpelling(printed));
+  if (resolved === null) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   return resolved;
 }
 
@@ -1774,11 +2005,7 @@ async function resolvedOutsideFloor(printed: string, floor: FloorPaths): Promise
  * resolved spelling as another directory.
  */
 async function judgedWorkTree(printed: string, floor: FloorPaths | undefined): Promise<string> {
-  const resolved =
-    floor === undefined
-      ? await resolveSpelledDirectory(printed)
-      : await resolvedOutsideFloor(printed, floor);
-  if (resolved === null) throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
+  const resolved = await resolvedAnswer(printed, floor);
   if (floor !== undefined && (await holdsProtectedPath(resolved, floor.vaultFiles, floor.daemon))) {
     throw VaultError.workTreeHoldsProtectedPath();
   }
@@ -1926,7 +2153,7 @@ function createRelayRepo(opts: {
         "[core]",
         `\trepositoryformatversion = ${sha256 ? "1" : "0"}`,
         "\tbare = true",
-        "\talternateRefsCommand = : no alternate refs",
+        `\talternateRefsCommand = ${NO_ALTERNATE_REFS}`,
         ...(sha256 ? ["[extensions]", "\tobjectFormat = sha256"] : []),
         "[push]",
         "\tdefault = current",
@@ -2018,9 +2245,12 @@ function baseGitEnv(envAllowlist: string[]): Record<string, string> {
 /**
  * No system or global git config on any git run (S1, face a): a stock Git for
  * Windows system config names `credential.helper=manager`, which would be told
- * the credential. Set after the allowlist, so an entry cannot reintroduce either.
+ * the credential. No variable that names git a repository, a configuration or
+ * a program either (A8). Set after the allowlist, so an entry cannot
+ * reintroduce any of them.
  */
 function isolateGitConfig(env: Record<string, string>): Record<string, string> {
+  removeRepositoryVariables(env);
   env.GIT_CONFIG_NOSYSTEM = "1";
   env.GIT_CONFIG_GLOBAL = NULL_GIT_CONFIG;
   return env;
@@ -2113,9 +2343,10 @@ const SH_NEUTRAL_PART = /^[A-Za-z0-9%+,\-./:=@_]+$/;
  * where double quotes would still let sh expand `$` and backticks inside (a
  * profile path like C:/Users/svc$deploy would arrive mangled). A literal `'`
  * in a part becomes the standard '\'' sequence. This composes with the readconf
- * double-quoting sshHardeningArgs applies to the UserKnownHostsFile VALUE: sh
- * strips the single quotes and hands ssh one argv element whose embedded double
- * quotes then survive for ssh's own whitespace re-tokenization of option values.
+ * double-quoting sshHardeningArgs applies to the two known-hosts file values: sh
+ * strips the single quotes and hands ssh one argv element each, whose embedded
+ * double quotes then survive for ssh's own whitespace re-tokenization of option
+ * values.
  */
 function toGitSshCommand(parts: string[]): string {
   const normalized = process.platform === "win32" ? parts.map((p) => p.replace(/\\/g, "/")) : parts;

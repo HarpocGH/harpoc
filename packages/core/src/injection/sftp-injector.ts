@@ -339,7 +339,7 @@ export async function executeSftpAction(
     batch = writeBatchFile(batchCommand);
 
     const args = [
-      ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+      ...sshHardeningArgs(kh, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
       ...(action.port !== undefined ? ["-P", String(action.port)] : []),
       "-oBatchMode=yes",
       "-b",

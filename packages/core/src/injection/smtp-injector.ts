@@ -96,6 +96,7 @@ const ATTACHMENT_REFUSALS: Record<LocalPathRefusal, string> = {
   glob: NOT_LISTED,
   win32_name: NOT_LISTED,
   dot_segment: NOT_LISTED,
+  dot_git: NOT_LISTED,
   protected: NOT_LISTED,
   not_allowed: NOT_LISTED,
   is_directory: NOT_LISTED,
@@ -127,7 +128,8 @@ export function buildSmtpAuditDetails(
  * the recipient-allowlist coupling (attachments demand a configured allowlist;
  * a configured allowlist constrains every recipient), the attachment count cap,
  * the attachment sources (`judgeLocalPath`: never a device, a network share, a
- * file inside the vault directory or outside the secret's `local_dirs`; then
+ * file inside the vault directory, outside the secret's `local_dirs`, under a
+ * `.git` name or inside a directory with a git directory's shape; then
  * nothing but a regular file) and the size caps (checked via `realpath` and
  * `stat` BEFORE any byte is read — an over-policy send never reads a local
  * file), then SSRF pre-flight with address pinning. Every throw

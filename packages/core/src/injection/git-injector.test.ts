@@ -1,13 +1,29 @@
 import { delimiter } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
+import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs } from "./allowlist.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
 import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
+import { readGitVersion } from "./git-injector-version.js";
 import { GitInjector } from "./git-injector.js";
+import { spawnCaptured } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
 import { expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./git-injector-version.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./git-injector-version.js")>();
+  return { ...actual, readGitVersion: vi.fn(actual.readGitVersion) };
+});
+vi.mock("./spawn-captured.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spawn-captured.js")>();
+  return { ...actual, spawnCaptured: vi.fn() };
+});
+
+const readVersion = vi.mocked(readGitVersion);
+const spawnMock = vi.mocked(spawnCaptured);
 
 // On Windows the ephemeral agent listens on a named pipe, which only the native
 // Win32-OpenSSH client consumes through SSH_AUTH_SOCK; an MSYS build (the
@@ -727,6 +743,220 @@ describe("GitInjector enforcement (no git binary required)", () => {
         ),
       ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
     });
+  });
+
+  // A4, A8, A9: the vault makes no repository without a work tree, a clone borrows
+  // objects from no local repository, and a pull opens no editor.
+  describe("A4, A8, A9: a clone's and a pull's further denied arguments", () => {
+    const REPOSITORY = "https://8.8.8.8/org/repo.git";
+    let log: Mock;
+
+    beforeEach(() => {
+      log = vi.fn();
+      readVersion.mockClear();
+      spawnMock.mockClear();
+    });
+
+    async function expectDenied(
+      operation: GitAction["operation"],
+      args: string[],
+      entry: string,
+      repository: string = REPOSITORY,
+    ): Promise<void> {
+      const err = await expectVaultError(
+        () =>
+          new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
+            {
+              type: "git",
+              operation,
+              repository,
+              args,
+              ...(operation === "clone" || operation === "ls-remote"
+                ? {}
+                : { working_directory: "./wd" }),
+            },
+            SECRET,
+            policy({
+              command_allowlist: GIT === null ? [] : [GIT],
+              url_allowlist: ["https://8.8.8.8/*"],
+            }),
+            undefined,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe(`disallowed git argument: ${entry}`);
+      expect(log.mock.calls).toEqual([
+        [
+          {
+            eventType: "secret.use",
+            secretId: "secret-1",
+            detail: { context: "git", operation, error: "INVALID_GIT_CONFIG" },
+            success: false,
+          },
+        ],
+      ]);
+      expect(readVersion).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+    }
+
+    async function expectAdmitted(operation: GitAction["operation"], args: string[]) {
+      await expect(
+        injector.executeWithSecret(
+          gitAction({
+            operation,
+            args,
+            ...(operation === "clone" || operation === "ls-remote"
+              ? {}
+              : { working_directory: "./wd" }),
+          }),
+          SECRET,
+          policy(),
+          undefined,
+        ),
+      ).rejects.toMatchObject({ code: ErrorCode.COMMAND_NOT_ALLOWED });
+    }
+
+    it.each([
+      ["--bare", "--bare"],
+      ["--bar", "--bare"],
+      ["--naked", "--naked"],
+      ["--nak", "--naked"],
+      ["--mirror", "--mirror"],
+      ["--mir", "--mirror"],
+      ["--reference=/x", "--reference"],
+      ["--reference", "--reference"],
+      ["--ref", "--reference"],
+      ["--reference-if-able=/x", "--reference-if-able"],
+      ["--shared", "--shared"],
+      ["--sha", "--shared"],
+      ["-s", "-s"],
+      ["-ns", "-s"],
+      ["-qs", "-s"],
+    ] as const)(
+      "a clone makes no repository without a work tree and borrows from none: %s is refused naming %s",
+      async (arg, entry) => {
+        await expectDenied("clone", [arg], entry);
+      },
+    );
+
+    it("a --bare clone of https://8.8.8.8/org/\\u200c.git, whose directory git would name \\u200c.git, is refused by the argument table", async () => {
+      await expectDenied("clone", ["--bare"], "--bare", "https://8.8.8.8/org/\u200c.git");
+    });
+
+    it.each([
+      "--branch=s",
+      "-bs",
+      "-os",
+      "--no-tags",
+      "--no-checkout",
+      "--shallow-since=2020-01-01",
+      "--shallow-exclude=x",
+      "--single-branch",
+      "--sparse",
+      "--server-option=x",
+      "--reject-shallow",
+      "--remote-submodules",
+      "--ref-format=reftable",
+      "--dissociate",
+      "--local",
+      "-l",
+      "--no-hardlinks",
+      "--revision=x",
+    ])("a clone keeps its other options: %s reaches the allowlist", async (arg) => {
+      await expectAdmitted("clone", [arg]);
+    });
+
+    it.each([
+      ["--edit", "--edit"],
+      ["--ed", "--edit"],
+      ["--edit=x", "--edit"],
+      ["-e", "-e"],
+      ["-qe", "-e"],
+    ] as const)("a pull takes no editor: %s is refused naming %s", async (arg, entry) => {
+      await expectDenied("pull", [arg], entry);
+    });
+
+    it.each([
+      "--rebase=interactive",
+      "--rebase=i",
+      "--reb=i",
+      "--reba=interactive",
+      "-ri",
+      "-rinteractive",
+      "-qri",
+      " --rebase=i ",
+    ])("a pull takes no interactive rebase, in any spelling: %j", async (arg) => {
+      await expectDenied("pull", [arg], "--rebase=interactive");
+    });
+
+    it.each(
+      [
+        ["--rebase"],
+        ["-r"],
+        ["--rebase=true"],
+        ["--rebase=false"],
+        ["--rebase=merges"],
+        ["--no-rebase"],
+        ["--no-edit"],
+        ["-Xours"],
+        ["-sours"],
+        ["-r", "--ff-only"],
+      ].map((args) => [args.join(" "), args] as const),
+    )(
+      "a pull keeps every other rebase and --no-edit: %s reaches the allowlist",
+      async (_label, args) => {
+        await expectAdmitted("pull", [...args]);
+      },
+    );
+
+    it.each(["-rmerges", "-rfalse", "-Xtheirs", "-srecursive", "-stheirs", "-Skeyid"])(
+      "a pull keeps a short option whose attached value holds an e: %s reaches the allowlist",
+      async (arg) => {
+        await expectAdmitted("pull", [arg]);
+      },
+    );
+
+    it.each(
+      (["pull", "fetch", "clone", "push", "ls-remote"] as const).flatMap((operation) =>
+        ["--no-upload-pack", "--no-upload", "--no-upload-p", "--no-upload-pack=x"].map(
+          (arg) => [operation, arg] as const,
+        ),
+      ),
+    )(
+      "no operation takes the negation of --upload-pack, which would cancel the vault's own: %s %s is refused naming --no-upload-pack",
+      async (operation, arg) => {
+        await expectDenied(operation, [arg], "--no-upload-pack");
+      },
+    );
+
+    it.each([
+      ["pull", "--no-edit"],
+      ["pull", "--no-tags"],
+      ["pull", "--no-rebase"],
+      ["pull", "--no-ff"],
+      ["fetch", "--no-tags"],
+      ["fetch", "--no-recurse-submodules"],
+      ["clone", "--no-tags"],
+      ["push", "--no-verify"],
+    ] as const)(
+      "the negations beside --no-upload-pack are kept: %s %s reaches the allowlist",
+      async (operation, arg) => {
+        await expectAdmitted(operation, [arg]);
+      },
+    );
+
+    it.each([
+      ["push", "--mirror"],
+      ["fetch", "--edit"],
+      ["fetch", "--mirror"],
+      ["ls-remote", "--mirror"],
+    ] as const)(
+      "a push keeps --mirror; a fetch and an ls-remote are not asked for a clone's entries: %s %s reaches the allowlist",
+      async (operation, arg) => {
+        await expectAdmitted(operation, [arg]);
+      },
+    );
   });
 });
 

@@ -224,14 +224,15 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "config",
       "for-each-ref",
       "fetch",
+      "config",
       "fetch",
     ]);
-    const [probe, remotes, listing, network, local] = calls();
+    const [probe, remotes, listing, network, , local] = calls();
     for (const step of [probe, remotes, listing, local]) {
       const [, args, opts] = step as SpawnCall;
       expect(opts.cwd).toBe(realpathSync.native(wd));
       expect(Object.keys(opts.env).some((k) => k.startsWith("HARPOC_GIT_"))).toBe(false);
-      expect("GIT_ASKPASS" in opts.env).toBe(false);
+      expect(opts.env.GIT_ASKPASS).toBe("");
       expect(args.some((a) => a.startsWith("--git-dir="))).toBe(false);
     }
     expect((remotes as SpawnCall)[1].slice(-8)).toEqual([
@@ -266,6 +267,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "fetch",
       "--no-recurse-submodules",
       "--refmap=",
+      "--upload-pack=git-upload-pack",
       "--prune",
       "--depth=1",
       "-t",
@@ -313,7 +315,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       policy(),
       undefined,
     );
-    const [, , , network, local] = calls();
+    const [, , , network, , local] = calls();
     const [, netArgs] = network as SpawnCall;
     const relay = (netArgs.find((a) => a.startsWith("--git-dir=")) as string).slice(10);
     expect(netArgs).toEqual([
@@ -325,6 +327,8 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "credential.helper=",
       "-c",
       "core.fsmonitor=false",
+      "-c",
+      "safe.bareRepository=explicit",
       `--git-dir=${relay}`,
       "fetch",
       "--quiet",
@@ -359,6 +363,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "fetch",
       "--no-recurse-submodules",
       "--refmap=",
+      "--upload-pack=git-upload-pack",
       ...args,
       "--",
       REPO,
@@ -373,7 +378,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       policy(),
       undefined,
     );
-    const [, , , network, local] = calls();
+    const [, , , network, , local] = calls();
     expect((network as SpawnCall)[1].slice(-1)).toEqual(["+refs/heads/*:refs/heads/*"]);
     expect((local as SpawnCall)[1].slice(-1)).toEqual(["+refs/heads/*:refs/remotes/origin/*"]);
   });
@@ -400,7 +405,9 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       policy(),
       undefined,
     );
-    expect(calls().map(([, , o]) => o.timeoutMs)).toEqual([10_000, 10_000, 10_000, 10_000, 6_000]);
+    expect(calls().map(([, , o]) => o.timeoutMs)).toEqual([
+      10_000, 10_000, 10_000, 10_000, 6_000, 6_000,
+    ]);
   });
 
   it("fetch: a remote listing past the output cap is GIT_OPERATION_FAILED before any credential-bearing step (RX-B9-15)", async () => {
@@ -487,6 +494,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
         ["rev-parse", "none"],
         ["for-each-ref", "none"],
         ["fetch", "list"],
+        ["config", "none"],
         ["pull", "list"],
       ],
     ],
@@ -506,6 +514,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
         ["config", "none"],
         ["for-each-ref", "none"],
         ["fetch", "list"],
+        ["config", "none"],
         ["fetch", "list"],
       ],
     ],
@@ -584,6 +593,8 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "credential.helper=",
       "-c",
       "core.fsmonitor=false",
+      "-c",
+      "safe.bareRepository=explicit",
       `--git-dir=${relay}`,
     ]);
     expect(args.slice(args.indexOf("ls-remote"))).toEqual([
@@ -643,9 +654,10 @@ describeGitSsh("the fetch step plan over SSH (RX-B9-17)", () => {
       "config",
       "for-each-ref",
       "fetch",
+      "config",
       "fetch",
     ]);
-    const [probe, remotes, listing, network, local] = calls();
+    const [probe, remotes, listing, network, , local] = calls();
     const [, netArgs, netOpts] = network as SpawnCall;
     expect(netArgs.some((a) => a.startsWith("--git-dir="))).toBe(true);
     expect(netOpts.env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");

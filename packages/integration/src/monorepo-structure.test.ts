@@ -607,6 +607,10 @@ describe("integration's test task names the files it reads outside its package (
     expect(config.tasks["test"]?.inputs).toContain(glob);
   });
 
+  it("the closing NUL input is the last of the test inputs", () => {
+    expect(config.tasks["test"]?.inputs?.at(-1)).toBe("!$TURBO_ROOT$/**/NUL");
+  });
+
   it("leaves env and dependsOn to the root configuration", () => {
     expect(config.tasks["test"]?.env).toBeUndefined();
     expect(config.tasks["test"]?.dependsOn).toBeUndefined();
@@ -624,6 +628,11 @@ describe("the root test script and the lockfile's formatting (DR, 2026-10-27)", 
   it("pnpm-lock.yaml is outside prettier's scope", () => {
     const ignored = readFileSync(resolve(monorepoRoot, ".prettierignore"), "utf-8").split(/\r?\n/);
     expect(ignored).toContain("pnpm-lock.yaml");
+  });
+
+  it("the build ledger is outside prettier's scope", () => {
+    const ignored = readFileSync(resolve(monorepoRoot, ".prettierignore"), "utf-8").split(/\r?\n/);
+    expect(ignored).toContain(".superpowers/");
   });
 });
 

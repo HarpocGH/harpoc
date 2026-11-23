@@ -40,6 +40,8 @@ import {
   type ProxyCaWiring,
 } from "../utils/proxy-ca.js";
 
+const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGBREAK"] as const;
+
 function resolveUiDistDir(): string {
   const require = createRequire(import.meta.url);
   return join(dirname(require.resolve("@harpoc/web-ui/package.json")), "dist");
@@ -685,8 +687,7 @@ export function registerServerCommand(program: Command): void {
             })();
           };
 
-          process.on("SIGINT", () => void shutdown("SIGINT"));
-          process.on("SIGTERM", () => void shutdown("SIGTERM"));
+          for (const signal of STOP_SIGNALS) process.on(signal, () => void shutdown(signal));
 
           // When stdio MCP runs alongside an HTTP server, MCP owns stdout for JSON-RPC.
           // Redirect console.log to stderr so HTTP startup messages don't corrupt the stream.

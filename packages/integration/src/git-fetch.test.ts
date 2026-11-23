@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -311,3 +319,174 @@ describeGit("Git context — fetch through the vault (M6)", () => {
     }
   });
 });
+
+/**
+ * Review Focus 1: a single-account daemon whose repository ran `git lfs
+ * install --local` (the four `filter.lfs.` keys in the tree's own `config`)
+ * has its pull and fetch refused with the fixed message, which the docs lead
+ * to `git config --get-regexp`; the same tree outside a daemon is served. The
+ * rows share one tree and run in order: the second declares the daemon.
+ */
+describeGit(
+  "Git context — a repository with Git LFS installed locally (A7, Review Focus 1)",
+  () => {
+    const OWN_CONFIGURATION =
+      "working_directory's repository configures a program or an address rewrite of its own";
+    const LFS_KEYS: ReadonlyArray<readonly [string, string]> = [
+      ["filter.lfs.clean", "git-lfs clean -- %f"],
+      ["filter.lfs.smudge", "git-lfs smudge -- %f"],
+      ["filter.lfs.process", "git-lfs filter-process"],
+      ["filter.lfs.required", "true"],
+    ];
+    let root: string;
+    let bare: string;
+    let seed: string;
+    let wt: string;
+    let server: GitSmartHttp;
+    let repoUrl: string;
+    let vault: TestVault;
+    let handle: string;
+    let gitEnv: NodeJS.ProcessEnv;
+
+    function git(cwd: string, ...args: string[]): Promise<string> {
+      return new Promise((done, fail) => {
+        execFile(
+          GIT as string,
+          args,
+          { cwd, env: gitEnv, encoding: "utf8", timeout: GIT_TIMEOUT_MS },
+          (err, stdout, stderr) => {
+            if (err) fail(new Error(`git ${args.join(" ")}: ${err.message}\n${stderr}`));
+            else done(stdout);
+          },
+        );
+      });
+    }
+
+    const refListing = async (cwd: string): Promise<string> =>
+      git(cwd, "for-each-ref", "--format=%(objectname) %(refname)");
+
+    async function advance(n: string): Promise<string> {
+      writeFileSync(join(seed, "a.txt"), `${n}\n`);
+      await git(seed, "commit", "-qam", n);
+      await git(seed, "push", "-q", bare, "main");
+      return (await git(seed, "rev-parse", "HEAD")).trim();
+    }
+
+    async function use(operation: "pull" | "fetch"): Promise<GitResult> {
+      const result = await vault.engine.useSecret(handle, {
+        type: "git",
+        operation,
+        repository: repoUrl,
+        working_directory: wt,
+      });
+      if (result.type !== "git") throw new Error("expected a git result");
+      return result;
+    }
+
+    function failedRows(operation: "pull" | "fetch") {
+      return vault.engine
+        .queryAudit({ eventType: AuditEventType.SECRET_USE })
+        .filter((row) => row.detail?.operation === operation && !row.success);
+    }
+
+    beforeAll(async () => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-git-lfs-local-")));
+      const emptyConfig = join(root, "gitconfig");
+      writeFileSync(emptyConfig, "");
+      gitEnv = {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: emptyConfig,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_AUTHOR_NAME: "harpoc-test",
+        GIT_AUTHOR_EMAIL: "test@example.com",
+        GIT_COMMITTER_NAME: "harpoc-test",
+        GIT_COMMITTER_EMAIL: "test@example.com",
+      };
+      bare = join(root, "repo.git");
+      await git(root, "init", "-q", "--bare", "repo.git");
+      await git(bare, "symbolic-ref", "HEAD", "refs/heads/main");
+      seed = join(root, "seed");
+      await git(root, "init", "-q", "-b", "main", "seed");
+      writeFileSync(join(seed, "a.txt"), "one\n");
+      await git(seed, "add", "a.txt");
+      await git(seed, "commit", "-qm", "one");
+      await git(seed, "push", "-q", bare, "main");
+
+      server = await startGitSmartHttp({
+        git: GIT as string,
+        projectRoot: root,
+        user: USER,
+        token: TOKEN,
+        env: gitEnv,
+      });
+      repoUrl = `http://127.0.0.1:${String(server.port)}/repo.git`;
+      wt = join(root, "wt");
+      await git(root, "clone", "-q", bare, "wt");
+      await git(wt, "remote", "set-url", "origin", repoUrl);
+      for (const [key, value] of LFS_KEYS) await git(wt, "config", key, value);
+
+      vault = createTestVault();
+      await vault.engine.initVault(PASSWORD);
+      const created = await vault.engine.createSecret({
+        name: "git-lfs-local-key",
+        type: "api_key",
+        value: new Uint8Array(Buffer.from(`${USER}:${TOKEN}`, "utf8")),
+      });
+      handle = created.handle;
+      await vault.engine.setInjectionPolicy(handle, {
+        url_allowlist: [`http://127.0.0.1:${String(server.port)}/*`],
+        command_allowlist: [GIT as string],
+        env_allowlist: [],
+        host_allowlist: [],
+      });
+    });
+
+    afterAll(async () => {
+      try {
+        if (server !== undefined) await server.close();
+        await destroyTestVault(vault);
+      } finally {
+        if (root !== undefined)
+          rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    });
+
+    it("outside a daemon the repository with Git LFS installed locally is served: a fetch and a pull", async () => {
+      const next = await advance("two");
+      const fetched = await use("fetch");
+      expect(fetched.exit_code, fetched.stderr).toBe(0);
+      expect((await git(wt, "rev-parse", "refs/remotes/origin/main")).trim()).toBe(next);
+      const pulled = await use("pull");
+      expect(pulled.exit_code, pulled.stderr).toBe(0);
+      expect((await git(wt, "rev-parse", "HEAD")).trim()).toBe(next);
+    });
+
+    it("a repository with Git LFS installed locally is refused in a daemon with the fixed message", async () => {
+      await advance("three");
+      vault.engine.declareDaemon({ protectedDirs: [], protectedFiles: [] });
+      const refs = await refListing(wt);
+      const config = readFileSync(join(wt, ".git", "config"));
+      const file = readFileSync(join(wt, "a.txt"));
+      const seen = server.requests.length;
+      for (const operation of ["pull", "fetch"] as const) {
+        const err = await expectVaultError(() => use(operation), ErrorCode.INVALID_GIT_CONFIG);
+        expect(err.message).toBe(OWN_CONFIGURATION);
+        const rows = failedRows(operation);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.detail).toEqual({
+          context: "git",
+          operation,
+          transport: "https",
+          error: "INVALID_GIT_CONFIG",
+          network_isolation: false,
+          fs_isolation: false,
+        });
+      }
+      expect(server.requests.length).toBeGreaterThan(seen);
+      expect(await refListing(wt)).toBe(refs);
+      expect(readFileSync(join(wt, ".git", "config")).equals(config)).toBe(true);
+      expect(readFileSync(join(wt, "a.txt")).equals(file)).toBe(true);
+    });
+  },
+);

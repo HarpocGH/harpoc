@@ -379,7 +379,7 @@ describeGit(
     });
 
     describe("the credential-free local pull speaks no transport but file (C1 final fix X2)", () => {
-      it("a submodule fetch the tree's config asks of the local pull is refused, and its other host sees nothing", async () => {
+      it("the local pull attempts no submodule fetch the tree's config asks for: it merges the remote, and the submodule's other host sees nothing", async () => {
         const subsrc = join(root, `subsrc-${String(Date.now())}`);
         git(root, "init", "-q", "-b", "main", subsrc);
         writeFileSync(join(subsrc, "s.txt"), "sub\n");
@@ -399,8 +399,12 @@ describeGit(
           args: ["--no-rebase"],
         });
 
+        expect(result.exit_code, result.stderr).toBe(0);
+        expect(git(wt, "rev-parse", "HEAD^2").trim()).toBe(
+          git(bare, "rev-parse", "refs/heads/main").trim(),
+        );
         expect(recorder.requests.slice(before)).toEqual([]);
-        expect(result.stderr).toMatch(/transport 'http' not allowed/);
+        expect(/Fetching submodule|transport 'http' not allowed/.test(result.stderr)).toBe(false);
         expect(leaked()).toEqual([]);
       });
     });

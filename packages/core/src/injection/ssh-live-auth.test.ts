@@ -175,7 +175,7 @@ describeSsh("live SSH authentication through the ephemeral agent", () => {
     const identity = writeIdentityFile(agent.publicKeyOpenssh);
     try {
       const r = await runSsh(
-        [...sshHardeningArgs(kh.file, identity.file, 10), ...tail(port)],
+        [...sshHardeningArgs(kh, identity.file, 10), ...tail(port)],
         agent.authSock,
       );
 
@@ -201,7 +201,7 @@ describeSsh("live SSH authentication through the ephemeral agent", () => {
     const identity = writeIdentityFile(agent.publicKeyOpenssh);
     try {
       // The pre-fix argv: identical except the `-i <identity.pub>` pair.
-      const full = sshHardeningArgs(kh.file, identity.file, 10);
+      const full = sshHardeningArgs(kh, identity.file, 10);
       const preFix = full.filter((a, i) => a !== "-i" && full[i - 1] !== "-i");
 
       const r = await runSsh([...preFix, ...tail(port)], agent.authSock);

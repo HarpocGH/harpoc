@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import {
   formatGitVersion,
+  GIT_WIN32_OWNER_MIN_VERSION,
   gitVersionAtLeast,
   parseGitVersion,
   readGitVersion,
@@ -38,6 +39,9 @@ describe("parseGitVersion", () => {
     ["git version 2.53.0.rc1.12.gabcdef", 2, 53, 0],
     ["git version 2.53.0.rc1.12.gabcdef.dirty", 2, 53, 0],
     ["git version 2.56.GIT", 2, 56, 0],
+    ["git version 2.37.1.windows.1", 2, 37, 1],
+    ["git version 2.37.0.windows.1", 2, 37, 0],
+    ["git version 2.37", 2, 37, 0],
   ])("reads %j as major %d, minor %d, patch %d", (line, major, minor, patch) => {
     expect(parseGitVersion(line)).toEqual({ major, minor, patch });
   });
@@ -59,6 +63,25 @@ describe("gitVersionAtLeast against [2, 37], judged on major and minor", () => {
     [1, 99, 0, false],
   ])("judges %d.%d.%d as %s", (major, minor, patch, atLeast) => {
     expect(gitVersionAtLeast({ major, minor, patch }, [2, 37])).toBe(atLeast);
+  });
+});
+
+describe("gitVersionAtLeast against [2, 37, 1], judged with the patch number", () => {
+  it.each<[number, number, number, boolean]>([
+    [2, 36, 9, false],
+    [2, 36, 99, false],
+    [2, 37, 0, false],
+    [1, 99, 9, false],
+    [2, 37, 1, true],
+    [2, 37, 2, true],
+    [2, 38, 0, true],
+    [3, 0, 0, true],
+  ])("judges %d.%d.%d as %s", (major, minor, patch, atLeast) => {
+    expect(gitVersionAtLeast({ major, minor, patch }, GIT_WIN32_OWNER_MIN_VERSION)).toBe(atLeast);
+  });
+
+  it("is the floor 2.37.1", () => {
+    expect(GIT_WIN32_OWNER_MIN_VERSION).toEqual([2, 37, 1]);
   });
 });
 

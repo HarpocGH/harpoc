@@ -40,13 +40,27 @@ export function writeTempSshFile(prefix: string, name: string, content: string):
   };
 }
 
+export interface KnownHostsFiles extends TempSshFile {
+  /** An empty file beside `file`, ssh's GlobalKnownHostsFile: never `none`, which a client before 8.5 reads as a file in its working directory. */
+  globalFile: string;
+}
+
 /**
- * Write pinned host keys to a 0600 known_hosts file in a 0700 temp directory.
+ * Write pinned host keys to a 0600 known_hosts file in a 0700 temp directory,
+ * and beside it an empty 0600 global_known_hosts; one disposer removes both.
  * Host keys are public, so disk is acceptable (unlike the private key, which the
  * ephemeral agent keeps in memory). Shared by the SSH and Git-over-SSH contexts.
  */
-export function writeKnownHosts(knownHosts: string[]): TempSshFile {
-  return writeTempSshFile("harpoc-ssh-", "known_hosts", knownHosts.join("\n") + "\n");
+export function writeKnownHosts(knownHosts: string[]): KnownHostsFiles {
+  const pinned = writeTempSshFile("harpoc-ssh-", "known_hosts", knownHosts.join("\n") + "\n");
+  const globalFile = join(dirname(pinned.file), "global_known_hosts");
+  try {
+    writeFileSync(globalFile, "", { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    pinned.dispose();
+    throw err;
+  }
+  return { ...pinned, globalFile };
 }
 
 /**
@@ -80,7 +94,8 @@ function quoteSshOptionValue(value: string): string {
 
 /**
  * Hardened ssh options (thesis §4.5.7): strict host-key verification against the
- * pinned known_hosts alone (no TOFU, and no host-wide `ssh_known_hosts` — S9),
+ * pinned known_hosts alone (no TOFU, and no host-wide `ssh_known_hosts` — S9:
+ * the global file is the empty one `writeKnownHosts` writes beside the pin),
  * agent-only auth, and no user ssh config. Shared
  * verbatim by the SSH context (as argv) and the Git-over-SSH context (folded
  * into GIT_SSH_COMMAND).
@@ -91,7 +106,7 @@ function quoteSshOptionValue(value: string): string {
  * default ~/.ssh/id_* candidates — ssh attempts exactly the vault identity.
  */
 export function sshHardeningArgs(
-  knownHostsFile: string,
+  knownHosts: Pick<KnownHostsFiles, "file" | "globalFile">,
   identityFile: string,
   connectTimeoutSec = 15,
 ): string[] {
@@ -101,9 +116,9 @@ export function sshHardeningArgs(
     "-o",
     "StrictHostKeyChecking=yes",
     "-o",
-    `UserKnownHostsFile=${quoteSshOptionValue(knownHostsFile)}`,
+    `UserKnownHostsFile=${quoteSshOptionValue(knownHosts.file)}`,
     "-o",
-    "GlobalKnownHostsFile=none",
+    `GlobalKnownHostsFile=${quoteSshOptionValue(knownHosts.globalFile)}`,
     "-o",
     "IdentitiesOnly=yes",
     "-i",

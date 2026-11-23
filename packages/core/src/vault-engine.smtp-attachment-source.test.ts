@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,6 +73,13 @@ function send(path: string): SmtpAction {
   };
 }
 
+function gitDirectory(dir: string): void {
+  mkdirSync(join(dir, "objects"), { recursive: true });
+  mkdirSync(join(dir, "refs"));
+  writeFileSync(join(dir, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, "config"), "[core]\n");
+}
+
 function failedUseRows(vault: VaultEngine): (Record<string, unknown> | null)[] {
   return vault
     .queryAudit({ eventType: AuditEventType.SECRET_USE, success: false })
@@ -129,6 +144,20 @@ describe("useSecret (smtp) — the engine's injector refuses the vault's own fil
       ErrorCode.SSRF_BLOCKED,
     );
   });
+
+  it("lets a work tree's file beside its `.git` past the source checks (refused later by the SSRF floor)", async () => {
+    const dir = join(tempDir, "vault");
+    const tree = join(tempDir, "tree");
+    mkdirSync(dir);
+    gitDirectory(join(tree, ".git"));
+    writeFileSync(join(tree, "report.txt"), "work tree report");
+    const vault = await mailVault(join(dir, "test.vault.db"), join(dir, "session.json"), [tree]);
+
+    await expectVaultError(
+      () => vault.useSecret("secret://mail", send(join(tree, "report.txt"))),
+      ErrorCode.SSRF_BLOCKED,
+    );
+  });
 });
 
 describe("useSecret (smtp) — an attachment comes only from a directory the secret's policy lists", () => {
@@ -141,6 +170,9 @@ describe("useSecret (smtp) — an attachment comes only from a directory the sec
     for (const dir of [join(tempDir, "vault"), listed, outside]) mkdirSync(dir);
     writeFileSync(join(listed, "report.txt"), "listed report");
     writeFileSync(join(outside, "report.txt"), "quarterly report");
+    gitDirectory(join(listed, "bare.git"));
+    gitDirectory(join(listed, "wt", ".git"));
+    symlinkSync(join(listed, "wt", ".git"), join(listed, "to-dotgit"), "junction");
   });
 
   function vaultListing(...localDirs: string[]): Promise<VaultEngine> {
@@ -194,6 +226,30 @@ describe("useSecret (smtp) — an attachment comes only from a directory the sec
       () => ({
         listedDirs: [join(tempDir, "vault")],
         path: join(tempDir, "vault", "missing.db"),
+        message: NOT_LISTED,
+      }),
+    ],
+    [
+      "a file of a bare repository in a listed directory",
+      () => ({
+        listedDirs: [listed],
+        path: join(listed, "bare.git", "config"),
+        message: NOT_LISTED,
+      }),
+    ],
+    [
+      "a file through a link into a `.git`",
+      () => ({
+        listedDirs: [listed],
+        path: join(listed, "to-dotgit", "config"),
+        message: NOT_LISTED,
+      }),
+    ],
+    [
+      "a `.git` spelling",
+      () => ({
+        listedDirs: [listed],
+        path: join(listed, "wt", ".git", "config"),
         message: NOT_LISTED,
       }),
     ],

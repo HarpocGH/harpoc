@@ -510,6 +510,53 @@ describe("SmtpInjector — attachments come only from a directory the secret's p
   );
 });
 
+function gitDirectory(dir: string): void {
+  mkdirSync(join(dir, "objects"), { recursive: true });
+  mkdirSync(join(dir, "refs"));
+  writeFileSync(join(dir, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, "config"), "[core]\n");
+}
+
+describe("SmtpInjector — attachments never come from a git directory", () => {
+  it.each([".git", ".GIT", ".git.", ".git::$INDEX_ALLOCATION", "git~1"])(
+    "each `.git` name gets the list message before any file-system call: %s",
+    async (name) => {
+      const c = counted();
+      await expectRejected(
+        c,
+        vaultInjector(c),
+        join(listedDir, name, "config"),
+        NOT_LISTED,
+        policy(listedDir),
+      );
+      expect(c.realpaths).toEqual([]);
+    },
+  );
+
+  it("a file of a bare repository in a listed directory, and one through a link into a `.git`, are refused as a file in no listed directory", async () => {
+    gitDirectory(join(listedDir, "bare.git"));
+    gitDirectory(join(listedDir, "wt", ".git"));
+    symlinkSync(join(listedDir, "wt", ".git"), join(listedDir, "to-dotgit"), "junction");
+    for (const path of [
+      join(listedDir, "bare.git", "config"),
+      join(listedDir, "to-dotgit", "config"),
+    ]) {
+      const c = counted();
+      await expectRejected(c, vaultInjector(c), path, NOT_LISTED, policy(listedDir));
+    }
+  });
+
+  it("a work tree's file beside its `.git` is sent, read from its resolved path", async () => {
+    gitDirectory(join(listedDir, "wt", ".git"));
+    const given = join(listedDir, "wt", "report.txt");
+    writeFileSync(given, "work tree report");
+    const c = counted();
+    await vaultInjector(c).run(action(given), SECRET, policy(listedDir), undefined, undefined);
+    expect(c.sends).toHaveLength(1);
+    expect(c.reads).toEqual([realpathSync.native(given)]);
+  });
+});
+
 describe("SmtpInjector — attachments never come from a device or a network share (B1)", () => {
   const win32Devices = [
     `${B}${B}.${B}NUL`,

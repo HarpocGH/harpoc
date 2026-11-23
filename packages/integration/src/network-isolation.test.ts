@@ -181,7 +181,7 @@ const CELLS: IsolationCell[] = [
       timeout_ms: 20_000,
     }),
     error: undefined,
-    refused: /Failed to connect to 127\.0\.0\.1(?: port |:)\d+/,
+    refused: /Failed to connect to 127\.0\.0\.1(?: port |:)\d+|Couldn't connect to server/,
   },
   {
     context: "ssh",

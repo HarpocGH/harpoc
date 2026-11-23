@@ -185,7 +185,14 @@ export function mapLocation(value: string, target: ParsedTarget): string {
     return value;
   }
   if (resolved.protocol !== "https:" && resolved.protocol !== "http:") return value;
-  return `/${resolved.host}${resolved.pathname}${resolved.search}`;
+  const port =
+    target.url.protocol === "http:" &&
+    resolved.protocol === "http:" &&
+    resolved.port === "" &&
+    isPlainUpstreamHost(resolved.hostname)
+      ? ":80"
+      : "";
+  return `/${resolved.host}${port}${resolved.pathname}${resolved.search}`;
 }
 
 /**

@@ -29,7 +29,7 @@ vi.mock("./injection/url-validator.js", async (importOriginal) => {
       if (args[0] === UNRESOLVED.url) {
         throw new shared.VaultError(
           shared.ErrorCode.DNS_RESOLUTION_FAILED,
-          `DNS resolution failed for ${UNRESOLVED.host}: getaddrinfo ENOTFOUND ${UNRESOLVED.host}`,
+          `DNS resolution failed for ${UNRESOLVED.host}: ENOTFOUND`,
         );
       }
       return actual.validateUrl(...args);

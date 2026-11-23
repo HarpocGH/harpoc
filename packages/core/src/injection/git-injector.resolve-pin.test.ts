@@ -22,7 +22,7 @@ vi.mock("./git-injector-version.js", async (importOriginal) => {
     readGitVersion: vi.fn<typeof actual.readGitVersion>(async () => ({
       major: 2,
       minor: 37,
-      patch: 0,
+      patch: 1,
     })),
   };
 });
@@ -106,9 +106,9 @@ function policy(repository: string): InjectionPolicy {
 const PLANS = [
   ["clone", ["network", "network", "local"]],
   ["ls-remote", ["network"]],
-  ["pull", ["local", "local", "local", "network", "local"]],
+  ["pull", ["local", "local", "local", "network", "local", "local"]],
   ["push", ["local", "local", "local", "network"]],
-  ["fetch", ["local", "local", "local", "network", "local"]],
+  ["fetch", ["local", "local", "local", "network", "local", "local"]],
 ] as const;
 const IP_PLANS = PLANS.filter(([operation]) => operation !== "ls-remote");
 

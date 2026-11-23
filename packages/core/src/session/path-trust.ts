@@ -26,7 +26,8 @@ export const WIN32_REPLACE_RIGHTS = 0x100d0040;
 export const WIN32_PARENT_RIGHTS = 0x500d0146;
 
 const OWNER_ONLY_MASK = 0o077;
-const GROUP_OR_WORLD_WRITE = 0o022;
+const GROUP_WRITE = 0o020;
+const WORLD_WRITE = 0o002;
 const STICKY = 0o1000;
 const INHERIT_ONLY = 2;
 const WIN32_TRIMMED_NAME = /[. ][\\/]*$/;
@@ -147,16 +148,33 @@ function assertOwnerOnlyAcl(path: string, label: string): void {
 }
 
 /**
- * Every directory of the chain, root first and the file's parent last, is
- * owned by `euid` or root with `(mode & 0o022) === 0`, or is root's sticky
- * directory that is not the parent and whose next entry is `euid`'s or root's.
+ * Whether an account other than the owner may write the entry: a write bit for
+ * others, or one for the group unless the entry is of `ownGroup`, the group for
+ * which the group's write bit passes. Without `ownGroup` any write bit but the
+ * owner's counts; no caller but the git context passes one.
  */
-export function posixHeld(chain: readonly { uid: number; mode: number }[], euid: number): boolean {
+export function othersMayWrite(entry: { mode: number; gid?: number }, ownGroup?: number): boolean {
+  if ((entry.mode & WORLD_WRITE) !== 0) return true;
+  return (entry.mode & GROUP_WRITE) !== 0 && (ownGroup === undefined || entry.gid !== ownGroup);
+}
+
+/**
+ * Every directory of the chain, root first and the file's parent last, is
+ * owned by `euid` or root and no other account may write it (`othersMayWrite`;
+ * `ownGroup` is the group for which the group's write bit passes, and no
+ * caller but the git context passes one), or is root's sticky directory that
+ * is not the parent and whose next entry is `euid`'s or root's.
+ */
+export function posixHeld(
+  chain: readonly { uid: number; mode: number; gid?: number }[],
+  euid: number,
+  ownGroup?: number,
+): boolean {
   const trusted = (uid: number): boolean => uid === euid || uid === 0;
   return (
     chain.length > 0 &&
     chain.every((dir, index) => {
-      if (trusted(dir.uid) && (dir.mode & GROUP_OR_WORLD_WRITE) === 0) return true;
+      if (trusted(dir.uid) && !othersMayWrite(dir, ownGroup)) return true;
       const next = chain[index + 1];
       return dir.uid === 0 && (dir.mode & STICKY) !== 0 && next !== undefined && trusted(next.uid);
     })
@@ -201,8 +219,10 @@ function directoryChain(dir: string): string[] {
  * relative path, a link or non-directory on the chain, a chain that cannot be
  * read, and on win32 a directory name that ends in a dot or a space: the
  * access listing reads such a name without it, another directory than `lstat`.
+ * Off win32 `ownGroup` is the group for which the group's write bit passes; no
+ * caller but the git context passes one, and the win32 walk ignores it.
  */
-export async function isHeldPath(resolvedFile: string): Promise<boolean> {
+export async function isHeldPath(resolvedFile: string, ownGroup?: number): Promise<boolean> {
   if (!isAbsolute(resolvedFile)) return false;
   const dirs = directoryChain(dirname(resolvedFile));
   if (process.platform === "win32" && dirs.some((dir) => WIN32_TRIMMED_NAME.test(dir))) {
@@ -213,7 +233,7 @@ export async function isHeldPath(resolvedFile: string): Promise<boolean> {
     if (stats.some((stat) => stat.isSymbolicLink() || !stat.isDirectory())) return false;
     if (process.platform === "win32") return win32Held(await listWindowsAclChain(dirs));
     const euid = process.geteuid?.();
-    return euid !== undefined && posixHeld(stats, euid);
+    return euid !== undefined && posixHeld(stats, euid, ownGroup);
   } catch {
     return false;
   }

@@ -13,6 +13,7 @@ import {
 } from "node:path";
 import { VaultError } from "@harpoc/shared";
 import { isHeldPath } from "../session/path-trust.js";
+import { hasGitDirectoryShape, holdsDotGitName } from "./local-path-git.js";
 
 const GLOB_CHARACTERS = /[*?[]/;
 const GLOB_CHARACTERS_AND_ESCAPE = /[*?[\\]/;
@@ -29,13 +30,14 @@ export interface DaemonPaths {
 
 /**
  * Why a local path is refused: `not_absolute`, `device`, `network_share`,
- * `glob`, `win32_name`, `dot_segment` and `is_directory` for a write whose
- * spelling ends in a separator before any file-system call; `protected` inside
- * the vault directory or a declared path, a path that does not resolve judged
- * through its nearest ancestor that resolves; `not_allowed` any other path that
- * does not resolve, a resolved name that is not handed on, one in no listed
- * directory or one not held; `is_directory` a write onto an existing directory
- * inside a listed directory.
+ * `glob`, `win32_name`, `dot_segment`, `dot_git` and `is_directory` for a write
+ * whose spelling ends in a separator before any file-system call; `protected`
+ * inside the vault directory or a declared path, a path that does not resolve
+ * judged through its nearest ancestor that resolves; `not_allowed` any other
+ * path that does not resolve, a resolved name that is not handed on, one in no
+ * listed directory, one with a `.git` name or inside a git directory, or one
+ * not held; `is_directory` a write onto an existing directory inside a listed
+ * directory.
  */
 export type LocalPathRefusal =
   | "not_absolute"
@@ -44,6 +46,7 @@ export type LocalPathRefusal =
   | "glob"
   | "win32_name"
   | "dot_segment"
+  | "dot_git"
   | "protected"
   | "not_allowed"
   | "is_directory";
@@ -282,13 +285,13 @@ async function resolveSpelledOnce(path: string, fs: SpelledFileSystem): Promise<
  * that one joined on. A step is climbed past only where the system says it is
  * not there. Null where the spelling names no one directory: no step resolves;
  * a step fails to resolve for another reason — it exists all the same, a link
- * that leads nowhere, through which git writes a bare clone, or the system
- * refuses to read it, as it refuses a spelling at its length limit, link and
- * all —; or a `..` stands among the steps behind, with no directory to climb
- * from. The answer is resolved once more and must be itself: a system's
- * `realpath` and its kernel can read a spelling differently — Darwin's takes a
- * `..` off the name of a file, for which its kernel answers that it is no
- * directory — and the path handed on is the one that both read as it stands.
+ * that leads nowhere, or the system refuses to read it, as it refuses a
+ * spelling at its length limit, link and all —; or a `..` stands among the
+ * steps behind, with no directory to climb from. The answer is resolved once
+ * more and must be itself: a system's `realpath` and its kernel can read a
+ * spelling differently — Darwin's takes a `..` off the name of a file, for
+ * which its kernel answers that it is no directory — and the path handed on is
+ * the one that both read as it stands.
  */
 export async function resolveSpelledDirectory(
   path: string,
@@ -387,12 +390,23 @@ async function resolvedListedDirs(
 ): Promise<string[]> {
   const resolved = await Promise.all(
     allowedDirs.map((dir) =>
-      lexicalRefusal(dir, platform, refuseGlob) === null
+      lexicalRefusal(dir, platform, refuseGlob) === null && !holdsDotGitName(dir)
         ? realpathOrNull(dir, fs)
         : Promise.resolve(null),
     ),
   );
   return resolved.filter((dir): dir is string => dir !== null);
+}
+
+export async function liesInGitDirectory(dir: string): Promise<boolean> {
+  for (let current = dir; ; current = dirname(current)) {
+    try {
+      if (await hasGitDirectoryShape(current)) return true;
+    } catch {
+      return true;
+    }
+    if (dirname(current) === current) return false;
+  }
 }
 
 async function isDirectory(path: string, fs: FileSystem): Promise<boolean | null> {
@@ -422,6 +436,7 @@ export async function judgeLocalPath(
   if (lexical !== null) return { refusal: lexical };
   const localPath = input.localPath as string;
   if (holdsDotSegment(localPath, platform)) return { refusal: "dot_segment" };
+  if (holdsDotGitName(localPath)) return { refusal: "dot_git" };
   if (input.access === "write" && endsInSeparator(localPath, platform)) {
     return { refusal: "is_directory" };
   }
@@ -455,6 +470,9 @@ export async function judgeLocalPath(
   if (!listedDirs.some((dir) => relative(dir, resolved) !== "" && isWithin(dir, resolved))) {
     return { refusal: "not_allowed" };
   }
+  if (holdsDotGitName(resolved) || (await liesInGitDirectory(dirname(resolved)))) {
+    return { refusal: "not_allowed" };
+  }
 
   if (input.access === "write" && existing) {
     const directory = await isDirectory(resolved, fs);
@@ -475,6 +493,7 @@ const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
   win32_name: () =>
     VaultError.invalidInput("sftp local path holds a name Windows reads differently"),
   dot_segment: () => VaultError.invalidInput("sftp local path must not hold a .. segment"),
+  dot_git: () => VaultError.invalidInput("sftp local path must not hold a .git segment"),
   protected: () => VaultError.localPathNotAllowed(),
   not_allowed: () => VaultError.localPathNotAllowed(),
   is_directory: () => VaultError.invalidInput("sftp download path must name a file"),
@@ -484,9 +503,9 @@ const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
  * Judges the local file of an sftp `upload` or `download` (`judgeLocalPath`)
  * and returns the resolved path the batch command names. Past the checks of
  * the spelling every refusal carries one code and one message, so a refusal
- * never tells whether a file exists; a download is told it names no file where
- * its spelling ends in a separator, and onto a directory only inside a listed
- * directory.
+ * never tells whether a file exists — but for one: where no earlier judgement
+ * refuses it, a download onto an existing directory inside a listed directory
+ * is told it names no file, as one whose spelling ends in a separator is.
  */
 export async function resolveSftpLocalPath(input: {
   localPath: unknown;

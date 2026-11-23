@@ -172,6 +172,9 @@ describe("mapLocation", () => {
   const absHttp = target("http://api.github.com/repos/a/b");
   const absHttps = target("https://api.github.com/repos/a/b");
   const pathWithQuery = target("/api.github.com/q?token=harpoc:gh-pat&x=1");
+  const plain80: ParsedTarget = { url: new URL("http://127.0.0.1/x"), form: "path" };
+  const plainV6: ParsedTarget = { url: new URL("http://[::1]/x"), form: "path" };
+  const plain9000: ParsedTarget = { url: new URL("http://127.0.0.1:9000/x"), form: "path" };
 
   it.each([
     [path, "https://api.github.com/repos/c/d", "/api.github.com/repos/c/d"],
@@ -185,6 +188,13 @@ describe("mapLocation", () => {
     [absHttps, "https://other.example/x?y=1", "https://other.example/x?y=1"],
     [pathWithQuery, "", "/api.github.com/q?token=harpoc:gh-pat&x=1"],
     [pathWithQuery, "#frag", "/api.github.com/q?token=harpoc:gh-pat&x=1"],
+    [plain80, "/y", "/127.0.0.1:80/y"],
+    [plain80, "http://127.0.0.1/z?q=1", "/127.0.0.1:80/z?q=1"],
+    [plainV6, "/y", "/[::1]:80/y"],
+    [plain9000, "/y", "/127.0.0.1:9000/y"],
+    [plain80, "http://other.example/y", "/other.example/y"],
+    [plain80, "https://127.0.0.1/y", "/127.0.0.1/y"],
+    [path, "http://127.0.0.1/y", "/127.0.0.1/y"],
   ])("maps the Location of row %#", (from, location, mapped) => {
     expect(mapLocation(location, from)).toBe(mapped);
   });

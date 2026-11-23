@@ -154,7 +154,7 @@ beforeAll(() => {
   listedDir = join(localDir, "listed");
   listedFile = join(listedDir, "report.pdf");
   outsideFile = join(localDir, "outside", "report.pdf");
-  for (const dir of [listedDir, join(listedDir, "sub"), join(localDir, "outside")]) mkdirSync(dir);
+  for (const dir of [listedDir, join(localDir, "outside")]) mkdirSync(dir);
   writeFileSync(listedFile, "report");
   writeFileSync(outsideFile, "outside");
 });
@@ -235,7 +235,9 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       "-o",
       expect.stringMatching(/^UserKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]known_hosts"$/),
       "-o",
-      "GlobalKnownHostsFile=none",
+      expect.stringMatching(
+        /^GlobalKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]global_known_hosts"$/,
+      ),
       "-o",
       "IdentitiesOnly=yes",
       "-i",
@@ -305,7 +307,9 @@ describeSftp("executeSftpAction spawn hardening (sftp resolvable)", () => {
       "-o",
       expect.stringMatching(/^UserKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]known_hosts"$/),
       "-o",
-      "GlobalKnownHostsFile=none",
+      expect.stringMatching(
+        /^GlobalKnownHostsFile="[^"]*harpoc-ssh-[^\\/"]+[\\/]global_known_hosts"$/,
+      ),
       "-o",
       "IdentitiesOnly=yes",
       "-i",

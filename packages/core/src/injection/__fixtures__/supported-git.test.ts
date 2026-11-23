@@ -11,7 +11,7 @@ const GIT = resolveExecutable("git", controlledPathDirs());
 
 describe("resolveSupportedGit on the host's git", () => {
   it.skipIf(GIT === null)(
-    "returns the host's git where its version is at or above the 2.32 floor and null below it (skipped where git does not resolve)",
+    "returns the host's git where its version is at or above the platform's floor (2.37.1 on win32, 2.32 elsewhere) and null below it (skipped where git does not resolve)",
     () => {
       const version = parseGitVersion(
         execFileSync(GIT as string, ["version"], {
@@ -21,7 +21,12 @@ describe("resolveSupportedGit on the host's git", () => {
         }),
       );
       const supported =
-        version !== null && (version.major > 2 || (version.major === 2 && version.minor >= 32));
+        version !== null &&
+        (process.platform === "win32"
+          ? version.major > 2 ||
+            (version.major === 2 &&
+              (version.minor > 37 || (version.minor === 37 && version.patch >= 1)))
+          : version.major > 2 || (version.major === 2 && version.minor >= 32));
       expect(resolveSupportedGit()).toBe(supported ? GIT : null);
     },
   );

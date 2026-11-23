@@ -14,6 +14,7 @@ export const SERVER_TRANSPORTS = ["stdio", "http", "rest", "proxy", "ssh-agent"]
 export const SERVER_STOP_TRIGGERS = [
   "SIGINT",
   "SIGTERM",
+  "SIGBREAK",
   "transport_closed",
   "start_failed",
   "listener_failed",

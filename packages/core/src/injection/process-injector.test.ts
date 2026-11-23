@@ -203,10 +203,28 @@ describe("ProcessInjector — resource bounds", () => {
 });
 
 describe("ProcessInjector — config validation", () => {
-  it("rejects a non-existent working_directory", async () => {
-    await expect(
-      run(nodeAction(`process.stdout.write("x")`, { working_directory: "/no/such/dir/xyz123" })),
-    ).rejects.toMatchObject({ code: ErrorCode.INVALID_PROCESS_CONFIG });
+  it("a missing working_directory is refused with the git context's message, naming no path", async () => {
+    const err = await expectVaultError(
+      () =>
+        run(nodeAction(`process.stdout.write("x")`, { working_directory: "/no/such/dir/xyz123" })),
+      ErrorCode.INVALID_PROCESS_CONFIG,
+    );
+    expect(err.message).toBe("working_directory does not exist");
+  });
+
+  it("a file as working_directory is refused `working_directory is not a directory`", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-proc-cwd-file-")));
+    try {
+      const file = join(dir, "not-a-directory");
+      writeFileSync(file, "x");
+      const err = await expectVaultError(
+        () => run(nodeAction(`process.stdout.write("x")`, { working_directory: file })),
+        ErrorCode.INVALID_PROCESS_CONFIG,
+      );
+      expect(err.message).toBe("working_directory is not a directory");
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 
   it("runs the child in working_directory: the cwd it prints is that directory (I23)", async () => {

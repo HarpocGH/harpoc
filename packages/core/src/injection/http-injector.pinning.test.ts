@@ -22,7 +22,7 @@ vi.mock("./url-validator.js", async (importOriginal) => {
       if (url.hostname === DNS.unresolvedHost) {
         throw new shared.VaultError(
           shared.ErrorCode.DNS_RESOLUTION_FAILED,
-          `DNS resolution failed for ${url.hostname}: getaddrinfo ENOTFOUND ${url.hostname}`,
+          `DNS resolution failed for ${url.hostname}: ENOTFOUND`,
         );
       }
       if (url.hostname.endsWith(".pinned.test")) {

@@ -19,12 +19,21 @@ import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ErrorCode, MAX_TOKEN_TTL_MS, VaultError } from "@harpoc/shared";
 
-const { mockEngine } = vi.hoisted(() => ({
-  mockEngine: {
-    createToken: vi.fn().mockReturnValue("jwt-token"),
-    destroy: vi.fn().mockResolvedValue(undefined),
-  },
-}));
+const { mockEngine, MINTED_JTI, MINTED_TOKEN } = vi.hoisted(() => {
+  const jti = "019a0000-0000-7000-8000-000000000001";
+  const part = (value: object): string =>
+    Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  const token = `${part({ alg: "HS256", typ: "JWT" })}.${part({ jti })}.c2lnbmF0dXJl`;
+  return {
+    MINTED_JTI: jti,
+    MINTED_TOKEN: token,
+    mockEngine: {
+      createToken: vi.fn().mockReturnValue(token),
+      revokeToken: vi.fn(),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+});
 
 vi.mock("../../utils/vault-loader.js", () => ({
   resolveVaultDir: vi.fn().mockReturnValue("/mock/.harpoc"),
@@ -53,8 +62,8 @@ const run = buildCli(
   (program) => registerAuthTokenCommand(program.command("auth")),
   ["auth", "token"],
 );
-const MINTED_TOKEN = "jwt-token";
 const NODE_TEXT = "node-own-text-5b1d";
+const JTI_LINE = /^JTI\s+019a0000-0000-7000-8000-000000000001$/m;
 const FLAG_AS_PATH =
   "Error: [INVALID_INPUT] --out: a flag, not a path (give a path that starts with a dash as ./-name)";
 
@@ -263,6 +272,7 @@ describe("auth token --out", () => {
     expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
     expect(spies.stderr()).toContain(`Token written to ${out}`);
     expect(spies.stdout()).toContain("Subject");
+    expect(spies.stdout()).toMatch(JTI_LINE);
   });
 
   it("puts token_file in place of token under --json", async () => {
@@ -270,10 +280,37 @@ describe("auth token --out", () => {
     await run(["--agent", "bot-1", "--out", out, "--json"]);
 
     expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
-    const payload = JSON.parse(spies.stdout()) as { token?: string; token_file?: string };
+    const payload = JSON.parse(spies.stdout()) as {
+      token?: string;
+      token_file?: string;
+      jti?: string;
+    };
     expect(payload.token_file).toBe(out);
     expect(payload.token).toBeUndefined();
+    expect(payload.jti).toBe(MINTED_JTI);
     expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+  });
+
+  it("both output forms print the JTI", async () => {
+    await run(["--agent", "bot-1"]);
+    expect(spies.stdout()).toMatch(JTI_LINE);
+
+    spies.logSpy.mockClear();
+    await run(["--agent", "bot-1", "--json"]);
+    const printed = JSON.parse(spies.stdout()) as { token?: string; jti?: string };
+    expect(printed.jti).toBe(MINTED_JTI);
+    expect(printed.token).toBe(MINTED_TOKEN);
+
+    spies.logSpy.mockClear();
+    await run(["--agent", "bot-1", "--out", join(dir, "plain-form")]);
+    expect(spies.stdout()).toMatch(JTI_LINE);
+
+    spies.logSpy.mockClear();
+    const jsonOut = join(dir, "json-form");
+    await run(["--agent", "bot-1", "--out", jsonOut, "--json"]);
+    const written = JSON.parse(spies.stdout()) as { token_file?: string; jti?: string };
+    expect(written.jti).toBe(MINTED_JTI);
+    expect(written.token_file).toBe(jsonOut);
   });
 
   it("refuses an existing --out path before the token is minted", async () => {
@@ -398,8 +435,11 @@ describe("auth token --out", () => {
       [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
     ]);
     expect(mockEngine.createToken).toHaveBeenCalledTimes(1);
+    expect(existsSync(out)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
 
     spies.errorSpy.mockClear();
+    mockEngine.revokeToken.mockClear();
     const jsonOut = join(dir, "launch-token.json-mode");
     vi.mocked(writeSync).mockImplementationOnce(() => {
       throw codedError("ENOSPC");
@@ -418,6 +458,8 @@ describe("auth token --out", () => {
         }),
       ],
     ]);
+    expect(existsSync(jsonOut)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
   });
 
   it("a failed close after the write carries the path and the errno code", async () => {
@@ -432,8 +474,11 @@ describe("auth token --out", () => {
       [`Error: [FILE_IO_ERROR] could not write the token file ${out} (EDQUOT)`],
     ]);
     expect(closeSync).toHaveBeenCalledTimes(1);
+    expect(existsSync(out)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
 
     spies.errorSpy.mockClear();
+    mockEngine.revokeToken.mockClear();
     const jsonOut = join(dir, "launch-token.json-mode");
     await failCloseOnce("EDQUOT");
     await expect(run(["--agent", "bot-1", "--out", jsonOut, "--json"])).rejects.toThrow(
@@ -451,6 +496,8 @@ describe("auth token --out", () => {
       ],
     ]);
     expect(closeSync).toHaveBeenCalledTimes(2);
+    expect(existsSync(jsonOut)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
   });
 
   it("a failed close behind a failed write leaves the write's errno code", async () => {
@@ -466,6 +513,94 @@ describe("auth token --out", () => {
       [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
     ]);
     expect(closeSync).toHaveBeenCalledTimes(1);
+    expect(existsSync(out)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
+  });
+
+  it("a short write is FILE_IO_ERROR (short write): the file is removed and the minted token revoked", async () => {
+    const out = join(dir, "launch-token");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeSync).mockImplementationOnce(((fd: number, buffer: Buffer) =>
+      actual.writeSync(fd, buffer, 0, 5)) as typeof writeSync);
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (short write)`],
+    ]);
+    expect(existsSync(out)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
+    expect(mockEngine.revokeToken.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(unlinkSync).mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("a short write of the whole token less its line feed is still a failure", async () => {
+    const out = join(dir, "launch-token");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeSync).mockImplementationOnce(((fd: number, buffer: Buffer) =>
+      actual.writeSync(fd, buffer, 0, buffer.length - 1)) as typeof writeSync);
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stdout(), MINTED_TOKEN, "stdout");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (short write)`],
+    ]);
+    expect(existsSync(out)).toBe(false);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
+  });
+
+  it("a failed revoke warns with the JTI and the code and still removes the file", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+    mockEngine.revokeToken.mockImplementationOnce(() => {
+      throw VaultError.vaultLocked();
+    });
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [
+        `Warning: the token ${MINTED_JTI} could not be revoked (VAULT_LOCKED); revoke it with: harpoc auth revoke ${MINTED_JTI}`,
+      ],
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
+    ]);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it("a failed removal after a failed write warns with the path and the errno code", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+    vi.mocked(unlinkSync).mockImplementationOnce(() => {
+      throw codedError("EPERM");
+    });
+
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Warning: could not remove ${out} after the failed write (EPERM)`],
+      [`Error: [FILE_IO_ERROR] could not write the token file ${out} (ENOSPC)`],
+    ]);
+    expect(mockEngine.revokeToken.mock.calls).toEqual([[MINTED_JTI]]);
+  });
+
+  it("a retry with the same --out after a failed write is served", async () => {
+    const out = join(dir, "launch-token");
+    vi.mocked(writeSync).mockImplementationOnce(() => {
+      throw codedError("ENOSPC");
+    });
+    await expect(run(["--agent", "bot-1", "--out", out])).rejects.toThrow("process.exit");
+
+    spies.errorSpy.mockClear();
+    await run(["--agent", "bot-1", "--out", out]);
+    expect(readFileSync(out, "utf8")).toBe(`${MINTED_TOKEN}\n`);
+    expect(spies.errorSpy.mock.calls).toEqual([[`Token written to ${out}`]]);
   });
 
   it("a failed removal after a refused mint warns with the path and the errno code", async () => {
@@ -536,6 +671,7 @@ describe("auth token --out", () => {
     expectAbsent(spies.stderr(), MINTED_TOKEN, "stderr");
     // The happy unlink path is silent: the warning is for an unlink that failed.
     expect(spies.stderr()).not.toContain("could not remove the empty");
+    expect(mockEngine.revokeToken).not.toHaveBeenCalled();
   });
 
   it.runIf(process.platform !== "win32")("writes it 0600 on POSIX", async () => {
@@ -589,6 +725,6 @@ describe("auth token --out", () => {
   it("round-trips through readLaunchTokenFile, the consumer of the file", async () => {
     const out = join(dir, "round-trip");
     await run(["--agent", "bot-1", "--out", out]);
-    expect(readLaunchTokenFile(out)).toEqual({ ok: true, token: "jwt-token" });
+    expect(readLaunchTokenFile(out)).toEqual({ ok: true, token: MINTED_TOKEN });
   });
 });

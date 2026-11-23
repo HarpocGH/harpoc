@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -11,13 +12,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import type { ConnectionConfig, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs } from "./allowlist.js";
+import { localStepWords } from "./__fixtures__/git-local-steps.js";
 import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { resolveNativeSshClient } from "./__fixtures__/native-ssh-client.js";
@@ -29,7 +31,7 @@ import type { DaemonPaths } from "./local-path.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
 import { system32Path } from "../win32-paths.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const readVersion = vi.hoisted(() => vi.fn<typeof readGitVersion>());
 
@@ -69,13 +71,16 @@ const KNOWN_HOSTS: ConnectionConfig = {
   ssh: { known_hosts: [`${SSH_HOST} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA`] },
 };
 const PINNED_CA: ConnectionConfig = { git: { ca_pem: "unused-ca-pem" } };
-const SCRIPTED_SECRET = new Uint8Array(Buffer.from("git-user:work-tree-token-value"));
+const SCRIPTED_USER = "git-user";
+const SCRIPTED_TOKEN = "work-tree-token-value";
+const SCRIPTED_SECRET = new Uint8Array(Buffer.from(`${SCRIPTED_USER}:${SCRIPTED_TOKEN}`));
 const SERVER_USER = "vaultuser";
 const SERVER_TOKEN = "S3CRET-TOKEN-work-tree";
 const SERVED_SECRET = new Uint8Array(Buffer.from(`${SERVER_USER}:${SERVER_TOKEN}`));
 const UNRESOLVED = "Git operation failed: could not resolve the working tree's repository";
 const PROTECTED = "git working directory is inside a directory the vault protects";
 const HOLDS_PROTECTED = "git work tree holds a path the vault protects";
+const NOT_SERVED = "working_directory is not in a repository the vault serves";
 
 const TREE_OPERATIONS = ["pull", "push", "fetch"] as const;
 type TreeOperation = (typeof TREE_OPERATIONS)[number];
@@ -100,6 +105,8 @@ const FORCED = [
   "credential.helper=",
   "-c",
   "core.fsmonitor=false",
+  "-c",
+  "safe.bareRepository=explicit",
 ];
 const PROBE = [
   "rev-parse",
@@ -111,6 +118,7 @@ const PROBE = [
   "--show-object-format",
   "--absolute-git-dir",
   "--git-common-dir",
+  "--is-bare-repository",
 ];
 const TOP_LEVEL_PROBE = ["rev-parse", "--path-format=absolute", "--show-toplevel"];
 
@@ -169,6 +177,8 @@ beforeEach(() => {
   writeFileSync(join(vaultDir, "vault.db"), "");
   writeFileSync(join(vaultDir, "session.json"), "");
   mkdirSync(join(root, "tree", ".git", "objects"), { recursive: true });
+  mkdirSync(join(root, "tree", ".git", "refs"));
+  writeFileSync(join(root, "tree", ".git", "HEAD"), "ref: refs/heads/main\n");
   log = vi.fn();
   readVersion.mockReset();
   readVersion.mockResolvedValue({ major: 2, minor: 51, patch: 0 });
@@ -198,9 +208,38 @@ function networkSteps(): Array<string | undefined> {
     .map(([, args]) => gitSubcommand(args));
 }
 
+const NO_REPOSITORY_ABOVE =
+  "a directory from the fixture's root up holds a .git entry or a git directory's shape: a row that names a directory outside any repository needs a host without one";
+
+function entryThere(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
+  }
+}
+
+/** The directories from `dir` up to the root that hold a `.git` entry or a git directory's shape. */
+function repositoriesUpFrom(dir: string): string[] {
+  const found: string[] = [];
+  for (let current = dir; ; current = dirname(current)) {
+    const there = (name: string) => entryThere(join(current, name));
+    if (
+      there(".git") ||
+      (there("HEAD") && (there("commondir") || (there("objects") && there("refs"))))
+    ) {
+      found.push(current);
+    }
+    if (dirname(current) === current) return found;
+  }
+}
+
 function failedRow(
   operation: TreeOperation,
   over: Record<string, unknown> = { transport: "https" },
+  error = "LOCAL_PATH_NOT_ALLOWED",
 ) {
   return {
     eventType: "secret.use",
@@ -209,7 +248,7 @@ function failedRow(
       context: "git",
       operation,
       ...over,
-      error: "LOCAL_PATH_NOT_ALLOWED",
+      error,
       network_isolation: false,
       fs_isolation: false,
     },
@@ -223,9 +262,18 @@ describe.skipIf(GIT === null)(
     const tree = () => join(root, "tree");
     const gitDir = () => join(root, "tree", ".git");
 
-    function use(operation: TreeOperation, floor: Floor = floorAt(vaultDir)) {
+    function use(
+      operation: TreeOperation,
+      floor: Floor = floorAt(vaultDir),
+      workingDirectory: string = tree(),
+    ) {
       return new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
-        { type: "git", operation, repository: HTTPS_REPOSITORY, working_directory: tree() },
+        {
+          type: "git",
+          operation,
+          repository: HTTPS_REPOSITORY,
+          working_directory: workingDirectory,
+        },
         SCRIPTED_SECRET,
         policy(),
         undefined,
@@ -245,12 +293,22 @@ describe.skipIf(GIT === null)(
       );
     }
 
+    function probeOf(dir: string): string {
+      return probeAnswer({
+        objectsDir: join(dir, "objects"),
+        shallowFile: join(dir, "shallow"),
+        gitDir: dir,
+        commonDir: dir,
+      });
+    }
+
     function probeAnswer(
       paths: {
         objectsDir?: string;
         shallowFile?: string;
         gitDir?: string;
         commonDir?: string;
+        bare?: string;
       } = {},
     ): string {
       return answer(
@@ -259,14 +317,26 @@ describe.skipIf(GIT === null)(
         "sha1",
         paths.gitDir ?? gitDir(),
         paths.commonDir ?? gitDir(),
+        paths.bare ?? "false",
       );
     }
 
+    function gitDirectoryAt(dir: string): string {
+      mkdirSync(join(dir, "objects"), { recursive: true });
+      mkdirSync(join(dir, "refs"));
+      writeFileSync(join(dir, "HEAD"), "ref: refs/heads/main\n");
+      return dir;
+    }
+
     /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
-    function script(answers: { probe?: string; topLevel?: string } = {}): void {
+    function script(
+      answers: { probe?: string; topLevel?: string } = {},
+      failing?: { step: (args: string[]) => boolean; result: SpawnCapturedResult },
+    ): void {
       const probe = answers.probe ?? probeAnswer();
       const topLevel = answers.topLevel ?? answer(tree());
       spawnMock.mockImplementation((_cmd, args) => {
+        if (failing?.step(args) === true) return Promise.resolve(failing.result);
         const sub = gitSubcommand(args);
         let stdout = "";
         if (args.includes("--git-path")) stdout = probe;
@@ -326,14 +396,20 @@ describe.skipIf(GIT === null)(
       ...TREE_OPERATIONS.flatMap((operation) => [
         [
           operation,
-          "a probe of four lines",
+          "a probe of five lines, the answer before the bare question",
           () => ({
-            probe: answer(join(gitDir(), "objects"), join(gitDir(), "shallow"), "sha1", gitDir()),
+            probe: answer(
+              join(gitDir(), "objects"),
+              join(gitDir(), "shallow"),
+              "sha1",
+              gitDir(),
+              gitDir(),
+            ),
           }),
         ] as const,
         [
           operation,
-          "a probe of six lines, a line feed in a path making one",
+          "a probe of seven lines, a line feed in a path making one",
           () => ({ probe: probeAnswer({ commonDir: `${gitDir()}\nsplit` }) }),
         ] as const,
       ]),
@@ -342,7 +418,7 @@ describe.skipIf(GIT === null)(
     ];
 
     it.each(MISCOUNTED)(
-      "five lines are taken, four or six refused: %s refuses %s, and goes on with the lines asked for",
+      "six lines are taken, five or seven refused: %s refuses %s, and goes on with the lines asked for",
       async (operation, _label, answers) => {
         script(answers());
         const err = await expectVaultError(() => use(operation), ErrorCode.GIT_OPERATION_FAILED);
@@ -390,6 +466,228 @@ describe.skipIf(GIT === null)(
         expect(err.message).toBe(PROTECTED);
         expect(log.mock.calls).toEqual([[failedRow(operation)]]);
         expect(calls()).toHaveLength(answeredBy);
+      },
+    );
+
+    const unresolvedRow = (operation: TreeOperation) =>
+      failedRow(operation, { transport: "https" }, "GIT_OPERATION_FAILED");
+
+    async function expectUnresolved(
+      operation: TreeOperation,
+      run: () => Promise<unknown>,
+      answeredBy: number,
+    ): Promise<void> {
+      const err = await expectVaultError(run, ErrorCode.GIT_OPERATION_FAILED);
+      expect(err.message).toBe(UNRESOLVED);
+      expect(log.mock.calls).toEqual([[unresolvedRow(operation)]]);
+      expect(calls()).toHaveLength(answeredBy);
+      expect(networkSteps()).toEqual([]);
+    }
+
+    it.each(TREE_OPERATIONS)(
+      "every step runs in the top level, whatever directory was named: %s named <tree>/sub/deep",
+      async (operation) => {
+        const named = join(tree(), "sub", "deep");
+        mkdirSync(named, { recursive: true });
+        script();
+        const result = await use(operation, floorAt(vaultDir), named);
+        expect(result.exit_code).toBe(0);
+        const inTheTree = calls().filter(([, args]) => !isNetwork(args));
+        expect(inTheTree.map(([, , opts]) => opts.cwd)).toEqual(
+          Array<string>(operation === "push" ? 3 : 5).fill(tree()),
+        );
+        const [, last] = calls().at(-1) as SpawnCall;
+        expect(last.filter((a) => a.startsWith("--work-tree="))).toEqual(
+          operation === "pull" ? [`--work-tree=${tree()}`] : [],
+        );
+      },
+    );
+
+    it.each(
+      TREE_OPERATIONS.flatMap((operation) =>
+        ["true", "maybe"].map((bare) => [operation, bare] as const),
+      ),
+    )(
+      "a repository that calls itself bare is refused: %s, the sixth line %s",
+      async (operation, bare) => {
+        script({ probe: probeAnswer({ bare }) });
+        await expectUnresolved(operation, () => use(operation), 1);
+      },
+    );
+
+    function otherRepository(): string {
+      const other = join(root, "other");
+      gitDirectoryAt(join(other, ".git"));
+      return other;
+    }
+
+    const ANOTHER_READING: ReadonlyArray<readonly [TreeOperation, keyof typeof ANSWERS, number]> = [
+      ...TREE_OPERATIONS.flatMap((operation) => [
+        [operation, "git directory", 1] as const,
+        [operation, "common directory", 1] as const,
+      ]),
+      ["pull", "top level", 2],
+    ];
+    const ANOTHER_READING_CASES = ANOTHER_READING.flatMap(([operation, which, answeredBy]) =>
+      (["with a floor", "without a floor"] as const).map(
+        (floored) => [operation, which, floored, answeredBy] as const,
+      ),
+    );
+
+    it.each(ANOTHER_READING_CASES)(
+      "git's answer must be the vault's reading: %s, its %s another repository's, %s",
+      async (operation, which, floored, answeredBy) => {
+        const other = otherRepository();
+        script(ANSWERS[which](which === "top level" ? other : join(other, ".git")));
+        await expectUnresolved(
+          operation,
+          () => (floored === "with a floor" ? use(operation) : useWithoutFloor(operation)),
+          answeredBy,
+        );
+      },
+    );
+
+    it.each(TREE_OPERATIONS)(
+      "a linked work tree's common directory is the vault's reading: %s is served where git answers the directory commondir names, refused where it answers the git directory",
+      async (operation) => {
+        const common = gitDirectoryAt(join(root, "main", ".git"));
+        const linked = join(common, "worktrees", "t");
+        mkdirSync(linked, { recursive: true });
+        writeFileSync(join(linked, "HEAD"), "ref: refs/heads/t\n");
+        writeFileSync(join(linked, "commondir"), "../..\n");
+        rmSync(gitDir(), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        writeFileSync(gitDir(), `gitdir: ${linked}\n`);
+        const answered = (commonDir: string) =>
+          probeAnswer({
+            objectsDir: join(common, "objects"),
+            shallowFile: join(common, "shallow"),
+            gitDir: linked,
+            commonDir,
+          });
+
+        script({ probe: answered(common) });
+        const result = await use(operation);
+        expect(result.exit_code).toBe(0);
+        expect(networkSteps()).toEqual([operation === "push" ? "push" : "fetch"]);
+
+        spawnMock.mockReset();
+        log.mockClear();
+        script({ probe: answered(linked) });
+        await expectUnresolved(operation, () => use(operation), 1);
+      },
+    );
+
+    const FAILED_STEPS: ReadonlyArray<readonly [string, () => SpawnCapturedResult]> = [
+      [
+        "exits 128 naming the tree",
+        () => ({
+          ...OK_STEP,
+          exit_code: 128,
+          stderr: `fatal: detected dubious ownership in repository at '${printed(tree())}'\n`,
+        }),
+      ],
+      [
+        "times out",
+        () => ({
+          ...OK_STEP,
+          exit_code: null,
+          timed_out: true,
+          signal: "SIGKILL",
+          stdout: `${printed(tree())}\n`,
+        }),
+      ],
+      [
+        "fails to spawn",
+        () => ({ ...OK_STEP, exit_code: null, spawn_failed: true, stderr: `${tree()}\n` }),
+      ],
+    ];
+    const FAILED_PROBES: ReadonlyArray<
+      readonly [TreeOperation, string, (args: string[]) => boolean, number]
+    > = [
+      ...TREE_OPERATIONS.map(
+        (operation) =>
+          [operation, "first probe", (args: string[]) => args.includes("--git-path"), 1] as const,
+      ),
+      ["pull", "top-level probe", (args: string[]) => args.includes("--show-toplevel"), 2],
+    ];
+    const FAILED_PROBE_CASES = FAILED_PROBES.flatMap(([operation, which, step, answeredBy]) =>
+      FAILED_STEPS.map(
+        ([how, result]) => [operation, which, how, step, result, answeredBy] as const,
+      ),
+    );
+
+    it.each(FAILED_PROBE_CASES)(
+      "a probe that fails is the vault's refusal, with nothing of git's text: %s, its %s %s",
+      async (operation, _which, _how, step, result, answeredBy) => {
+        script({}, { step, result: result() });
+        const err = await expectVaultError(() => use(operation), ErrorCode.GIT_OPERATION_FAILED);
+        const spelled = [tree(), printed(tree()), JSON.stringify(tree()).slice(1, -1)];
+        const texts = [err.message, JSON.stringify(err), JSON.stringify(log.mock.calls)];
+        expect(texts.some((text) => spelled.some((path) => text.includes(path)))).toBe(false);
+        expect(err.message).toBe(UNRESOLVED);
+        expect(log.mock.calls).toEqual([[unresolvedRow(operation)]]);
+        expect(calls()).toHaveLength(answeredBy);
+        expect(networkSteps()).toEqual([]);
+      },
+    );
+
+    const RETURNED_PROBES: ReadonlyArray<
+      readonly [TreeOperation, string, (args: string[]) => boolean]
+    > = [
+      [
+        "push",
+        "its HEAD question rev-parse --verify HEAD",
+        (args) => gitSubcommand(args) === "symbolic-ref" || args.includes("--verify"),
+      ],
+      ...TREE_OPERATIONS.map(
+        (operation) =>
+          [
+            operation,
+            "its ref listing",
+            (args: string[]) => gitSubcommand(args) === "for-each-ref",
+          ] as const,
+      ),
+    ];
+
+    it.each(RETURNED_PROBES)(
+      "a later probe that fails is still git's result, returned through the redaction: %s, %s",
+      async (operation, _which, step) => {
+        script(
+          {},
+          {
+            step,
+            result: {
+              ...OK_STEP,
+              exit_code: 128,
+              stderr: `fatal: ${SCRIPTED_USER} could not read ${SCRIPTED_TOKEN}\n`,
+            },
+          },
+        );
+        const result = await use(operation);
+        expectAbsent(result.stderr, SCRIPTED_USER, "the result's stderr");
+        expectAbsent(result.stderr, SCRIPTED_TOKEN, "the result's stderr");
+        expect(result.exit_code).toBe(128);
+        expect(result.stderr.includes("[REDACTED]")).toBe(true);
+        expect(log.mock.calls).toEqual([
+          [
+            {
+              eventType: "secret.use",
+              secretId: "secret-1",
+              detail: {
+                context: "git",
+                operation,
+                transport: "https",
+                exit_code: 128,
+                network_isolation: false,
+                fs_isolation: false,
+                sanitized: true,
+              },
+              success: true,
+            },
+          ],
+        ]);
+        expect(calls()).toHaveLength(3);
+        expect(networkSteps()).toEqual([]);
       },
     );
 
@@ -453,6 +751,78 @@ describe.skipIf(GIT === null)(
           expect(result.exit_code).toBe(0);
           expect(networkSteps()).toEqual([operation === "push" ? "push" : "fetch"]);
         }
+      },
+    );
+
+    // Git for Windows prints forward slashes, and only win32 has a junction without a privilege.
+    it
+      .runIf(WIN32)
+      .each(
+        TREE_OPERATIONS.flatMap((operation) =>
+          (["as made", "in lower case"] as const).map((spelling) => [operation, spelling] as const),
+        ),
+      )(
+      "a git directory git spells through a junction, its shallow file missing, is served: %s, spelled %s",
+      async (operation, spelling) => {
+        const through = join(root, "jt", ".git");
+        symlinkSync(tree(), join(root, "jt"), "junction");
+        const spell = (line: string) => (spelling === "as made" ? line : line.toLowerCase());
+        script({
+          probe: answer(
+            ...[
+              join(through, "objects"),
+              join(through, "shallow"),
+              "sha1",
+              through,
+              through,
+              "false",
+            ].map((line) => spell(printed(line))),
+          ),
+        });
+        const result = await use(operation);
+        expect(result.exit_code).toBe(0);
+        expect(networkSteps()).toEqual([operation === "push" ? "push" : "fetch"]);
+      },
+    );
+
+    // Git for Windows prints forward slashes, and only win32 has a junction without a privilege.
+    it.runIf(WIN32).each(TREE_OPERATIONS)(
+      "a junction into the vault's directory with a missing shallow file stays refused: %s",
+      async (operation) => {
+        await expectRefusedAtTheProbe(
+          operation,
+          probeAnswer({ shallowFile: join(intoTheVault(), "shallow") }),
+        );
+      },
+    );
+
+    // Only off win32 can a name end in a carriage return.
+    it.skipIf(WIN32)(
+      "a name that ends in a carriage return is judged as it is: a pull in <root>/tree\\r beside <root>/tree",
+      async () => {
+        const named = join(root, "tree\r");
+        script({ probe: probeOf(gitDirectoryAt(join(named, ".git"))), topLevel: answer(named) });
+        const result = await use("pull", floorAt(vaultDir), named);
+        expect(result.exit_code).toBe(0);
+        const inTheTree = calls().filter(([, args]) => !isNetwork(args));
+        expect(inTheTree.map(([, , opts]) => opts.cwd)).toEqual(Array<string>(5).fill(named));
+        const [, last] = calls().at(-1) as SpawnCall;
+        expect(last.filter((a) => a.startsWith("--work-tree="))).toEqual([`--work-tree=${named}`]);
+      },
+    );
+
+    // Only off win32 can a name end in a carriage return.
+    it.skipIf(WIN32).each(TREE_OPERATIONS)(
+      "a git directory whose name ends in a carriage return is judged as it is: %s in a tree whose .git is a link to <root>/gd\\r beside <root>/gd",
+      async (operation) => {
+        const named = gitDirectoryAt(join(root, "gd\r"));
+        gitDirectoryAt(join(root, "gd"));
+        rmSync(gitDir(), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        symlinkSync(named, gitDir(), "dir");
+        script({ probe: probeOf(named) });
+        const result = await use(operation);
+        expect(result.exit_code).toBe(0);
+        expect(networkSteps()).toEqual([operation === "push" ? "push" : "fetch"]);
       },
     );
 
@@ -522,6 +892,107 @@ describe.skipIf(GIT === null)(
       expect(calls()).toHaveLength(1);
     });
 
+    function plain(): string {
+      const dir = join(root, "plain");
+      mkdirSync(dir);
+      expect(repositoriesUpFrom(root), NO_REPOSITORY_ABOVE).toEqual([]);
+      return dir;
+    }
+
+    it.skipIf(SSH === null)(
+      "over SSH a pull in a directory without .git is refused, the row naming the host, nothing spawned (skipped where the native ssh client does not resolve)",
+      async () => {
+        const key = generateKeyPairSync("rsa", {
+          modulusLength: 2048,
+          privateKeyEncoding: { type: "pkcs1", format: "pem" },
+          publicKeyEncoding: { type: "spki", format: "pem" },
+        }).privateKey;
+        script();
+        const dir = plain();
+        const err = await expectVaultError(
+          () =>
+            new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
+              {
+                type: "git",
+                operation: "pull",
+                repository: SSH_REPOSITORY,
+                working_directory: dir,
+              },
+              new Uint8Array(Buffer.from(key)),
+              policy(),
+              KNOWN_HOSTS,
+              "secret-1",
+              undefined,
+              floorAt(vaultDir),
+            ),
+          ErrorCode.INVALID_GIT_CONFIG,
+        );
+        expect(err.message).toBe(NOT_SERVED);
+        expect(log.mock.calls).toEqual([
+          [
+            {
+              eventType: "secret.use",
+              secretId: "secret-1",
+              detail: {
+                context: "git",
+                operation: "pull",
+                transport: "ssh",
+                host: SSH_HOST,
+                error: "INVALID_GIT_CONFIG",
+                network_isolation: false,
+                fs_isolation: false,
+              },
+              success: false,
+            },
+          ],
+        ]);
+        expect(calls()).toHaveLength(0);
+      },
+    );
+
+    it("with a CA pinned a pull in a directory without .git is refused, the row carrying ca_pinned", async () => {
+      script();
+      const dir = plain();
+      const err = await expectVaultError(
+        () =>
+          new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
+            {
+              type: "git",
+              operation: "pull",
+              repository: HTTPS_REPOSITORY,
+              working_directory: dir,
+            },
+            SCRIPTED_SECRET,
+            policy(),
+            PINNED_CA,
+            "secret-1",
+            undefined,
+            floorAt(vaultDir),
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expect(err.message).toBe(NOT_SERVED);
+      expect(log.mock.calls).toEqual([
+        [
+          {
+            eventType: "secret.use",
+            secretId: "secret-1",
+            detail: {
+              context: "git",
+              operation: "pull",
+              transport: "https",
+              error: "INVALID_GIT_CONFIG",
+              network_isolation: false,
+              fs_isolation: false,
+              ca_pinned: true,
+            },
+            success: false,
+          },
+        ],
+      ]);
+      expect(calls()).toHaveLength(0);
+    });
+
     it.each([
       ["the vault's directory", () => ({ topLevel: root, daemon: undefined })],
       [
@@ -559,9 +1030,11 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it("the pull is bound: its local step names the judged top level as its work tree", async () => {
+    it("the pull is bound: named below the top level, its local step names the judged top level as its work tree", async () => {
+      const sub = join(tree(), "sub");
+      mkdirSync(sub);
       script();
-      const result = await use("pull");
+      const result = await use("pull", floorAt(vaultDir), sub);
       expect(result.exit_code).toBe(0);
       const [, network] = calls().find(([, a]) => isNetwork(a)) as SpawnCall;
       const relay = (network.find((a) => a.startsWith("--git-dir=")) as string).slice(
@@ -570,35 +1043,38 @@ describe.skipIf(GIT === null)(
       const [, args, opts] = calls().at(-1) as SpawnCall;
       expect(args).toEqual([
         ...FORCED,
-        "-c",
-        "protocol.allow=never",
-        "-c",
-        "protocol.file.allow=always",
+        ...localStepWords(WIN32 ? "NUL" : "/dev/null"),
         "-c",
         `url.${printed(relay)}.insteadOf=${HTTPS_REPOSITORY}`,
         `--work-tree=${tree()}`,
         "pull",
+        "--no-recurse-submodules",
+        "--upload-pack=git-upload-pack",
         "--",
         HTTPS_REPOSITORY,
       ]);
       expect(opts.cwd).toBe(tree());
     });
 
+    // A link is a junction on win32, which needs no privilege.
     it.each(TREE_OPERATIONS)(
-      "without a floor nothing is judged and the pull is still bound: %s",
+      "without a floor no answer is judged against one, the equalities hold, and the pull is still bound: %s, its .git a link to a git directory inside the vault's directory",
       async (operation) => {
-        const unresolved = nowhere();
-        script({
-          probe: probeAnswer({ gitDir: unresolved, commonDir: unresolved }),
-          topLevel: answer(root),
-        });
+        const inside = gitDirectoryAt(join(vaultDir, "gd"));
+        rmSync(gitDir(), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        symlinkSync(inside, gitDir(), WIN32 ? "junction" : "dir");
+        script({ probe: probeOf(inside) });
         const result = await useWithoutFloor(operation);
         expect(result.exit_code).toBe(0);
         expect(networkSteps()).toEqual([operation === "push" ? "push" : "fetch"]);
         const [, last] = calls().at(-1) as SpawnCall;
         expect(last.filter((a) => a.startsWith("--work-tree="))).toEqual(
-          operation === "pull" ? [`--work-tree=${root}`] : [],
+          operation === "pull" ? [`--work-tree=${tree()}`] : [],
         );
+
+        spawnMock.mockReset();
+        log.mockClear();
+        await expectRefusedAtTheProbe(operation, probeOf(inside));
       },
     );
 
@@ -793,33 +1269,6 @@ describe.skipIf(GIT === null)(
       expect(readFileSync(join(wt, "top.txt"), "utf8")).toBe("2\n");
       expect(readFileSync(join(wt, "sub", "s.txt"), "utf8")).toBe("2\n");
       expect(readdirSync(join(wt, "sub"))).toEqual(["s.txt"]);
-    });
-
-    it("a push and a fetch in a bare repository work as before", async () => {
-      const { name, bare, seed } = remote();
-      const local = join(root, "local.git");
-      git(root, "clone", "-q", "--bare", bare, local);
-      const pushed = commit(seed, "2");
-      git(seed, "push", "-q", local, "HEAD:refs/heads/main");
-      const push = await serve("push", name, local);
-      expect(push.exit_code, push.stderr).toBe(0);
-      expect(git(bare, "rev-parse", "refs/heads/main").trim()).toBe(pushed);
-
-      const fetched = advance(seed, bare, "3");
-      git(local, "config", "remote.origin.url", url(name));
-      const fetch = await serve("fetch", name, local);
-      expect(fetch.exit_code, fetch.stderr).toBe(0);
-      expect(git(local, "rev-parse", "refs/remotes/origin/main").trim()).toBe(fetched);
-    });
-
-    it("a pull in a bare repository ends at the second probe, nothing fetched", async () => {
-      const { name, bare } = remote();
-      const local = join(root, "local.git");
-      git(root, "clone", "-q", "--bare", bare, local);
-      const requests = server.requests.length;
-      const result = await serve("pull", name, local);
-      expect(result.exit_code).toBe(128);
-      expect(server.requests.length).toBe(requests);
     });
 
     it("a pull in a work tree that holds the vault's directory is refused, nothing fetched; a push and a fetch there are served", async () => {

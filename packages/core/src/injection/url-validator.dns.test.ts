@@ -9,7 +9,25 @@ vi.mock("node:dns", () => ({
 }));
 
 import { validateHostPort, validateUrl } from "./url-validator.js";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+
+const NODE_TEXT = "node-own-text-5b1d";
+
+function resolverFailures(host: string): [string, unknown, string][] {
+  return [
+    [
+      "an Error with a code",
+      Object.assign(new Error(`getaddrinfo ENOTFOUND ${host} ${NODE_TEXT}`), { code: "ENOTFOUND" }),
+      "ENOTFOUND",
+    ],
+    [
+      "an Error without a code",
+      new Error(`getaddrinfo EAI_AGAIN ${host} ${NODE_TEXT}`),
+      "unknown error",
+    ],
+    ["a thrown string", `getaddrinfo ${host} ${NODE_TEXT}`, "unknown error"],
+  ];
+}
 
 // The pre-flight A/AAAA resolution branch of validateUrl — reached only for
 // public hostnames, so node:dns is mocked (test-env convention: no real DNS).
@@ -68,6 +86,20 @@ describe("validateUrl DNS resolution", () => {
     });
   });
 
+  it.each(resolverFailures("missing.example.com"))(
+    "the resolver's failure names its errno code, never its text: %s",
+    async (_case, failure, named) => {
+      lookupMock.mockRejectedValue(failure);
+
+      const err = await expectVaultError(
+        () => validateUrl("https://missing.example.com/"),
+        ErrorCode.DNS_RESOLUTION_FAILED,
+      );
+      expectAbsent(err.message, NODE_TEXT);
+      expect(err.message).toBe(`DNS resolution failed for missing.example.com: ${named}`);
+    },
+  );
+
   it("resolves the hostname the parser takes from https:///path and fails on one code", async () => {
     lookupMock.mockRejectedValue(new Error("getaddrinfo ENOTFOUND path"));
 
@@ -97,6 +129,20 @@ describe("validateHostPort DNS resolution", () => {
     );
     expect(lookupMock).toHaveBeenCalledExactlyOnceWith("db.example.test");
   });
+
+  it.each(resolverFailures("db.example.test"))(
+    "the resolver's failure names its errno code, never its text: %s",
+    async (_case, failure, named) => {
+      lookupMock.mockRejectedValue(failure);
+
+      const err = await expectVaultError(
+        () => validateHostPort("db.example.test", 5432),
+        ErrorCode.DNS_RESOLUTION_FAILED,
+      );
+      expectAbsent(err.message, NODE_TEXT);
+      expect(err.message).toBe(`DNS resolution failed for db.example.test: ${named}`);
+    },
+  );
 
   it.each([
     ["bücher.example", 5432],

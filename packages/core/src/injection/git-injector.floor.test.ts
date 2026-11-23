@@ -339,17 +339,28 @@ async function cloneDestination(
   return tail[3];
 }
 
+/** `dir` holding a `.git` with a git directory's shape: `HEAD`, `objects`, `refs`. */
+function repository(dir: string): string {
+  mkdirSync(join(dir, ".git", "objects"), { recursive: true });
+  mkdirSync(join(dir, ".git", "refs"));
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  return dir;
+}
+
 async function treeDirectory(
   operation: (typeof TREE_OPERATIONS)[number],
   workingDirectory: string,
 ): Promise<string | undefined> {
-  const result = await use({
-    type: "git",
-    operation,
-    repository: HTTPS_REPOSITORY,
-    working_directory: workingDirectory,
-  });
-  expect(result.exit_code).toBe(1);
+  await expectVaultError(
+    () =>
+      use({
+        type: "git",
+        operation,
+        repository: HTTPS_REPOSITORY,
+        working_directory: workingDirectory,
+      }),
+    ErrorCode.GIT_OPERATION_FAILED,
+  );
   expect(spawnMock).toHaveBeenCalledTimes(1);
   const [, args, opts] = spawnMock.mock.calls[0] as Parameters<typeof spawnCaptured>;
   expect(gitSubcommand(args)).toBe("rev-parse");
@@ -609,7 +620,7 @@ describe.skipIf(GIT === null)(
       "a working tree spelled through a link and `..` that stay outside the floor runs, its steps in the resolved directory: %s",
       async (operation) => {
         mkdirSync(join(root, "elsewhere", "deep"), { recursive: true });
-        mkdirSync(join(root, "elsewhere", "tree"));
+        repository(join(root, "elsewhere", "tree"));
         mkdirSync(join(root, "agent"));
         const link = join(root, "agent", "link");
         symlinkSync(join(root, "elsewhere", "deep"), link, "dir");
@@ -623,7 +634,7 @@ describe.skipIf(GIT === null)(
     it.skipIf(WIN32)(
       "a working tree reached through a link outside the floor runs its steps in the link's target",
       async () => {
-        mkdirSync(join(root, "elsewhere", "tree"), { recursive: true });
+        repository(join(root, "elsewhere", "tree"));
         const link = join(root, "link");
         symlinkSync(join(root, "elsewhere", "tree"), link, "dir");
         expect(await treeDirectory("pull", link)).toBe(join(root, "elsewhere", "tree"));
@@ -634,15 +645,15 @@ describe.skipIf(GIT === null)(
     it.runIf(WIN32)(
       "a working tree reached through a junction outside the floor runs its steps in the junction's target",
       async () => {
-        mkdirSync(join(root, "elsewhere", "tree"), { recursive: true });
+        repository(join(root, "elsewhere", "tree"));
         const junction = join(root, "junction");
         symlinkSync(join(root, "elsewhere", "tree"), junction, "junction");
         expect(await treeDirectory("pull", junction)).toBe(join(root, "elsewhere", "tree"));
       },
     );
 
-    // A symbolic link needs a privilege on win32. git writes a bare clone through a link that
-    // leads nowhere, into the link's target.
+    // A symbolic link needs a privilege on win32. The floor refuses each spelling before git
+    // runs, whatever git would make of it.
     it.skipIf(WIN32).each([
       ["as the destination", (link: string) => link],
       ["as the destination, spelled with a trailing separator", (link: string) => `${link}/`],
@@ -659,7 +670,6 @@ describe.skipIf(GIT === null)(
           type: "git",
           operation: "clone",
           repository: HTTPS_REPOSITORY,
-          args: ["--bare"],
           working_directory: spell(link),
         });
         expect(readdirSync(vaultDir)).toEqual(["tree"]);
@@ -680,7 +690,6 @@ describe.skipIf(GIT === null)(
         type: "git",
         operation: "clone",
         repository: HTTPS_REPOSITORY,
-        args: ["--mirror"],
         working_directory: join(agent, "link"),
       });
       expect(readdirSync(vaultDir)).toEqual(["tree"]);
@@ -697,7 +706,6 @@ describe.skipIf(GIT === null)(
           type: "git",
           operation: "clone",
           repository: HTTPS_REPOSITORY,
-          args: ["--bare"],
           working_directory: junction,
         });
         expect(readdirSync(vaultDir)).toEqual(["tree"]);
@@ -752,7 +760,6 @@ describe.skipIf(GIT === null)(
           type: "git",
           operation: "clone",
           repository: HTTPS_REPOSITORY,
-          args: ["--bare"],
           working_directory: `${agent}/file/../link`,
         });
         expect(readdirSync(vaultDir)).toEqual(["tree"]);
@@ -778,7 +785,7 @@ describe.skipIf(GIT === null)(
     );
 
     it("a working tree spelled relative, with `.` steps and a doubled separator, resolves against the process's own: its steps run in the absolute directory", async () => {
-      mkdirSync(join(root, "vault-beside"));
+      repository(join(root, "vault-beside"));
       const saved = process.cwd();
       process.chdir(root);
       try {
@@ -875,7 +882,6 @@ describe.skipIf(GIT === null)(
           type: "git",
           operation: "clone",
           repository: HTTPS_REPOSITORY,
-          args: ["--bare"],
           working_directory: spelled,
         });
         expect(readdirSync(vaultDir)).toEqual(["tree"]);
@@ -920,7 +926,6 @@ describe.skipIf(GIT === null)(
             type: "git",
             operation: "clone",
             repository: HTTPS_REPOSITORY,
-            args: ["--bare"],
             working_directory: spelled.slice(agent.length + 1),
           });
           expect(cwd).toHaveBeenCalled();
@@ -945,7 +950,6 @@ describe.skipIf(GIT === null)(
             type: "git",
             operation: "clone",
             repository: HTTPS_REPOSITORY,
-            args: ["--bare"],
             working_directory: join(locked, "link"),
           });
         } finally {
@@ -1047,15 +1051,17 @@ describe.skipIf(GIT === null)(
     it.each(TREE_OPERATIONS)(
       "a working tree beside the vault's directory passes the floor: %s goes on to the step the suite scripts",
       async (operation) => {
-        const beside = join(root, "vault-beside");
-        mkdirSync(beside);
-        const result = await use({
-          type: "git",
-          operation,
-          repository: HTTPS_REPOSITORY,
-          working_directory: beside,
-        });
-        expect(result.exit_code).toBe(1);
+        const beside = repository(join(root, "vault-beside"));
+        await expectVaultError(
+          () =>
+            use({
+              type: "git",
+              operation,
+              repository: HTTPS_REPOSITORY,
+              working_directory: beside,
+            }),
+          ErrorCode.GIT_OPERATION_FAILED,
+        );
         expect(spawnMock).toHaveBeenCalledTimes(1);
         const [, args, opts] = spawnMock.mock.calls[0] as Parameters<typeof spawnCaptured>;
         expect(gitSubcommand(args)).toBe("rev-parse");
@@ -1288,7 +1294,7 @@ describe.skipIf(GIT === null)(
     it.each(TREE_OPERATIONS)(
       "the directory check reads the resolved path: a relative working tree is read from the process's own, and %s goes on to its first probe there",
       async (operation) => {
-        mkdirSync(join(root, "vault-beside"));
+        repository(join(root, "vault-beside"));
         const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
         try {
           expect(await treeDirectory(operation, "vault-beside")).toBe(join(root, "vault-beside"));

@@ -349,8 +349,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
       // (note 4, 2026-09-10) — idempotent, one icacls per process.
       try {
         restrictDir(dir);
-      } catch (err) {
-        lastError = failureReason(err);
+      } catch {
         continue;
       }
     }

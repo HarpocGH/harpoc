@@ -315,14 +315,28 @@ describeGit(
     it("control: an untouched relay runs the fetch through to the local fetch (M6)", async () => {
       const result = await runFetch();
       expect(result.exit_code).toBe(0);
-      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref", "fetch", "fetch"]);
+      expect(subcommands()).toEqual([
+        "rev-parse",
+        "config",
+        "for-each-ref",
+        "fetch",
+        "config",
+        "fetch",
+      ]);
       expect(relaysLeft()).toEqual([]);
     });
 
     it("control: an untouched relay runs the pull through to the local pull", async () => {
       const result = await run("pull");
       expect(result.exit_code).toBe(0);
-      expect(subcommands()).toEqual(["rev-parse", "rev-parse", "for-each-ref", "fetch", "pull"]);
+      expect(subcommands()).toEqual([
+        "rev-parse",
+        "rev-parse",
+        "for-each-ref",
+        "fetch",
+        "config",
+        "pull",
+      ]);
       expect(relaysLeft()).toEqual([]);
     });
 

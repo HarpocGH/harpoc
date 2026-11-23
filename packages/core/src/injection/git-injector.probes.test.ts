@@ -11,7 +11,7 @@ import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import { GitInjector } from "./git-injector.js";
-import { expectAbsent } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 const GIT = resolveSupportedGit();
 // Skipped where no supported git resolves.
@@ -339,33 +339,28 @@ describeGit(
       expectAbsent(JSON.stringify(result), TOKEN);
     });
 
-    it("a failed probe's result is returned redacted: a pull in a directory that is no repository", async () => {
+    it("a pull in a directory that is no repository is the vault's refusal: nothing of the path reaches the message or the row", async () => {
       const plain = join(home, "plain");
       quiet(() => mkdirSync(plain));
       quiet(() => writeFileSync(join(plain, ".git"), "gitdir: missing\n"));
       const log = vi.fn();
       const audited = new GitInjector({ log } as unknown as AuditLogger);
-      const outcome = await audited
-        .executeWithSecret(
-          { type: "git", operation: "pull", repository: url(), working_directory: plain },
-          SECRET,
-          policy(),
-          undefined,
-          "secret-1",
-        )
-        .then(
-          (r) => r,
-          (e: unknown) => (e instanceof VaultError ? e.code : "threw"),
-        );
-      const returned = typeof outcome === "object";
-      expect(returned).toBe(true);
-      const result = outcome as GitResult;
-      expect(result.exit_code === 0).toBe(false);
-      expectAbsent(JSON.stringify(result), USER, "the result");
-      expect(result.stderr.includes("[REDACTED]")).toBe(true);
+      const err = await expectVaultError(
+        () =>
+          audited.executeWithSecret(
+            { type: "git", operation: "pull", repository: url(), working_directory: plain },
+            SECRET,
+            policy(),
+            undefined,
+            "secret-1",
+          ),
+        ErrorCode.INVALID_GIT_CONFIG,
+      );
+      expectAbsent(err.message, USER, "the message");
+      expect(err.message).toBe("working_directory is not in a repository the vault serves");
       const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
-      expect(row.detail.sanitized).toBe(true);
       expectAbsent(JSON.stringify(log.mock.calls), USER, "the audit calls");
+      expect(row.detail.error).toBe("INVALID_GIT_CONFIG");
     });
 
     describe("the clone reads the remote's HEAD through the parse seam (F2-E10, W7)", () => {

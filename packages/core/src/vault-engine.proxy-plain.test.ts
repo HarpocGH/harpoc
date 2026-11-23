@@ -252,6 +252,23 @@ describe("resolveForProxy — the plain reading of a loopback literal", () => {
       interface: "proxy",
     });
   });
+
+  it("an http: origin is refused INVALID_INPUT before anything is judged, even where an http:// entry names it", async () => {
+    const retained = retainDecryptedValues(engine);
+    const onHttp: ProxyTarget = { method: "GET", origin: "http://127.0.0.1:9000", path: "/x" };
+
+    for (const target of [onHttp, { ...onHttp, plainOrigin: "http://127.0.0.1:9000" }]) {
+      const err = await expectVaultError(
+        () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), target),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        "Invalid proxy target: an http(s) origin and a path without query or fragment",
+      );
+    }
+    expect(useRows()).toHaveLength(0);
+    expect(retained).toHaveLength(0);
+  });
 });
 
 describe("resolveForProxy — a plain reading that is not served is refused as today", () => {

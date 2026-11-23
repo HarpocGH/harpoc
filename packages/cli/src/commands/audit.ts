@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
 import type { AuditChainVerification, DecryptedAuditEvent, VaultEngine } from "@harpoc/core";
 import type { AuditChainAnchor, AuditEventType } from "@harpoc/shared";
@@ -69,6 +70,23 @@ function assertAnchorOut(out: string): void {
     throw VaultError.invalidInput(
       "--out: a flag, not a path (give a path that starts with a dash as ./-name)",
     );
+  }
+  const parent = dirname(resolve(out));
+  let isDirectory = false;
+  try {
+    isDirectory = statSync(parent).isDirectory();
+  } catch {
+    // Refused below with the path, never the errno's text.
+  }
+  if (!isDirectory) throw VaultError.invalidInput(`--out: no such directory: ${parent}`);
+  let exists: boolean;
+  try {
+    exists = lstatSync(out, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    throw VaultError.invalidInput(`--out: cannot check ${out} (is its directory searchable?)`);
+  }
+  if (exists) {
+    throw VaultError.invalidInput(`--out: ${out} exists; the anchor is written to a new file only`);
   }
 }
 
@@ -253,7 +271,7 @@ export function registerAuditCommand(program: Command): void {
           const payload = JSON.stringify(anchor, null, 2);
           if (options.out !== undefined) {
             try {
-              writeFileSync(options.out, payload + "\n", "utf8");
+              writeFileSync(options.out, payload + "\n", { encoding: "utf8", flag: "wx" });
             } catch (err) {
               const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
               throw new VaultError(

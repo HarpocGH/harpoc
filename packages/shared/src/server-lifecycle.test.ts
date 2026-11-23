@@ -7,10 +7,11 @@ describe("server-lifecycle", () => {
     expect([...SERVER_TRANSPORTS]).toEqual(["stdio", "http", "rest", "proxy", "ssh-agent"]);
   });
 
-  it("names exactly the five stop triggers", () => {
+  it("names exactly the six stop triggers", () => {
     expect([...SERVER_STOP_TRIGGERS]).toEqual([
       "SIGINT",
       "SIGTERM",
+      "SIGBREAK",
       "transport_closed",
       "start_failed",
       "listener_failed",

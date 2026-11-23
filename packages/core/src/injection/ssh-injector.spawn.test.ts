@@ -134,7 +134,9 @@ describeSsh("SshInjector spawn hardening (ssh resolvable)", () => {
     expect(args).toContain("BatchMode=yes");
     expect(args).toContain("PasswordAuthentication=no");
     expect(args.some((a) => a.startsWith("UserKnownHostsFile="))).toBe(true);
-    expect(args[args.indexOf("GlobalKnownHostsFile=none") - 1]).toBe("-o");
+    const globalAt = args.findIndex((a) => a.startsWith("GlobalKnownHostsFile="));
+    expect(args[globalAt - 1]).toBe("-o");
+    expect(args[globalAt]).toMatch(/^GlobalKnownHostsFile="[^"]+global_known_hosts"$/);
     // The VALUE is double-quoted for ssh's readconf, which re-splits option
     // values on whitespace after argv: an unquoted path with a space (e.g. a
     // "C:/Users/Stefan G/…" temp dir) reads as two known_hosts files and strict

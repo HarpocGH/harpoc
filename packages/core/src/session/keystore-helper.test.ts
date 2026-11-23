@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode } from "@harpoc/shared";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { runKeystoreHelper } from "./keystore-helper.js";
 
 const NODE = process.execPath;
+const HELPER_TEXT = "helper-text-marker-3f9c";
 
 /**
  * Direct pins for the generic bridge-runner guards (review T7): output caps,
@@ -37,21 +39,19 @@ describe("runKeystoreHelper — generic guards", () => {
     });
   });
 
-  it("caps the stderr detail carried into the failure message (4 KiB buffer, 200-char detail)", async () => {
-    const err = await runKeystoreHelper(
-      NODE,
-      ["-e", 'process.stderr.write("E".repeat(8 * 1024), () => process.exit(3))'],
-      "",
-      { label: "StderrSpam" },
-    ).then(
-      () => {
-        throw new Error("should reject");
-      },
-      (e: unknown) => e as VaultError,
+  it("a non-zero exit names the label and the exit status, nothing the helper wrote", async () => {
+    const err = await expectVaultError(
+      () =>
+        runKeystoreHelper(
+          NODE,
+          ["-e", `process.stderr.write(${JSON.stringify(HELPER_TEXT)}, () => process.exit(3))`],
+          "",
+          { label: "StderrSpam" },
+        ),
+      ErrorCode.SESSION_FILE_ERROR,
     );
-    expect(err.code).toBe(ErrorCode.SESSION_FILE_ERROR);
-    expect(err.message).toContain("StderrSpam failed (exit 3)");
-    expect(err.message.length).toBeLessThan(300);
+    expectAbsent(err.message, HELPER_TEXT);
+    expect(err.message).toBe("Session file error: StderrSpam failed (exit 3)");
   });
 
   it("settles exactly once when output arrives before a non-zero exit", async () => {
@@ -99,12 +99,11 @@ describe("runKeystoreHelper — generic guards", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  it("a missing binary rejects with a failed-to-start error", async () => {
-    await expect(
-      runKeystoreHelper("/nonexistent/keystore-bridge", [], "", { label: "Ghost" }),
-    ).rejects.toMatchObject({
-      code: ErrorCode.SESSION_FILE_ERROR,
-      message: expect.stringContaining("failed to start") as string,
-    });
+  it("a helper that does not start names node's code, not its text", async () => {
+    const err = await expectVaultError(
+      () => runKeystoreHelper("/nonexistent/keystore-bridge", [], "", { label: "Ghost" }),
+      ErrorCode.SESSION_FILE_ERROR,
+    );
+    expect(err.message).toBe("Session file error: Ghost helper failed to start: ENOENT");
   });
 });

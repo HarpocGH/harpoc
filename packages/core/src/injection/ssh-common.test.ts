@@ -1,34 +1,55 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { sftpActionSchema, sshActionSchema } from "@harpoc/shared";
 import { isSshName, sshHardeningArgs, writeKnownHosts } from "./ssh-common.js";
 
+const PIN = "deploy.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIApin";
+const ID = "/tmp/harpoc-ssh-id-x/identity.pub";
+
 describe("sshHardeningArgs", () => {
-  it("S9: trusts the pinned known_hosts alone — the host-wide global known_hosts is switched off", () => {
-    const args = sshHardeningArgs(
-      "/tmp/harpoc-ssh-x/known_hosts",
-      "/tmp/harpoc-ssh-id-x/identity.pub",
-    );
-    const at = args.indexOf("GlobalKnownHostsFile=none");
-    expect(at).toBeGreaterThan(0);
-    expect(args[at - 1]).toBe("-o");
-    expect(args).toContain('UserKnownHostsFile="/tmp/harpoc-ssh-x/known_hosts"');
-    expect(args).toContain("StrictHostKeyChecking=yes");
+  it("S9: trusts the pinned known_hosts alone — the global file is an empty file of the vault's own, never `none`", () => {
+    const kh = writeKnownHosts([PIN]);
+    try {
+      expect(kh.globalFile).toBe(join(dirname(kh.file), "global_known_hosts"));
+      expect(readFileSync(kh.globalFile, "utf8")).toBe("");
+      const args = sshHardeningArgs(kh, ID);
+      const at = args.indexOf(`UserKnownHostsFile="${kh.file}"`);
+      expect(at).toBeGreaterThan(0);
+      expect(args[at - 1]).toBe("-o");
+      expect(args.slice(at + 1, at + 3)).toEqual(["-o", `GlobalKnownHostsFile="${kh.globalFile}"`]);
+      expect(args.some((a) => a.startsWith("GlobalKnownHostsFile=none"))).toBe(false);
+      expect(args).toContain("StrictHostKeyChecking=yes");
+    } finally {
+      kh.dispose();
+    }
   });
 });
 
 describe("writeKnownHosts", () => {
-  it("writes every pin on its own line, newline-terminated, and removes its directory on dispose", () => {
+  it("writes every pin on its own line, newline-terminated, and removes its directory with both files on dispose", () => {
     const first = "[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfirst";
     const second = "deploy.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAsecond";
     const kh = writeKnownHosts([first, second]);
     try {
       expect(readFileSync(kh.file, "utf8")).toBe(`${first}\n${second}\n`);
+      expect(existsSync(kh.globalFile)).toBe(true);
     } finally {
       kh.dispose();
     }
+    expect(existsSync(kh.globalFile)).toBe(false);
     expect(existsSync(dirname(kh.file))).toBe(false);
+  });
+
+  // win32 keeps no POSIX mode bits: the 0600 and 0700 are judged off win32 alone.
+  it.skipIf(process.platform === "win32")("the global file is 0600 in a 0700 directory", () => {
+    const kh = writeKnownHosts([PIN]);
+    try {
+      expect(statSync(kh.globalFile).mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(kh.globalFile)).mode & 0o777).toBe(0o700);
+    } finally {
+      kh.dispose();
+    }
   });
 });
 

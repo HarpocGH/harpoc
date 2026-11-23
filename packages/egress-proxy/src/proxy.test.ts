@@ -332,15 +332,45 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
       "a Basic credential whose token does not verify",
       401,
       "Basic dXNlcjpwdw==",
+      "pw",
+      "dXNlcjpwdw==",
       ErrorCode.INVALID_TOKEN,
     ],
-    ["an invalid token", 401, "Bearer tok-bogus", ErrorCode.INVALID_TOKEN],
-    ["an expired token", 401, `Bearer ${TOKENS.expired}`, ErrorCode.TOKEN_EXPIRED],
-    ["a revoked token", 401, `Bearer ${TOKENS.revoked}`, ErrorCode.TOKEN_REVOKED],
-    ["a sealed vault", 503, `Bearer ${TOKENS.sealed}`, ErrorCode.VAULT_LOCKED],
+    [
+      "an invalid token",
+      401,
+      "Bearer tok-bogus",
+      "tok-bogus",
+      "tok-bogus",
+      ErrorCode.INVALID_TOKEN,
+    ],
+    [
+      "an expired token",
+      401,
+      `Bearer ${TOKENS.expired}`,
+      TOKENS.expired,
+      TOKENS.expired,
+      ErrorCode.TOKEN_EXPIRED,
+    ],
+    [
+      "a revoked token",
+      401,
+      `Bearer ${TOKENS.revoked}`,
+      TOKENS.revoked,
+      TOKENS.revoked,
+      ErrorCode.TOKEN_REVOKED,
+    ],
+    [
+      "a sealed vault",
+      503,
+      `Bearer ${TOKENS.sealed}`,
+      TOKENS.sealed,
+      TOKENS.sealed,
+      ErrorCode.VAULT_LOCKED,
+    ],
   ])(
     "%s is refused %i with its code; no lease, nothing upstream",
-    async (_t, status, header, code) => {
+    async (_t, status, header, verified, needle, code) => {
       const reply = await proxyRequest({
         port,
         path: `/127.0.0.1:${upstream.port}/user`,
@@ -348,8 +378,9 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
       });
 
       expect(reply.status).toBe(status);
-      expectAbsent(reply.raw, header.slice("Bearer ".length));
+      expectAbsent(reply.raw, needle);
       expect(JSON.parse(reply.body)).toMatchObject({ error: code });
+      expect(double.verifyToken).toHaveBeenCalledWith(verified);
       expect(double.resolveForProxy).not.toHaveBeenCalled();
       expect(upstream.seen).toHaveLength(0);
     },
@@ -374,16 +405,19 @@ describe("caller authentication — Proxy-Authorization on every request", () =>
   );
 
   it("a well-formed Basic header with a revoked token is the verification's 401", async () => {
+    const credential = Buffer.from(`harpoc:${TOKENS.revoked}`).toString("base64");
     const reply = await send(
       "/user",
       {
-        "proxy-authorization": BASIC(`harpoc:${TOKENS.revoked}`),
+        "proxy-authorization": `Basic ${credential}`,
         authorization: "Bearer harpoc:gh-pat",
       },
       { token: null },
     );
 
     expect(reply.status).toBe(401);
+    expectAbsent(reply.raw, TOKENS.revoked);
+    expectAbsent(reply.raw, credential);
     expect(JSON.parse(reply.body)).toMatchObject({ error: ErrorCode.TOKEN_REVOKED });
     expect(double.verifyToken).toHaveBeenCalledWith(TOKENS.revoked);
     expect(double.resolveForProxy).not.toHaveBeenCalled();

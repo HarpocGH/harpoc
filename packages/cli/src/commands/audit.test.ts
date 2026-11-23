@@ -1,4 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
@@ -19,8 +28,14 @@ vi.mock("../utils/vault-loader.js", () => ({
   loadUnlockedEngine: vi.fn().mockResolvedValue(mockEngine),
 }));
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+});
+
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import type { VaultApiToken } from "@harpoc/shared";
+import { expectAbsent } from "@harpoc/test-utils";
 import { loadUnlockedEngine } from "../utils/vault-loader.js";
 import { registerAuditCommand } from "./audit.js";
 import { buildCli, spyCli, tokenFixture, type CliSpies } from "../__fixtures__/cli-harness.js";
@@ -28,6 +43,13 @@ import { buildCli, spyCli, tokenFixture, type CliSpies } from "../__fixtures__/c
 const run = buildCli(registerAuditCommand, ["audit"]);
 
 const SECRET_ID = "0190c9d2-7b4a-7c3e-8f12-3456789abcde";
+const NODE_TEXT = "node-own-text-7c2e";
+
+function codedError(code: string): NodeJS.ErrnoException {
+  const err: NodeJS.ErrnoException = new Error(`${code}: ${NODE_TEXT}`);
+  err.code = code;
+  return err;
+}
 
 describe("audit --since validation", () => {
   let spies: CliSpies;
@@ -436,50 +458,141 @@ describe("audit anchor / verify --anchor", () => {
   it.each([
     {
       label: "an empty --out",
-      args: ["anchor", "--out", ""],
-      line: "Error: [INVALID_INPUT] --out: empty path",
+      args: () => ["anchor", "--out", ""],
+      line: () => "Error: [INVALID_INPUT] --out: empty path",
     },
     {
       label: "a dash-led --out=--json value",
-      args: ["anchor", "--out=--json"],
-      line: "Error: [INVALID_INPUT] --out: a flag, not a path (give a path that starts with a dash as ./-name)",
+      args: () => ["anchor", "--out=--json"],
+      line: () =>
+        "Error: [INVALID_INPUT] --out: a flag, not a path (give a path that starts with a dash as ./-name)",
     },
-  ])("anchor refuses $label before the vault opens", async ({ args, line }) => {
+    {
+      label: "an --out whose directory does not exist",
+      args: () => ["anchor", "--out", join(tempDir, "missing", "vault.anchor")],
+      line: () => `Error: [INVALID_INPUT] --out: no such directory: ${join(tempDir, "missing")}`,
+    },
+    {
+      label: "an existing --out file",
+      args: () => {
+        writeFileSync(join(tempDir, "vault.anchor"), "keep-me\n", "utf8");
+        return ["anchor", "--out", join(tempDir, "vault.anchor")];
+      },
+      line: () =>
+        `Error: [INVALID_INPUT] --out: ${join(tempDir, "vault.anchor")} exists; the anchor is written to a new file only`,
+      kept: () => join(tempDir, "vault.anchor"),
+    },
+  ])("anchor refuses $label before the vault opens", async ({ args, line, kept }) => {
     mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
     const stray = resolve("--json");
     try {
-      await expect(run(args)).rejects.toThrow("process.exit");
-      expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+      await expect(run(args())).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([[line()]]);
       expect(spies.logSpy).not.toHaveBeenCalled();
       expect(loadUnlockedEngine).not.toHaveBeenCalled();
       expect(existsSync(stray)).toBe(false);
+      const keptFile = kept?.();
+      if (keptFile !== undefined) expect(readFileSync(keptFile, "utf8")).toBe("keep-me\n");
     } finally {
       rmSync(stray, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
-  it("anchor --out into a missing directory is FILE_IO_ERROR with the path and the errno code", async () => {
-    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
-    const out = join(tempDir, "missing", "vault.anchor");
+  // Symbolic links: win32 refuses one without a privilege (EPERM); POSIX makes one freely.
+  it.skipIf(process.platform === "win32")(
+    "a dangling link at --out is an existing entry",
+    async () => {
+      mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+      const out = join(tempDir, "planted-link");
+      const target = join(tempDir, "missing-target");
+      symlinkSync(target, out);
+
+      await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
+      expect(spies.errorSpy.mock.calls).toEqual([
+        [`Error: [INVALID_INPUT] --out: ${out} exists; the anchor is written to a new file only`],
+      ]);
+      expect(spies.logSpy).not.toHaveBeenCalled();
+      expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      expect(existsSync(target)).toBe(false);
+    },
+  );
+
+  // POSIX modes: win32 has none, and root searches a 0600 directory regardless.
+  it.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "an --out it cannot check",
+    async () => {
+      mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+      const locked = join(tempDir, "locked");
+      const out = join(locked, "vault.anchor");
+      mkdirSync(locked);
+      chmodSync(locked, 0o600);
+      try {
+        await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [`Error: [INVALID_INPUT] --out: cannot check ${out} (is its directory searchable?)`],
+        ]);
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      } finally {
+        chmodSync(locked, 0o700);
+      }
+    },
+  );
+
+  it("a file that appears at --out after the check is not replaced: FILE_IO_ERROR with the path and EEXIST, both forms", async () => {
+    const out = join(tempDir, "vault.anchor");
+    mockEngine.getAuditChainTail.mockImplementationOnce(() => {
+      writeFileSync(out, "planted\n", "utf8");
+      return validAnchor;
+    });
 
     await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
-    expect(spies.stderr()).not.toContain("no such file or directory");
     expect(spies.errorSpy.mock.calls).toEqual([
-      [`Error: [FILE_IO_ERROR] could not write the anchor file ${out} (ENOENT)`],
+      [`Error: [FILE_IO_ERROR] could not write the anchor file ${out} (EEXIST)`],
     ]);
+    expect(readFileSync(out, "utf8")).toBe("planted\n");
     expect(loadUnlockedEngine).toHaveBeenCalledTimes(1);
 
     spies.errorSpy.mockClear();
-    await expect(run(["anchor", "--out", out, "--json"])).rejects.toThrow("process.exit");
+    const jsonOut = join(tempDir, "vault.anchor.json-mode");
+    mockEngine.getAuditChainTail.mockImplementationOnce(() => {
+      writeFileSync(jsonOut, "planted\n", "utf8");
+      return validAnchor;
+    });
+    await expect(run(["anchor", "--out", jsonOut, "--json"])).rejects.toThrow("process.exit");
     expect(spies.errorSpy.mock.calls).toEqual([
       [
         JSON.stringify({
           error: "FILE_IO_ERROR",
-          message: `could not write the anchor file ${out} (ENOENT)`,
+          message: `could not write the anchor file ${jsonOut} (EEXIST)`,
         }),
       ],
     ]);
+    expect(readFileSync(jsonOut, "utf8")).toBe("planted\n");
     expect(spies.logSpy).not.toHaveBeenCalled();
+  });
+
+  it("a write that fails after the create leaves the file, and the retry is refused", async () => {
+    mockEngine.getAuditChainTail.mockReturnValue(validAnchor);
+    const out = join(tempDir, "vault.anchor");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(writeFileSync).mockImplementationOnce((file, data, options) => {
+      actual.writeFileSync(file, String(data).slice(0, 8), options);
+      throw codedError("ENOSPC");
+    });
+
+    await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
+    expectAbsent(spies.stderr(), NODE_TEXT, "stderr");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [FILE_IO_ERROR] could not write the anchor file ${out} (ENOSPC)`],
+    ]);
+    expect(existsSync(out)).toBe(true);
+
+    spies.errorSpy.mockClear();
+    await expect(run(["anchor", "--out", out])).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([
+      [`Error: [INVALID_INPUT] --out: ${out} exists; the anchor is written to a new file only`],
+    ]);
+    expect(loadUnlockedEngine).toHaveBeenCalledTimes(1);
   });
 
   it("exits non-zero when there are no chained rows to anchor", async () => {

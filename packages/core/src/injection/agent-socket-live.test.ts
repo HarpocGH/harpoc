@@ -191,7 +191,7 @@ describe.skipIf(SSH === null)(
         ...(viaJump ? [pin(jumpPort, JUMP_HOST_KEY)] : []),
       ]);
       const identity = writeIdentityFile(publicLine(identityFixture));
-      const hardening = sshHardeningArgs(kh.file, identity.file, 10);
+      const hardening = sshHardeningArgs(kh, identity.file, 10);
       const config = viaJump
         ? writeTempSshFile("harpoc-ssh-cfg-", "config", hardeningConfig(hardening))
         : undefined;

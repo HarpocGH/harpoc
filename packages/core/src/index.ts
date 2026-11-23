@@ -238,7 +238,9 @@ export {
   gitVersionAtLeast,
   GIT_MIN_VERSION,
   GIT_PIN_MIN_VERSION,
+  GIT_WIN32_OWNER_MIN_VERSION,
 } from "./injection/git-injector-version.js";
+export type { GitVersionFloor } from "./injection/git-injector-version.js";
 export {
   matchesUrlAllowlist,
   matchesHostAllowlist,

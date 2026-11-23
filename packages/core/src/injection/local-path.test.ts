@@ -40,6 +40,7 @@ const NO_GLOB = "sftp local path must not contain glob characters";
 const MUST_NAME_A_FILE = "sftp download path must name a file";
 const READ_DIFFERENTLY = "sftp local path holds a name Windows reads differently";
 const DOT_SEGMENT = "sftp local path must not hold a .. segment";
+const DOT_GIT = "sftp local path must not hold a .git segment";
 const WIN32 = process.platform === "win32";
 const NO_PATHS: DaemonPaths = { protectedDirs: [], protectedFiles: [] };
 const USERS = "S-1-5-32-545";
@@ -335,6 +336,28 @@ const DOT_SEGMENTS: readonly Case[] = [
     ]),
   ),
 ];
+
+const DOT_GIT_NAMES = [".git", ".GIT", ".git.", ".git::$INDEX_ALLOCATION", "git~1"];
+
+const DOT_GIT_SPELLINGS: ReadonlyArray<readonly [string, () => Partial<Input>, string]> =
+  TRANSFERS.flatMap((operation) =>
+    DOT_GIT_NAMES.flatMap((name) =>
+      (
+        [
+          [`/srv/r/${name}/config`, "linux", DOT_GIT],
+          [
+            `C:${B}d${B}${name}${B}config`,
+            "win32",
+            name.endsWith(".") || name.includes(":") ? READ_DIFFERENTLY : DOT_GIT,
+          ],
+        ] as const
+      ).map(([localPath, platform, message]): readonly [string, () => Partial<Input>, string] => [
+        `${operation} of ${localPath} on ${platform}`,
+        () => ({ operation, localPath, platform }),
+        message,
+      ]),
+    ),
+  );
 
 const DOWNLOADS_ENDING_IN_A_SEPARATOR: readonly Case[] = [
   ["<listed>/new.pdf/", () => ({ localPath: `${join(fx.listed, "new.pdf")}${sep}` })],
@@ -779,6 +802,13 @@ describe("resolveSftpLocalPath: a `..` segment and a trailing separator, judged 
     }
   });
 
+  // On win32 a trailing dot is `win32_name`.
+  it.skipIf(WIN32)("a name of three dots is no segment", async () => {
+    const localPath = join(fx.listed, "...");
+    writeFileSync(localPath, "...");
+    await expect(resolveSftpLocalPath(input({ localPath }))).resolves.toBe(localPath);
+  });
+
   it.each(DOWNLOADS_ENDING_IN_A_SEPARATOR)(
     "a download whose spelling ends in a separator names no file, before any call: %s",
     async (_label, overrides) => {
@@ -805,6 +835,45 @@ describe("resolveSftpLocalPath: a `..` segment and a trailing separator, judged 
       await expect(resolveSftpLocalPath(input({ allowedDirs: [listed] })), listed).resolves.toBe(
         join(fx.listed, "report.pdf"),
       );
+    }
+  });
+});
+
+describe("resolveSftpLocalPath: a `.git` name, judged by the spelling", () => {
+  it.each(DOT_GIT_SPELLINGS)(
+    "a `.git` name is refused before any file-system call: %s",
+    async (_label, overrides, message) => {
+      await expectRefusedBeforeAnyCall(overrides(), message);
+    },
+  );
+
+  it("a `.git` name in the listed directory's own spelling", async () => {
+    await expectRefusedBeforeAnyCall(
+      { localPath: join(fx.listed, "wt", ".git", "config") },
+      DOT_GIT,
+    );
+    await expectRefusedBeforeAnyCall(
+      { operation: "download", localPath: join(fx.listed, ".git", "new.pdf") },
+      DOT_GIT,
+    );
+  });
+
+  it("`.git` before a trailing separator, `..` before `.git`", async () => {
+    await expectRefusedBeforeAnyCall(
+      { operation: "download", localPath: `${join(fx.listed, ".git")}${sep}` },
+      DOT_GIT,
+    );
+    await expectRefusedBeforeAnyCall({ localPath: viaSub(fx.listed, `.git${sep}x`) }, DOT_SEGMENT);
+  });
+
+  it("a name that merely starts like `.git`, or a `repo.git` without the shape, is no `.git` name", async () => {
+    for (const dir of [".github", "repo.git"]) {
+      mkdirSync(join(fx.listed, dir), { recursive: true });
+    }
+    for (const name of [join(".github", "ci.yml"), ".gitignore", ".git-x", join("repo.git", "f")]) {
+      const localPath = join(fx.listed, name);
+      writeFileSync(localPath, name);
+      await expect(resolveSftpLocalPath(input({ localPath })), name).resolves.toBe(localPath);
     }
   });
 });
@@ -905,6 +974,23 @@ describe("judgeLocalPath: a `..` segment", () => {
         judgement({ localPath: `C:${B}srv${B}a${B}..${B}b`, refuseGlob: false, platform: "win32" }),
       ),
     ).resolves.toEqual({ refusal: "dot_segment" });
+  });
+
+  it("a backslash separates a `.git` name on every platform", async () => {
+    await expect(
+      judgeLocalPath(
+        judgement({ localPath: `/srv/a${B}.git${B}b`, refuseGlob: false, platform: "linux" }),
+      ),
+    ).resolves.toEqual({ refusal: "dot_git" });
+    await expect(
+      judgeLocalPath(
+        judgement({
+          localPath: `C:${B}srv${B}a${B}.git${B}b`,
+          refuseGlob: false,
+          platform: "win32",
+        }),
+      ),
+    ).resolves.toEqual({ refusal: "dot_git" });
   });
 });
 

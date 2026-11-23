@@ -33,8 +33,9 @@ export function registerInitCommand(program: Command): void {
           try {
             chmodSync(vaultDir, 0o700);
           } catch (err) {
+            const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
             console.error(
-              `Warning: could not restrict ${vaultDir} to owner-only access (${err instanceof Error ? err.message : String(err)})`,
+              `Warning: could not restrict ${vaultDir} to owner-only access (${typeof code === "string" ? code : "unknown error"})`,
             );
           }
         }

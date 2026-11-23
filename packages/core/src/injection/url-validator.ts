@@ -223,12 +223,17 @@ export async function validateUrl(
       if (err instanceof VaultError) throw err;
       throw new VaultError(
         ErrorCode.DNS_RESOLUTION_FAILED,
-        `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : "unknown"}`,
+        `DNS resolution failed for ${hostname}: ${errnoCode(err)}`,
       );
     }
   }
 
   return { url, resolvedAddresses };
+}
+
+function errnoCode(err: unknown): string {
+  const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+  return typeof code === "string" ? code : "unknown error";
 }
 
 /** Check if a string looks like an IP address (v4 or v6). */
@@ -320,7 +325,7 @@ export async function validateHostPort(host: string, port: number): Promise<Vali
     if (err instanceof VaultError) throw err;
     throw new VaultError(
       ErrorCode.DNS_RESOLUTION_FAILED,
-      `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : "unknown"}`,
+      `DNS resolution failed for ${hostname}: ${errnoCode(err)}`,
     );
   }
 }

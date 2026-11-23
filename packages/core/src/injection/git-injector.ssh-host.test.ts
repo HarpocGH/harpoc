@@ -109,6 +109,14 @@ function policy(hosts: string[]): InjectionPolicy {
   };
 }
 
+/** `dir` holding a `.git` with a git directory's shape: `HEAD`, `objects`, `refs`. */
+function repository(dir: string): string {
+  mkdirSync(join(dir, ".git", "objects"), { recursive: true });
+  mkdirSync(join(dir, ".git", "refs"));
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  return dir;
+}
+
 /** The action as an unparsed caller hands it to the injector (git-injector.audit.test.ts). */
 function unparsed(operation: string, patch: Record<string, unknown>): GitAction {
   return { type: "git", operation, ...patch } as unknown as GitAction;
@@ -445,14 +453,14 @@ describeGitSsh(
     });
 
     beforeEach(() => {
-      scratch = mkdtempSync(join(tmpdir(), "harpoc-git-ssh-host-"));
+      scratch = repository(mkdtempSync(join(tmpdir(), "harpoc-git-ssh-host-")));
       spawnMock.mockReset();
       spawnMock.mockImplementation((_cmd, args) => {
         const sub = gitSubcommand(args);
         const stdout = args.includes("--show-toplevel")
           ? `${scratch}\n`
           : sub === "rev-parse"
-            ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\n`
+            ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\nfalse\n`
             : sub === "symbolic-ref"
               ? "refs/heads/main\n"
               : sub === "config"

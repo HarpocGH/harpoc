@@ -379,6 +379,7 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       { ...TARGET, origin: "https://api.github.com/" },
       { ...TARGET, origin: "https://u:p@api.github.com" },
       { ...TARGET, origin: "ftp://api.github.com" },
+      { ...TARGET, origin: "http://api.github.com" },
       { ...TARGET, method: "GET /x" },
     ]) {
       await expectVaultError(

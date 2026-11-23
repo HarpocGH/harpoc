@@ -78,10 +78,7 @@ export class KeychainWrappingKeyStore implements WrappingKeyStore {
     if (ITEM_NOT_FOUND_PATTERN.test(result.stderr)) {
       return null;
     }
-    const detail = result.stderr.replace(/\s+/g, " ").trim().slice(0, 200);
-    throw VaultError.sessionFileError(
-      `Keychain read failed (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`,
-    );
+    throw VaultError.sessionFileError(`Keychain read failed (exit ${result.exitCode})`);
   }
 
   async storeWrappingKey(key: Uint8Array): Promise<void> {

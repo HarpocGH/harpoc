@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -26,6 +27,7 @@ import {
   isHeldPath,
   isLinkPath,
   linkProbePath,
+  othersMayWrite,
   posixHeld,
   win32Held,
 } from "./path-trust.js";
@@ -35,6 +37,8 @@ const LABEL = "--backup-dir";
 
 const EUID = 1001;
 const NEIGHBOUR_UID = 1002;
+const OWN_GROUP = 1001;
+const OTHER_GROUP = 1002;
 const ROOT_0755 = { uid: 0, mode: 0o755 };
 const ROOT_STICKY_1777 = { uid: 0, mode: 0o1777 };
 const OWN_0700 = { uid: EUID, mode: 0o700 };
@@ -192,6 +196,35 @@ describe("posixHeld", () => {
 
   it("holds nothing on an empty chain", () => {
     expect(posixHeld([], EUID)).toBe(false);
+  });
+
+  it("with the account's group a 0775 directory of that group holds, one of another group does not, and a write bit for others never does", () => {
+    const own = { uid: EUID, gid: OWN_GROUP, mode: 0o700 };
+    expect(
+      posixHeld([ROOT_0755, { uid: EUID, gid: OWN_GROUP, mode: 0o775 }, own], EUID, OWN_GROUP),
+    ).toBe(true);
+    expect(
+      posixHeld([ROOT_0755, { uid: EUID, gid: OTHER_GROUP, mode: 0o775 }, own], EUID, OWN_GROUP),
+    ).toBe(false);
+    expect(
+      posixHeld([ROOT_0755, { uid: EUID, gid: OWN_GROUP, mode: 0o777 }, own], EUID, OWN_GROUP),
+    ).toBe(false);
+    expect(posixHeld([ROOT_0755, { uid: EUID, mode: 0o775 }, own], EUID, OWN_GROUP)).toBe(false);
+    expect(
+      posixHeld([ROOT_0755, { uid: 0, gid: OWN_GROUP, mode: 0o775 }, own], EUID, OWN_GROUP),
+    ).toBe(true);
+  });
+});
+
+describe("othersMayWrite", () => {
+  it("reads a write bit for others always, and a write bit for the group unless the entry is of the group handed", () => {
+    expect(othersMayWrite({ mode: 0o644, gid: OWN_GROUP })).toBe(false);
+    expect(othersMayWrite({ mode: 0o664, gid: OWN_GROUP })).toBe(true);
+    expect(othersMayWrite({ mode: 0o664, gid: OWN_GROUP }, OWN_GROUP)).toBe(false);
+    expect(othersMayWrite({ mode: 0o664, gid: OWN_GROUP }, OTHER_GROUP)).toBe(true);
+    expect(othersMayWrite({ mode: 0o646, gid: OWN_GROUP })).toBe(true);
+    expect(othersMayWrite({ mode: 0o646, gid: OWN_GROUP }, OWN_GROUP)).toBe(true);
+    expect(othersMayWrite({ mode: 0o646, gid: OWN_GROUP }, OTHER_GROUP)).toBe(true);
   });
 });
 
@@ -570,6 +603,19 @@ describe("on real directories", () => {
       chmodSync(base, 0o777);
       expect(await isHeldPath(file)).toBe(false);
     });
+
+    it.skipIf(WIN32)(
+      "does not hold a file in a 0775 directory without a group, and holds it with the directory's own group (POSIX modes)",
+      async () => {
+        const shared = join(base, "shared");
+        mkdirSync(shared);
+        chmodSync(shared, 0o775);
+        const file = join(shared, "transfer.bin");
+        writeFileSync(file, "");
+        expect(await isHeldPath(file)).toBe(false);
+        expect(await isHeldPath(file, statSync(base).gid)).toBe(true);
+      },
+    );
 
     it.runIf(WIN32)(
       "holds a file in a fresh directory under the temporary directory (win32)",

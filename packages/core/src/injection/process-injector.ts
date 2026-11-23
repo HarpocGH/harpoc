@@ -198,11 +198,11 @@ export class ProcessInjector {
   private assertDirectory(dir: string): void {
     try {
       if (!statSync(dir).isDirectory()) {
-        throw VaultError.invalidProcessConfig(`working_directory is not a directory: ${dir}`);
+        throw VaultError.invalidProcessConfig("working_directory is not a directory");
       }
     } catch (err) {
       if (err instanceof VaultError) throw err;
-      throw VaultError.invalidProcessConfig(`working_directory does not exist: ${dir}`);
+      throw VaultError.invalidProcessConfig("working_directory does not exist");
     }
   }
 

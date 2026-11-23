@@ -95,7 +95,7 @@ export class SshInjector {
     try {
       identity = writeIdentityFile(agent.publicKeyOpenssh);
       const args = [
-        ...sshHardeningArgs(kh.file, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
+        ...sshHardeningArgs(kh, identity.file, Math.max(1, Math.ceil(timeoutMs / 1000))),
         ...(action.port !== undefined ? ["-p", String(action.port)] : []),
         "-l",
         action.user,

@@ -586,11 +586,12 @@ function toUseError(err: unknown): VaultError {
 const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 /**
- * The URL a proxy target names, or null when it names none: an http(s)
+ * The URL a proxy target names, or null when it names none: an https
  * origin in the URL's own serialization and a path the parser keeps as given,
  * so the origin the allowlist judges, the row records and the proxy connects
- * to are one — on a plain lease `plainOrigin`, which `plainTargetUrl` holds
- * to the same rule — and no query, fragment or userinfo rides in.
+ * to are one — on a plain lease `plainOrigin`, an http origin that
+ * `plainTargetUrl` holds to its own serialization and the same path — and no
+ * query, fragment or userinfo rides in.
  */
 function proxyTargetUrl(target: ProxyTarget): URL | null {
   if (!HTTP_METHOD_TOKEN.test(target.method) || !target.path.startsWith("/")) return null;
@@ -600,7 +601,7 @@ function proxyTargetUrl(target: ProxyTarget): URL | null {
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.protocol !== "https:") return null;
   return url.origin === target.origin && url.pathname === target.path ? url : null;
 }
 

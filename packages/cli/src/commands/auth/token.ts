@@ -52,6 +52,20 @@ function errnoCode(err: unknown): string {
   return code ?? "unknown error";
 }
 
+function jtiOf(token: string): string {
+  let jti: unknown;
+  try {
+    const payload = token.split(".")[1] ?? "";
+    jti = (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { jti?: unknown }).jti;
+  } catch {
+    jti = undefined;
+  }
+  if (typeof jti !== "string" || jti === "") {
+    throw new VaultError(ErrorCode.INTERNAL_ERROR, "auth token: the minted token carries no jti");
+  }
+  return jti;
+}
+
 export function registerAuthTokenCommand(auth: Command): void {
   auth
     .command("token")
@@ -185,15 +199,18 @@ export function registerAuthTokenCommand(auth: Command): void {
               }
               throw err;
             }
+            const jti = jtiOf(token);
 
             if (out !== undefined && outFd !== undefined) {
               let failedWith: string | undefined;
               try {
-                writeSync(outFd, token + "\n");
-                // The POSIX chmod repair mirrors init.ts and is skipped on
-                // win32, where the file inherits the directory ACL as the
-                // vault does.
-                if (process.platform !== "win32") {
+                const bytes = Buffer.from(token + "\n", "utf8");
+                if (writeSync(outFd, bytes) !== bytes.length) {
+                  failedWith = "short write";
+                } else if (process.platform !== "win32") {
+                  // The POSIX chmod repair mirrors init.ts and is skipped on
+                  // win32, where the file inherits the directory ACL as the
+                  // vault does.
                   try {
                     fchmodSync(outFd, 0o600);
                   } catch (err) {
@@ -211,6 +228,21 @@ export function registerAuthTokenCommand(auth: Command): void {
                 failedWith ??= errnoCode(err);
               }
               if (failedWith !== undefined) {
+                try {
+                  engine.revokeToken(jti);
+                } catch (err) {
+                  const code = err instanceof VaultError ? err.code : "unknown error";
+                  console.error(
+                    `Warning: the token ${jti} could not be revoked (${code}); revoke it with: harpoc auth revoke ${jti}`,
+                  );
+                }
+                try {
+                  unlinkSync(out);
+                } catch (err) {
+                  console.error(
+                    `Warning: could not remove ${out} after the failed write (${errnoCode(err)})`,
+                  );
+                }
                 throw new VaultError(
                   ErrorCode.FILE_IO_ERROR,
                   `could not write the token file ${out} (${failedWith})`,
@@ -222,6 +254,7 @@ export function registerAuthTokenCommand(auth: Command): void {
             if (options.json) {
               printJson({
                 ...(options.out !== undefined ? { token_file: options.out } : { token }),
+                jti,
                 subject,
                 principal_type: principalType,
                 scope,
@@ -233,6 +266,7 @@ export function registerAuthTokenCommand(auth: Command): void {
             } else {
               printRecord({
                 ...(options.out !== undefined ? {} : { Token: token }),
+                JTI: jti,
                 Subject: subject,
                 "Principal type": principalType,
                 Scope: scope.join(", "),

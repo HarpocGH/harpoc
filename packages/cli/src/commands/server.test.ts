@@ -256,6 +256,7 @@ describe("server start", () => {
   let originalLog: typeof console.log;
   let priorSigintListeners: ((signal: "SIGINT") => void)[];
   let priorSigtermListeners: ((signal: "SIGTERM") => void)[];
+  let priorSigbreakListeners: ((signal: "SIGBREAK") => void)[];
   let priorStdinEndListeners: ((...args: unknown[]) => void)[];
 
   beforeEach(() => {
@@ -268,6 +269,7 @@ describe("server start", () => {
     backupSchedulerCtorCalls.length = 0;
     priorSigintListeners = process.listeners("SIGINT");
     priorSigtermListeners = process.listeners("SIGTERM");
+    priorSigbreakListeners = process.listeners("SIGBREAK");
     priorStdinEndListeners = process.stdin.listeners("end") as ((...args: unknown[]) => void)[];
     spies = spyCli();
     stubPlatform("linux");
@@ -281,6 +283,9 @@ describe("server start", () => {
     }
     for (const listener of process.listeners("SIGTERM")) {
       if (!priorSigtermListeners.includes(listener)) process.removeListener("SIGTERM", listener);
+    }
+    for (const listener of process.listeners("SIGBREAK")) {
+      if (!priorSigbreakListeners.includes(listener)) process.removeListener("SIGBREAK", listener);
     }
     for (const listener of process.stdin.listeners("end") as ((...args: unknown[]) => void)[]) {
       if (!priorStdinEndListeners.includes(listener)) process.stdin.removeListener("end", listener);
@@ -5025,7 +5030,7 @@ describe("server start", () => {
 
   // ── Shutdown ────────────────────────────────────────────────────
 
-  it("registers SIGINT and SIGTERM handlers", async () => {
+  it("registers SIGINT, SIGTERM and SIGBREAK handlers", async () => {
     const onSpy = vi.spyOn(process, "on");
 
     await run(["--mcp"]);
@@ -5033,6 +5038,7 @@ describe("server start", () => {
     const events = onSpy.mock.calls.map((c) => c[0]);
     expect(events).toContain("SIGINT");
     expect(events).toContain("SIGTERM");
+    expect(events).toContain("SIGBREAK");
 
     onSpy.mockRestore();
   });
@@ -5061,6 +5067,44 @@ describe("server start", () => {
         tokenless: false,
         port: 3000,
         trigger: "SIGINT",
+      }),
+    );
+    const [httpRow, restRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+    const httpClose = mockMcpHttpServer.close.mock.invocationCallOrder[0] as number;
+    const restClose = mockRestServer.close.mock.invocationCallOrder[0] as number;
+    const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+    expect(httpRow).toBeLessThan(httpClose);
+    expect(restRow).toBeLessThan(restClose);
+    expect(restClose).toBeLessThan(destroy);
+    expect(httpClose).toBeLessThan(destroy);
+
+    onSpy.mockRestore();
+  });
+
+  it("SIGBREAK shutdown writes one server.stop per started listener with trigger SIGBREAK, each before its close, all before destroy, exit 0", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    spies.exitSpy.mockImplementation(() => undefined as never);
+
+    await run(["--rest", "--mcp-http", "--port", "3000", "--mcp-http-port", "3001"]);
+    const sigbreakCall = onSpy.mock.calls.find((call) => call[0] === "SIGBREAK");
+    (sigbreakCall?.[1] as () => void)();
+    await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+    expect(mockEngine.auditServerStop).toHaveBeenCalledTimes(2);
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "http",
+        tokenless: false,
+        port: 3001,
+        trigger: "SIGBREAK",
+      }),
+    );
+    expect(mockEngine.auditServerStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: "rest",
+        tokenless: false,
+        port: 3000,
+        trigger: "SIGBREAK",
       }),
     );
     const [httpRow, restRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];

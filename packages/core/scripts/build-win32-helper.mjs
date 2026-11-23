@@ -13,6 +13,7 @@ if (process.platform === "win32") {
       console.log(`[harpoc-job] ${resolved.exe}`);
     }
   } catch (err) {
-    console.warn(`[harpoc-job] not prebuilt: ${err instanceof Error ? err.message : String(err)}`);
+    const code = err instanceof Error ? err.code : undefined;
+    console.warn(`[harpoc-job] not prebuilt: ${typeof code === "string" ? code : "unknown error"}`);
   }
 }

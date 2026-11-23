@@ -117,7 +117,7 @@ describe.skipIf(GIT === null)("GitInjector askpass binds the validated origin", 
     let runs: AskpassRun[] | undefined;
     spawnMock.mockImplementation((_cmd, _args, opts) => {
       const env = (opts as { env: Record<string, string> }).env;
-      if (env.GIT_ASKPASS !== undefined && runs === undefined) {
+      if (env.GIT_ASKPASS && runs === undefined) {
         origin = env.HARPOC_GIT_ORIGIN;
         runs = prompts.map((p) => runLauncher(env, p));
       }

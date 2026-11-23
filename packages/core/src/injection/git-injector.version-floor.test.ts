@@ -1,5 +1,13 @@
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -62,14 +70,17 @@ if (process.platform === "win32") {
 const GIT = resolveExecutable("git", controlledPathDirs());
 const SSH = resolveNativeSshClient("ssh");
 const SYSTEM_TMP = tmpdir();
+const WIN32 = process.platform === "win32";
 
 const OPERATIONS = ["clone", "pull", "push", "fetch", "ls-remote"] as const;
+const UNFLOORED: readonly GitOperation[] = WIN32 ? ["clone", "ls-remote"] : OPERATIONS;
+const WIN32_FLOORED = ["pull", "push", "fetch"] as const;
 const PLANS: Record<GitOperation, readonly string[]> = {
   clone: ["network", "network", "local"],
   "ls-remote": ["network"],
-  pull: ["local", "local", "local", "network", "local"],
+  pull: ["local", "local", "local", "network", "local", "local"],
   push: ["local", "local", "local", "network"],
-  fetch: ["local", "local", "local", "network", "local"],
+  fetch: ["local", "local", "local", "network", "local", "local"],
 };
 
 const RESOLVED_HOST = "https://git.example/org/repo.git";
@@ -126,6 +137,10 @@ function olderThanPinFloor(version: string): string {
   return `Git operation failed: git ${version} is older than 2.37 and would ignore the addresses the vault judged for the repository host`;
 }
 
+function olderThanWin32Floor(version: string): string {
+  return `Git operation failed: git ${version} is older than 2.37.1, which a pull, a push and a fetch need on Windows`;
+}
+
 function gitVersion(major: number, minor: number, patch: number): GitVersion {
   return { major, minor, patch };
 }
@@ -177,6 +192,14 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
   };
 }
 
+/** `dir` holding a `.git` with a git directory's shape: `HEAD`, `objects`, `refs`. */
+function repository(dir: string): string {
+  mkdirSync(join(dir, ".git", "objects"), { recursive: true });
+  mkdirSync(join(dir, ".git", "refs"));
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  return dir;
+}
+
 const spawnMock = vi.mocked(spawnCaptured);
 let scratch: string;
 let tempRoot: string;
@@ -193,7 +216,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  scratch = mkdtempSync(join(SYSTEM_TMP, "harpoc-git-vf-wd-"));
+  scratch = repository(mkdtempSync(join(SYSTEM_TMP, "harpoc-git-vf-wd-")));
   tempRoot = mkdtempSync(join(SYSTEM_TMP, "harpoc-git-vf-"));
   savedTemp = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
   process.env.TMPDIR = tempRoot;
@@ -209,7 +232,7 @@ beforeEach(() => {
     const stdout = args.includes("--show-toplevel")
       ? `${scratch}\n`
       : sub === "rev-parse"
-        ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\n`
+        ? `${join(scratch, ".git", "objects")}\n${join(scratch, ".git", "shallow")}\nsha1\n${join(scratch, ".git")}\n${join(scratch, ".git")}\nfalse\n`
         : sub === "symbolic-ref"
           ? "refs/heads/main\n"
           : sub === "config"
@@ -375,7 +398,7 @@ describe.skipIf(GIT === null)(
 describe.skipIf(GIT === null)(
   "control: git 2.32.0 runs where no pin is handed (skipped where git does not resolve)",
   () => {
-    it.each(OPERATIONS)(
+    it.each(UNFLOORED)(
       "%s over HTTP to a loopback address with git 2.32.0: the operation's plan spawned step by step and one success row of the unchanged form",
       async (operation) => {
         readVersion.mockResolvedValue(gitVersion(2, 32, 0));
@@ -383,7 +406,7 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it.skipIf(SSH === null).each(OPERATIONS)(
+    it.skipIf(SSH === null).each(UNFLOORED)(
       "%s over SSH with git 2.32.0: the operation's plan spawned step by step and one success row of the unchanged form (skipped where the native ssh client does not resolve)",
       async (operation) => {
         readVersion.mockResolvedValue(gitVersion(2, 32, 0));
@@ -409,7 +432,7 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it.each(overOperations(UNPINNED_HTTPS))(
+    it.each(overOperations(UNPINNED_HTTPS).filter(([operation]) => UNFLOORED.includes(operation)))(
       "control: %s over %s with git 2.36.9: the operation's plan spawned step by step without a pin and one success row of the unchanged form",
       async (operation, _label, repository) => {
         readVersion.mockResolvedValue(gitVersion(2, 36, 9));
@@ -418,7 +441,7 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it.skipIf(SSH === null).each(OPERATIONS)(
+    it.skipIf(SSH === null).each(UNFLOORED)(
       "control: %s over SSH with git 2.36.9: the operation's plan spawned step by step and one success row of the unchanged form (skipped where the native ssh client does not resolve)",
       async (operation) => {
         readVersion.mockResolvedValue(gitVersion(2, 36, 9));
@@ -426,13 +449,124 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it.each(OPERATIONS)(
+    it.each(UNFLOORED)(
       "control: %s over HTTPS to a host the vault resolved with git 2.37.0: the operation's plan spawned step by step, every network step handed the pin of both judged addresses and every local step none, one success row of the unchanged form",
       async (operation) => {
         readVersion.mockResolvedValue(gitVersion(2, 37, 0));
         await expectRuns(actionFor(operation, RESOLVED_HOST), HTTPS_SUCCESS);
         expect(pinsOfSteps()).toEqual(
           PLANS[operation].map((kind) => (kind === "network" ? [PIN_443] : [])),
+        );
+      },
+    );
+  },
+);
+
+describe.skipIf(GIT === null)(
+  "W-1: on Windows a pull, a push and a fetch need git 2.37.1 (skipped where git does not resolve)",
+  () => {
+    it.runIf(WIN32).each(WIN32_FLOORED)(
+      "%s over HTTP to a loopback address with git 2.37.0: GIT_OPERATION_FAILED with the Windows floor's message, one failed row of context, operation, error and git_version, nothing spawned, no temporary directory (win32 only)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 0));
+        await expectFloorRefusal(
+          actionFor(operation, LOOPBACK_ADDRESS),
+          olderThanWin32Floor("2.37.0"),
+          { operation, error: "GIT_OPERATION_FAILED", git_version: "2.37.0" },
+        );
+      },
+    );
+
+    it.runIf(WIN32 && SSH !== null).each(WIN32_FLOORED)(
+      "%s over SSH with git 2.37.0: GIT_OPERATION_FAILED with the Windows floor's message, one failed row of context, operation, host, error and git_version, nothing spawned, no temporary directory (win32 only, skipped where the native ssh client does not resolve)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 0));
+        await expectFloorRefusal(
+          actionFor(operation, SSH_REPOSITORY),
+          olderThanWin32Floor("2.37.0"),
+          { operation, host: SSH_HOST, error: "GIT_OPERATION_FAILED", git_version: "2.37.0" },
+        );
+      },
+    );
+
+    it.runIf(WIN32).each(WIN32_FLOORED)(
+      "%s over HTTPS to a host the vault resolved with git 2.37.0: the pin's floor passes, refused after exactly one validateUrl call with the Windows floor's message, one failed row of context, operation, error and git_version, nothing spawned, no temporary directory (win32 only)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 0));
+        await expectFloorRefusal(
+          actionFor(operation, RESOLVED_HOST),
+          olderThanWin32Floor("2.37.0"),
+          {
+            operation,
+            error: "GIT_OPERATION_FAILED",
+            git_version: "2.37.0",
+          },
+        );
+        expect(vi.mocked(validateUrl)).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it
+      .runIf(WIN32)
+      .each(overOperations(UNPINNED_HTTPS).filter(([operation]) => !UNFLOORED.includes(operation)))(
+      "%s over %s with git 2.36.9: no pin, so the Windows floor's message, one failed row of context, operation, error and git_version, nothing spawned, no temporary directory (win32 only)",
+      async (operation, _label, repository) => {
+        readVersion.mockResolvedValue(gitVersion(2, 36, 9));
+        await expectFloorRefusal(actionFor(operation, repository), olderThanWin32Floor("2.36.9"), {
+          operation,
+          error: "GIT_OPERATION_FAILED",
+          git_version: "2.36.9",
+        });
+      },
+    );
+
+    it.runIf(WIN32 && SSH !== null).each(WIN32_FLOORED)(
+      "%s over SSH with git 2.36.9: the Windows floor's message, one failed row of context, operation, host, error and git_version, nothing spawned, no temporary directory (win32 only, skipped where the native ssh client does not resolve)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 36, 9));
+        await expectFloorRefusal(
+          actionFor(operation, SSH_REPOSITORY),
+          olderThanWin32Floor("2.36.9"),
+          { operation, host: SSH_HOST, error: "GIT_OPERATION_FAILED", git_version: "2.36.9" },
+        );
+      },
+    );
+
+    it.runIf(WIN32).each(WIN32_FLOORED)(
+      "control: %s over HTTP to a loopback address with git 2.37.1: the operation's plan spawned step by step and one success row of the unchanged form (win32 only)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 1));
+        await expectRuns(actionFor(operation, LOOPBACK_ADDRESS), HTTPS_SUCCESS);
+      },
+    );
+
+    it.runIf(WIN32).each(WIN32_FLOORED)(
+      "control: %s over HTTPS to a host the vault resolved with git 2.37.1: the operation's plan spawned step by step, every network step handed the pin of both judged addresses and every local step none, one success row of the unchanged form (win32 only)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 1));
+        await expectRuns(actionFor(operation, RESOLVED_HOST), HTTPS_SUCCESS);
+        expect(pinsOfSteps()).toEqual(
+          PLANS[operation].map((kind) => (kind === "network" ? [PIN_443] : [])),
+        );
+      },
+    );
+
+    it.runIf(WIN32 && SSH !== null).each(WIN32_FLOORED)(
+      "control: %s over SSH with git 2.37.1: the operation's plan spawned step by step and one success row of the unchanged form (win32 only, skipped where the native ssh client does not resolve)",
+      async (operation) => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 1));
+        await expectRuns(actionFor(operation, SSH_REPOSITORY), SSH_SUCCESS);
+      },
+    );
+
+    it.runIf(WIN32)(
+      "a pull without a working tree, with git 2.37.0: the Windows floor's refusal, not the working tree's, one failed row of context, operation, error and git_version, nothing spawned, no temporary directory (win32 only)",
+      async () => {
+        readVersion.mockResolvedValue(gitVersion(2, 37, 0));
+        await expectFloorRefusal(
+          { type: "git", operation: "pull", repository: LOOPBACK_ADDRESS },
+          olderThanWin32Floor("2.37.0"),
+          { operation: "pull", error: "GIT_OPERATION_FAILED", git_version: "2.37.0" },
         );
       },
     );

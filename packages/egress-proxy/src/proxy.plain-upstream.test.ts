@@ -290,6 +290,27 @@ describe("redirects on the plain reading (A5)", () => {
     expect(reply.headers.location).toBe("/127.0.0.1:443/n");
   });
 
+  it("a Location at the plain origin's default port keeps :80, whose TLS reading would be 443", async () => {
+    redirectTo("http://127.0.0.1/n");
+    const reply = await send(`/127.0.0.1:${upstream.port}/start`);
+
+    expect(upstream.seen).toHaveLength(1);
+    expect(reply.status).toBe(302);
+    expect(reply.headers.location).toBe("/127.0.0.1:80/n");
+
+    double.resolveForProxy.mockRejectedValueOnce(VaultError.urlNotAllowed("https://127.0.0.1:80"));
+    const followUp = await send(reply.headers.location as string);
+
+    expect(followUp.status).toBe(403);
+    expect(judged(1)).toStrictEqual({
+      method: "GET",
+      origin: "https://127.0.0.1:80",
+      path: "/n",
+      plainOrigin: "http://127.0.0.1",
+    });
+    expect(upstream.seen).toHaveLength(1);
+  });
+
   it("a cross-origin one is mapped and its follow-up goes back through the lease", async () => {
     const other = await startPlainUpstream();
     try {

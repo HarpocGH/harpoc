@@ -163,7 +163,7 @@ function tcpRefusal(err: unknown, host: string, port: number): VaultError {
 interface Authenticated {
   token: VaultApiToken;
   caller: CallerContext;
-  /** The bearer as sent — a tunnel keeps it to verify every request it carries again. */
+  /** The token as verified — a Bearer's as sent, a Basic credential's decoded; a tunnel keeps it to verify every request it carries again. */
   raw: string;
 }
 

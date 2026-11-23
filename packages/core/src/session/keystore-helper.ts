@@ -12,7 +12,7 @@ export interface RunKeystoreHelperOptions {
   /** Kill the helper and reject after this many milliseconds (default 15000). */
   timeoutMs?: number;
   /**
-   * When true (default), a non-zero exit rejects with the stderr detail. When
+   * When true (default), a non-zero exit rejects naming the exit status. When
    * false, the result is returned and the caller decides — keystore lookups
    * signal a clean miss through non-zero exits.
    */
@@ -70,7 +70,12 @@ export function runKeystoreHelper(
     }, timeoutMs);
 
     child.on("error", (err) => {
-      finish(VaultError.sessionFileError(`${label} helper failed to start: ${err.message}`));
+      const code = (err as NodeJS.ErrnoException).code;
+      finish(
+        VaultError.sessionFileError(
+          `${label} helper failed to start: ${typeof code === "string" ? code : "unknown error"}`,
+        ),
+      );
     });
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -93,12 +98,7 @@ export function runKeystoreHelper(
       if (settled) return;
       const stderr = Buffer.concat(stderrChunks).toString("utf8");
       if (code !== 0 && expectZeroExit) {
-        const detail = stderr.replace(/\s+/g, " ").trim().slice(0, 200);
-        finish(
-          VaultError.sessionFileError(
-            `${label} failed (exit ${code ?? "unknown"})${detail ? `: ${detail}` : ""}`,
-          ),
-        );
+        finish(VaultError.sessionFileError(`${label} failed (exit ${code ?? "unknown"})`));
         return;
       }
       const buffer = Buffer.concat(stdoutChunks);

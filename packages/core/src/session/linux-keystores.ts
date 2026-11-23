@@ -38,10 +38,7 @@ export function findLinuxKeystoreBinary(
 }
 
 function failure(label: string, result: KeystoreHelperResult): VaultError {
-  const detail = result.stderr.replace(/\s+/g, " ").trim().slice(0, 200);
-  return VaultError.sessionFileError(
-    `${label} failed (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`,
-  );
+  return VaultError.sessionFileError(`${label} failed (exit ${result.exitCode})`);
 }
 
 export interface SecretServiceWrappingKeyStoreOptions {
