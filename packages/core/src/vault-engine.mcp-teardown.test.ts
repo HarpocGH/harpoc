@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType, UseSecretAction } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, injectionPolicyInputSchema, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
-import type { McpConnectionEntry } from "./injection/mcp-registry.js";
+import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
+import {
+  registerAgents,
+  registryOf,
+  seedLiveStdioEntry,
+  storeInjectionPolicyBlob,
+} from "./__fixtures__/engine-seams.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
@@ -143,27 +148,6 @@ function grant(secretId: string, principalId: string, permissions: Permission[])
   );
 }
 
-/** Publish a ready stdio entry without spawning a child — something live to tear down. */
-async function seedLiveStdioEntry(secretId: string): Promise<void> {
-  const client = { onclose: undefined, close: () => Promise.resolve() };
-  await registryOf(engine).acquire(secretId, () =>
-    Promise.resolve({
-      secretId,
-      serverName: "docs",
-      transportKind: "stdio",
-      client: client as unknown as McpConnectionEntry["client"],
-      state: "connecting",
-      crashed: false,
-      credentialFingerprint: "cred-fp",
-      configFingerprint: "config-fp",
-      isolation: { network: false, fs: false },
-      strictTreeExit: false,
-      spawnedAt: Date.now(),
-      lastUsedAt: Date.now(),
-    } satisfies McpConnectionEntry),
-  );
-}
-
 function terminatesFor(secretId: string) {
   return engine.queryAudit({
     eventType: AuditEventType.MCP_TERMINATE,
@@ -179,7 +163,7 @@ describe("a denied use ends the secret's live downstream child (E73)", () => {
   it("ACCESS_DENIED for a list holder: the entry is terminated, reason use_denied, attributed", async () => {
     const id = await makeSecret("mcp-denied");
     grant(id, "alice", ["list"]);
-    await seedLiveStdioEntry(id);
+    await seedLiveStdioEntry(engine, id);
 
     await expectVaultError(
       () => engine.useSecret("secret://mcp-denied", USE, agent("alice")),
@@ -195,7 +179,7 @@ describe("a denied use ends the secret's live downstream child (E73)", () => {
 
   it("the concealed refusal (no grant at all) terminates too; the wire still reads not-found", async () => {
     const id = await makeSecret("mcp-concealed");
-    await seedLiveStdioEntry(id);
+    await seedLiveStdioEntry(engine, id);
 
     await expectVaultError(
       () => engine.useSecret("secret://mcp-concealed", USE, agent("bob")),
@@ -209,7 +193,7 @@ describe("a denied use ends the secret's live downstream child (E73)", () => {
   it("control: a use holder passes the gate and keeps the child", async () => {
     const id = await makeSecret("mcp-kept");
     grant(id, "alice", ["use"]);
-    await seedLiveStdioEntry(id);
+    await seedLiveStdioEntry(engine, id);
 
     // Past the gate the process context refuses on its empty command allowlist
     // — a refusal the registry never hears about.
@@ -220,6 +204,27 @@ describe("a denied use ends the secret's live downstream child (E73)", () => {
 
     expect(registryOf(engine).get(id)).toBeDefined();
     expect(terminatesFor(id)).toHaveLength(0);
+  });
+
+  it("a use refused for the block ends the secret's live child", async () => {
+    const id = await makeSecret("mcp-bootstrap");
+    grant(id, "alice", ["use"]);
+    await seedLiveStdioEntry(engine, id);
+    storeInjectionPolicyBlob(
+      engine,
+      id,
+      injectionPolicyInputSchema.parse({ ssh_bootstrap: BLOCK }),
+    );
+
+    await expectVaultError(
+      () => engine.useSecret("secret://mcp-bootstrap", USE, agent("alice")),
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+    );
+
+    expect(registryOf(engine).get(id)).toBeUndefined();
+    const [row] = terminatesFor(id);
+    expect(row?.detail).toMatchObject({ reason: "ssh_bootstrap_enabled", server: "docs" });
+    expect(row?.principal_id).toBe("alice");
   });
 
   it("no live entry: the refusal writes no mcp.terminate row", async () => {

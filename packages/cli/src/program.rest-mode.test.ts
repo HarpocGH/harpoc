@@ -208,6 +208,21 @@ const STORED_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
+};
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
+const KEY_A =
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+const KEY_B =
+  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDiRlhkneupuv3jgo1YA59JtrC+7Q9ocZXT54nv4vvv+77sjQ4T/HHrNVmc0ia2WVSMzcUQiBdgrdSYHcUp4P1dlo0Y552j00fGAo1KeQX93kqrQCpIm3QnKeYE4LpWjkdBdKI0xDLiak2HfYfC63uqcz0tNIKO1nQdlETEGe7tSQyVV/2KrIf8fTfRCRzSEXVxb4wgiZmSp4dcBqYYAIYulxSnJQaJr/idz/Md+Adqsz0GQIuspKHhajbpDakIMx+pJYv9LeIyKVFsu0AJMvn+mcz5W5dQpjdd+ECnNj1Kt1+9afM5fXOwakSqPYkX3Z52c9V6Bi4yT4mXIKt5eMrPWkMivj6imynq8WCGWTgZeIH2rFCmfRTiJh4jd70gm7SHCw9As/XER4bcyawV8Wh13sHICyTFpIbtoSHkUFYMJ8fS59ALDICSjypVUL6qUKrhV1lkqfObz4hGJCXk1K2jiE+cuRaq7Bp5qfpmkKMx6KzrdbNeNcSMGV7h+EWTJ9U=";
+const BOOTSTRAP_BLOCK = {
+  host: "h1.example",
+  port: 22,
+  user: "ubuntu",
+  host_keys: [HOST_KEY],
+  install_keys: [KEY_A],
+  sudoers: false,
 };
 const MCP_CONFIG = { server_name: "srv", transport: "http", url: "https://mcp.example.com/mcp" };
 /** The config `--name srv --transport http --url …` parses to: the schema adds the default revision. */
@@ -1254,7 +1269,7 @@ describe("audit's filters under --url are judged before any request (C-11)", () 
   });
 });
 
-describe("secret allow under --url: each of the 15 flag groups alone is a set (T5)", () => {
+describe("secret allow under --url: each of the 16 flag groups alone is a set (T5)", () => {
   it.each<{ flag: string; args: string[]; set: Record<string, unknown> }>([
     { flag: "--command", args: ["--command", "git"], set: { command_allowlist: ["git"] } },
     {
@@ -1291,6 +1306,7 @@ describe("secret allow under --url: each of the 15 flag groups alone is a set (T
     { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
     { flag: "--local-dir", args: ["--local-dir", "/srv/out"], set: { local_dirs: ["/srv/out"] } },
     { flag: "--clear", args: ["--clear"], set: {} },
+    { flag: "--clear-bootstrap", args: ["--clear-bootstrap"], set: { ssh_bootstrap: null } },
   ])("$flag alone is a set, not a show", async ({ args, set }) => {
     await run([...rest, "secret", "allow", "secret://k", ...args]);
     expect(mockClient.setInjectionPolicy.mock.calls).toEqual([
@@ -1304,6 +1320,84 @@ describe("secret allow under --url: each of the 15 flag groups alone is a set (T
     await run([...rest, "secret", "allow", "secret://k", "--acknowledge-interpreter"]);
     expect(clientCalls()).toEqual({ getInjectionPolicy: [["secret://k"]] });
     expect(spies.stdout()).toBe(JSON.stringify(STORED_POLICY, null, 2));
+  });
+});
+
+describe("secret allow under --url: each bootstrap flag alone is a set on a stored block (4b B1)", () => {
+  const STORED = { ...STORED_POLICY, ssh_bootstrap: BOOTSTRAP_BLOCK };
+
+  beforeEach(() => {
+    mockClient.getInjectionPolicy.mockResolvedValue(STORED);
+  });
+
+  it.each<{ flag: string; args: string[]; set: Record<string, unknown> }>([
+    {
+      flag: "--bootstrap-host",
+      args: ["--bootstrap-host", "h2.example"],
+      set: { host: "h2.example" },
+    },
+    { flag: "--bootstrap-port", args: ["--bootstrap-port", "2222"], set: { port: 2222 } },
+    { flag: "--bootstrap-user", args: ["--bootstrap-user", "deploy"], set: { user: "deploy" } },
+    {
+      flag: "--bootstrap-host-key",
+      args: ["--bootstrap-host-key", KEY_B],
+      set: { host_keys: [KEY_B] },
+    },
+    { flag: "--bootstrap-key", args: ["--bootstrap-key", KEY_B], set: { install_keys: [KEY_B] } },
+    { flag: "--bootstrap-sudoers", args: ["--bootstrap-sudoers"], set: { sudoers: true } },
+  ])("$flag alone is a set, not a show", async ({ args, set }) => {
+    await run([...rest, "secret", "allow", "secret://k", ...args]);
+    expect(mockClient.setInjectionPolicy.mock.calls).toEqual([
+      [
+        "secret://k",
+        { ...STORED, ssh_bootstrap: { ...BOOTSTRAP_BLOCK, ...set } },
+        { acknowledge_interpreters: false },
+      ],
+    ]);
+    expect(spies.stdout()).toBe("");
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+});
+
+describe("secret allow under --url: the bootstrap flags are judged as in-process (4b B1)", () => {
+  it.each<[string, string[], string]>([
+    [
+      "--clear-bootstrap beside a bootstrap flag",
+      ["--clear-bootstrap", "--bootstrap-host", "h2.example"],
+      "Error: [INVALID_INPUT] --clear-bootstrap conflicts with --bootstrap-host",
+    ],
+    [
+      "a port that is no decimal number",
+      ["--bootstrap-port", "0x16"],
+      'Error: [INVALID_INPUT] Invalid bootstrap-port "0x16". Must be 1-65535.',
+    ],
+  ])("refused before any request, on a stored block too: %s", async (_case, args, line) => {
+    mockClient.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      ssh_bootstrap: BOOTSTRAP_BLOCK,
+    });
+    await expect(run([...rest, "secret", "allow", "secret://k", ...args])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(clientCalls()).toEqual({});
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
+
+  it("a lone --no-bootstrap-sudoers on a secret without a block is refused after the read and before the write", async () => {
+    await expect(
+      run([...rest, "secret", "allow", "secret://k", "--no-bootstrap-sudoers"]),
+    ).rejects.toThrow("process.exit");
+    const stderr = spies.stderr();
+    expect(stderr).toMatch(/^Error: \[SCHEMA_VALIDATION_ERROR\] /);
+    expect(stderr).toContain("ssh_bootstrap.host: ");
+    expect(stderr).toContain("ssh_bootstrap.user: ");
+    expect(stderr).toContain("ssh_bootstrap.host_keys: ");
+    expect(stderr).toContain("ssh_bootstrap.install_keys: ");
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(clientCalls()).toEqual({ getInjectionPolicy: [["secret://k"]] });
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
 });
 

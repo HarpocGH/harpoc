@@ -4,6 +4,7 @@ import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { HarpocEnv } from "../types.js";
 import {
   AUTH,
+  EXPECTED_CALLER,
   NON_OBJECT_BODIES,
   buildSecretsApp,
   createMockEngine,
@@ -507,6 +508,41 @@ describe("POST /api/v1/secrets/:handle/use — git fetch and ls-remote (B9)", ()
     expect(await res.json()).toStrictEqual({
       error: ErrorCode.SCHEMA_VALIDATION_ERROR,
       message: "action.refspecs: Invalid input: expected array, received string",
+    });
+    expect(engine.useSecret).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/v1/secrets/:handle/use — the ssh bootstrap (4b B9)", () => {
+  const KEY_A =
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+  const BOOT = {
+    type: "ssh",
+    operation: "bootstrap",
+    host: "h1.example",
+    user: "ubuntu",
+    public_key: KEY_A,
+  };
+
+  it("a bootstrap action reaches the engine verbatim and its status comes back as data", async () => {
+    const status = { type: "ssh_bootstrap", key: "installed", sudoers: "not_asked" };
+    engine.useSecret.mockResolvedValueOnce(status);
+    const res = await postUse(BOOT);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toStrictEqual({ data: status });
+    expect(engine.useSecret).toHaveBeenCalledTimes(1);
+    const [handle, action, caller] = engine.useSecret.mock.calls[0] as unknown[];
+    expect(handle).toBe("secret://test-key");
+    expect(action).toStrictEqual(BOOT);
+    expect(caller).toEqual(EXPECTED_CALLER);
+  });
+
+  it("a bootstrap beside a command is 400 naming the key, never reaching the engine", async () => {
+    const res = await postUse({ ...BOOT, command: "id" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toStrictEqual({
+      error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: 'action: Unrecognized key: "command"',
     });
     expect(engine.useSecret).not.toHaveBeenCalled();
   });

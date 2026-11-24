@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, watch } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { untilWritten } from "./__fixtures__/spawn-children.js";
 import { spawnCaptured } from "./spawn-captured.js";
 
 /**
@@ -96,35 +97,6 @@ async function untilGone(pid: number): Promise<boolean> {
     await sleep(GONE_POLL_MS);
   }
   return true;
-}
-
-/**
- * The child's marker — the empty file its stdout write's callback creates, so "before" is in the
- * pipe, or the pid file renamed into place whole — rejected when the spawn settles first or after
- * `boundMs` on `setInterval`, which no row fakes.
- */
-function untilWritten(path: string, spawned: Promise<unknown>, boundMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const watcher = watch(dirname(path), () => {
-      if (existsSync(path)) end();
-    });
-    const bound = setInterval(() => {
-      if (existsSync(path)) end();
-      else end(new Error(`the child's marker did not appear within ${String(boundMs)} ms`));
-    }, boundMs);
-    const end = (err?: Error): void => {
-      watcher.close();
-      clearInterval(bound);
-      if (err) reject(err);
-      else resolve();
-    };
-    const settled = (): void => {
-      if (existsSync(path)) end();
-      else end(new Error("the spawn settled before the child's marker appeared"));
-    };
-    void spawned.then(settled, settled);
-    if (existsSync(path)) end();
-  });
 }
 
 describe("spawnCaptured lifecycle (M4)", () => {

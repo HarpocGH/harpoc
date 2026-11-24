@@ -34,6 +34,7 @@ export const FULL_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
 
 export const MOCK_TOKEN: VaultApiToken = {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { UseSecretAction } from "@harpoc/shared";
 import { MAX_DOCKER_TIMEOUT_MS } from "@harpoc/shared";
 import { actionTimeoutRefusal } from "./action-timeout.js";
+import { BOOT } from "./__fixtures__/ssh-public-keys.js";
 
 const CONTEXTS = [
   "http",
@@ -44,6 +45,11 @@ describe("actionTimeoutRefusal", () => {
     for (const value of [undefined, 1, cap(type)]) {
       expect(actionTimeoutRefusal(action(type, value))).toBeUndefined();
     }
+  });
+
+  it("a bootstrap action passes the table: it carries no timeout_ms", () => {
+    expect(actionTimeoutRefusal(BOOT)).toBeUndefined();
+    expect(actionTimeoutRefusal({ ...BOOT, port: 2222, sudoers: true })).toBeUndefined();
   });
 
   it("the database context is not judged here", () => {

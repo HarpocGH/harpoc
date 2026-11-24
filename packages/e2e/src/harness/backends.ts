@@ -26,8 +26,10 @@ export const MYSQL = {
 } as const;
 
 /**
- * The sshd containers are published on loopback ALIASES at port 22, not the
- * 55xxx offset the database services use. The aliases predate the SshAction
+ * The sshd containers of the `ssh` context are published on loopback ALIASES at
+ * port 22, not the 55xxx offset the database services use; the two
+ * `sshd-bootstrap-*` targets are on 127.0.0.1 at 55122 and 55123
+ * (`harness/bootstrap.ts`). The aliases predate the SshAction
  * `port` field (D59) and are retained, not forced: with a port the two
  * servers could share one address. `127.0.0.2` and `127.0.0.3` are distinct
  * loopback addresses — all of 127/8 is loopback on Linux and Windows (verified
@@ -261,6 +263,8 @@ export type FleetService =
   | "mysql-tls"
   | "sshd-pinned"
   | "sshd-rogue"
+  | "sshd-bootstrap-sudo"
+  | "sshd-bootstrap-sudo-rs"
   | "git-http"
   | "git-https"
   | "echo-https"
@@ -273,10 +277,10 @@ export type FleetService =
   | "mongo"
   | "registry";
 
-const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));
+export const COMPOSE_DIR = fileURLToPath(new URL("../..", import.meta.url));
 
 /** Overridable for hosts where Docker is installed outside PATH. */
-const DOCKER = process.env["HARPOC_E2E_DOCKER"] ?? "docker";
+export const DOCKER = process.env["HARPOC_E2E_DOCKER"] ?? "docker";
 
 /**
  * `docker compose ps --format json` emits a JSON array on some versions and one

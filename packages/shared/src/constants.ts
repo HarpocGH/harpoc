@@ -171,6 +171,8 @@ export const MAX_MCP_STDOUT_BUFFER_BYTES = 4_194_304; // 4 MiB unframed downstre
 export const DEFAULT_DB_TIMEOUT_MS = 30_000; // connect + query budget
 export const DEFAULT_GIT_TIMEOUT_MS = 120_000; // clone/pull/push may be slow
 export const DEFAULT_SSH_TIMEOUT_MS = 30_000; // remote command budget
+export const SSH_BOOTSTRAP_TIMEOUT_MS = 120_000; // the ssh bootstrap's whole budget, under the session's idle window
+export const SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC = 15; // the ssh bootstrap's ConnectTimeout
 export const MAX_DB_ROWS = 10_000; // result-set row cap (flags truncated)
 export const MAX_DB_RESULT_BYTES = 1_048_576; // 1 MiB serialized result set
 

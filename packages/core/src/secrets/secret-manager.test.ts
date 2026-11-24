@@ -406,6 +406,44 @@ describe("revokeSecret", () => {
   });
 });
 
+describe("revokeResolved", () => {
+  it("revokeResolved writes the status with its onCommit, and a throw there rolls it back", async () => {
+    await manager.createSecret({
+      name: "ends",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    await manager.createSecret({
+      name: "stays",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from("v")),
+    });
+    const ends = await manager.resolveHandle("secret://ends");
+    const stays = await manager.resolveHandle("secret://stays");
+
+    const seen: string[] = [];
+    manager.revokeResolved(ends, (secretId) => {
+      seen.push(secretId);
+      store.setMeta("committed_with", secretId);
+    });
+    expect(seen).toEqual([ends.id]);
+    expect(store.getSecret(ends.id)?.status).toBe("revoked");
+    expect(store.getMeta("committed_with")).toBe(ends.id);
+
+    expect(() =>
+      manager.revokeResolved(stays, (secretId) => {
+        store.setMeta("rolled_back", secretId);
+        throw new Error("commit refused");
+      }),
+    ).toThrow("commit refused");
+    expect(store.getSecret(stays.id)?.status).toBe("active");
+    expect(store.getMeta("rolled_back")).toBeUndefined();
+
+    manager.revokeResolved(stays);
+    expect(store.getSecret(stays.id)?.status).toBe("revoked");
+  });
+});
+
 describe("resolveHandle", () => {
   it("resolves a simple handle", async () => {
     await manager.createSecret({

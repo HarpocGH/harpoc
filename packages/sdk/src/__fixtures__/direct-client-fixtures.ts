@@ -23,6 +23,7 @@ export const FULL_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [] as string[],
+  ssh_bootstrap: null,
 };
 
 /** The VaultEngine methods DirectClient calls, each a vitest mock. */

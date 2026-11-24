@@ -33,6 +33,7 @@ describe("injectionPolicyInputSchema", () => {
       proxy: false,
       ssh_agent_socket: false,
       local_dirs: [],
+      ssh_bootstrap: null,
     });
   });
 
@@ -191,6 +192,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: [],
+    ssh_bootstrap: null,
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -227,6 +229,16 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     }
   });
 
+  it("refuses a missing ssh_bootstrap, naming it — the read-side default lives in core, never here", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { ssh_bootstrap: _dropped, ...partial } = complete;
+    const result = injectionPolicySchema.safeParse(partial);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_bootstrap"]);
+    }
+  });
+
   it("refuses an unknown key (strict)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
@@ -238,10 +250,10 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     );
   });
 
-  it("applies no defaults — an empty object is fourteen misses", () => {
+  it("applies no defaults — an empty object is fifteen misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(14);
+    if (!result.success) expect(result.error.issues).toHaveLength(15);
   });
 
   it.each(["/srv/out", "/", "C:\\data", "c:/data/out"])("accepts the local directory %j", (dir) => {
@@ -319,6 +331,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: ["/srv/out"],
+    ssh_bootstrap: null,
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
@@ -356,6 +369,16 @@ describe("setInjectionPolicyRequestSchema", () => {
     expect(wire.success).toBe(false);
     if (!wire.success) {
       expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_agent_socket"]);
+    }
+  });
+
+  it("requires ssh_bootstrap on the wire — a body without it is refused naming ssh_bootstrap alone", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { ssh_bootstrap: _omitted, ...fourteenFields } = complete;
+    const wire = setInjectionPolicyRequestSchema.safeParse(fourteenFields);
+    expect(wire.success).toBe(false);
+    if (!wire.success) {
+      expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_bootstrap"]);
     }
   });
 

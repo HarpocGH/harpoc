@@ -24,6 +24,12 @@ function expectNotExposed(...texts: string[]): void {
   }
 }
 
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const BOOTSTRAP_HOST_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
+const BOOTSTRAP_KEY =
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+
 /** What the create route answers (201) — not a SecretInfo. */
 const created = { handle: "secret://n1", status: "created", message: "Secret created" };
 
@@ -495,6 +501,7 @@ describe("PolicyEditor", () => {
         proxy: false,
         ssh_agent_socket: false,
         local_dirs: [],
+        ssh_bootstrap: null,
       },
     ]);
   });
@@ -548,6 +555,7 @@ describe("PolicyEditor", () => {
         proxy: false,
         ssh_agent_socket: false,
         local_dirs: [],
+        ssh_bootstrap: null,
       },
     ]);
   });
@@ -627,6 +635,40 @@ describe("PolicyEditor", () => {
       "/srv/out",
       "C:\\data",
     ]);
+  });
+
+  it("sends a stored bootstrap block back unchanged and says it is not edited here", async () => {
+    const block = {
+      host: "h1.example",
+      port: 2222,
+      user: "ubuntu",
+      host_keys: [BOOTSTRAP_HOST_KEY],
+      install_keys: [BOOTSTRAP_KEY],
+      sudoers: true,
+    };
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ ssh_bootstrap: block }}
+        onDone={vi.fn()}
+      />,
+    );
+    const note = screen.getByText(/are not editable here/);
+    expect(Array.from(note.querySelectorAll("code"), (code) => code.textContent)).toEqual([
+      "env_allowlist",
+      "response_header_allowlist",
+      "smtp_recipient_allowlist",
+      "imap_read_only",
+      "ssh_bootstrap",
+    ]);
+    expect((note.textContent as string).replace(/\s+/g, " ").trim()).toBe(
+      "env_allowlist, response_header_allowlist, smtp_recipient_allowlist, imap_read_only and ssh_bootstrap are not editable here and are sent back unchanged.",
+    );
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["ssh_bootstrap"]).toEqual(block);
   });
 
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {

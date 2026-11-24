@@ -502,6 +502,17 @@ export interface SshResult {
 }
 
 /**
+ * Result of an ssh bootstrap (design 4b A4, B7): a status and no output — nothing the
+ * host wrote comes back. `key` says whether the line was appended or already there,
+ * `sudoers` what became of the drop-in.
+ */
+export interface SshBootstrapResult {
+  type: "ssh_bootstrap";
+  key: "installed" | "present";
+  sudoers: "written" | "present" | "not_asked";
+}
+
+/**
  * Result of an SFTP use_secret invocation (design §4.7): process-shaped, like
  * `SshResult` — the sftp client's own exit status plus captured, sanitized
  * output. There is no per-path echo: the transferred file's content never
@@ -577,6 +588,7 @@ export type UseSecretResponse =
   | DatabaseResult
   | GitResult
   | SshResult
+  | SshBootstrapResult
   | SmtpResult
   | ImapResult
   | WebsocketResult

@@ -56,6 +56,8 @@ import {
   SESSION_FILE_NAME,
   SESSION_SLIDE_INTERVAL_MS,
   SQLITE_PRAGMAS,
+  SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC,
+  SSH_BOOTSTRAP_TIMEOUT_MS,
   VAULT_AUDIT_ENABLED,
   VAULT_DB_NAME,
   VAULT_DIR_NAME,
@@ -377,6 +379,15 @@ describe("vault defaults", () => {
     ["MAX_PROCESS_OUTPUT_BYTES", 1_048_576, MAX_PROCESS_OUTPUT_BYTES],
   ] as const)("%s is %i (M-P2-25, I23)", (_name, expected, value) => {
     expect(value).toBe(expected);
+  });
+
+  it("the bootstrap's budget stays under the session's idle window and over its connection bound", () => {
+    expect(SSH_BOOTSTRAP_TIMEOUT_MS).toBe(120_000);
+    expect(SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC).toBe(15);
+    expect(SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC * 1_000).toBeLessThan(SSH_BOOTSTRAP_TIMEOUT_MS);
+    expect(SSH_BOOTSTRAP_TIMEOUT_MS + SESSION_SLIDE_INTERVAL_MS).toBeLessThan(
+      DEFAULT_SESSION_TTL_MS,
+    );
   });
 });
 

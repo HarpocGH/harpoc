@@ -86,7 +86,12 @@ describe("useSecret — an out-of-schema timeout_ms of an unparsed caller", () =
         () =>
           engine.useSecret(
             HANDLE,
-            unparsed({ type, security: "tls", operation: { kind: "search" }, timeout_ms: 0 }),
+            unparsed({
+              type,
+              security: "tls",
+              ...(type === "ssh" ? {} : { operation: { kind: "search" } }),
+              timeout_ms: 0,
+            }),
           ),
         ErrorCode.INVALID_INPUT,
       );

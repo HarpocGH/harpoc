@@ -1,5 +1,6 @@
-import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
-import type { McpConnectionRegistry } from "../injection/mcp-registry.js";
+import { AAD_INJECTION_POLICY, AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
+import { encrypt } from "../crypto/aes-gcm.js";
+import type { McpConnectionEntry, McpConnectionRegistry } from "../injection/mcp-registry.js";
 import type { SecretManager } from "../secrets/secret-manager.js";
 import type { SqliteStore } from "../storage/sqlite-store.js";
 import type { VaultEngine } from "../vault-engine.js";
@@ -25,6 +26,34 @@ export function registryOf(engine: VaultEngine): McpConnectionRegistry {
 }
 
 /**
+ * Publish a ready stdio entry into the engine's registry without spawning a
+ * child: something live to tear down, closed through `close`.
+ */
+export async function seedLiveStdioEntry(
+  engine: VaultEngine,
+  secretId: string,
+  close: () => Promise<unknown> = () => Promise.resolve(),
+): Promise<void> {
+  const client = { onclose: undefined, close };
+  await registryOf(engine).acquire(secretId, () =>
+    Promise.resolve({
+      secretId,
+      serverName: "docs",
+      transportKind: "stdio",
+      client: client as unknown as McpConnectionEntry["client"],
+      state: "connecting",
+      crashed: false,
+      credentialFingerprint: "cred-fp",
+      configFingerprint: "config-fp",
+      isolation: { network: false, fs: false },
+      strictTreeExit: false,
+      spawnedAt: Date.now(),
+      lastUsedAt: Date.now(),
+    } satisfies McpConnectionEntry),
+  );
+}
+
+/**
  * Keep every plaintext the engine's live secret manager decrypts — the very
  * `Uint8Array` `getSecretValue` hands the engine, by reference, never a copy —
  * so a test can observe the engine's own wipe of it (C5). The manager is
@@ -40,6 +69,32 @@ export function retainDecryptedValues(engine: VaultEngine): Uint8Array[] {
     return value;
   };
   return retained;
+}
+
+/**
+ * Store `blob` as a secret's injection policy past `setInjectionPolicy`, which
+ * refuses some stored states a suite needs (test seam — private fields).
+ */
+export function storeInjectionPolicyBlob(
+  engine: VaultEngine,
+  secretId: string,
+  blob: unknown,
+): void {
+  const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+  const enc = encrypt(
+    kek,
+    new Uint8Array(Buffer.from(JSON.stringify(blob), "utf8")),
+    AAD_INJECTION_POLICY(secretId),
+  );
+  const now = Date.now();
+  store.upsertInjectionPolicy({
+    secret_id: secretId,
+    policy_encrypted: enc.ciphertext,
+    policy_iv: enc.iv,
+    policy_tag: enc.tag,
+    created_at: now,
+    updated_at: now,
+  });
 }
 
 /**

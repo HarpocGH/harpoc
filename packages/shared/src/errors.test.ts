@@ -95,6 +95,12 @@ const STATUS_CASES = [
   [ErrorCode.SSH_NOT_CONFIGURED, 400],
   [ErrorCode.INVALID_SSH_CONFIG, 400],
   [ErrorCode.SSH_CLIENT_UNSUPPORTED, 501],
+  [ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED, 403],
+  [ErrorCode.SSH_PASSWORD_NOT_OFFERED, 502],
+  [ErrorCode.SSH_PASSWORD_REFUSED, 502],
+  [ErrorCode.SSH_BOOTSTRAP_STEP_FAILED, 502],
+  [ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED, 502],
+  [ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT, 409],
   [ErrorCode.GIT_OPERATION_FAILED, 502],
   [ErrorCode.GIT_UNSUPPORTED_TRANSPORT, 400],
   [ErrorCode.INVALID_GIT_CONFIG, 400],
@@ -404,6 +410,99 @@ describe("factory methods", () => {
     expect(err.message).toBe(
       "Unsupported ssh client: the binary resolved under C:\\Program Files\\Git\\usr\\bin is an MSYS/Cygwin build (msys-2.0.dll or cygwin1.dll beside it), which cannot reach the vault's named-pipe ssh-agent; allowlist the native Win32-OpenSSH client (C:\\Windows\\System32\\OpenSSH\\ssh.exe) and put its directory ahead of Git's usr\\bin on PATH",
     );
+  });
+
+  it.each([
+    [
+      "no_block",
+      "SSH bootstrap not allowed: the secret's injection policy holds no bootstrap block",
+    ],
+    ["target", "SSH bootstrap not allowed: host, user or port is not the bootstrap block's"],
+    ["key", "SSH bootstrap not allowed: the public key is not one the bootstrap block lists"],
+    ["sudoers", "SSH bootstrap not allowed: the bootstrap block does not allow the sudoers rule"],
+    [
+      "bootstrap_only",
+      "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
+    ],
+  ] as const)(
+    "sshBootstrapNotAllowed(%s) maps to 403 with its fixed text and no details",
+    (reason, text) => {
+      const err = VaultError.sshBootstrapNotAllowed(reason);
+      expect(err.code).toBe(ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED);
+      expect(err.statusCode).toBe(403);
+      expect(err.message).toBe(text);
+      expect(err.details).toBeUndefined();
+    },
+  );
+
+  it("sshPasswordNotOffered() maps to 502 with one fixed text", () => {
+    const err = VaultError.sshPasswordNotOffered();
+    expect(err.code).toBe(ErrorCode.SSH_PASSWORD_NOT_OFFERED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe("SSH bootstrap refused: the server does not offer password login");
+  });
+
+  it("sshPasswordRefused() maps to 502 and says a repeat can lock the vault host out of the server", () => {
+    const err = VaultError.sshPasswordRefused();
+    expect(err.code).toBe(ErrorCode.SSH_PASSWORD_REFUSED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe(
+      "SSH bootstrap refused: the server refused the stored password; repeating the bootstrap can lock the vault host out of the server",
+    );
+  });
+
+  it("sshBootstrapStepFailed(dropIn, key) names the two words and nothing else", () => {
+    const err = VaultError.sshBootstrapStepFailed("refused", "not_attempted");
+    expect(err.code).toBe(ErrorCode.SSH_BOOTSTRAP_STEP_FAILED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe(
+      "SSH bootstrap failed: no key was installed (sudoers: refused, key: not_attempted)",
+    );
+    expect(err.details).toBeUndefined();
+  });
+
+  it("sshBootstrapUnconfirmed() maps to 502 and says a key and a sudoers drop-in may be installed", () => {
+    const err = VaultError.sshBootstrapUnconfirmed();
+    expect(err.code).toBe(ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).toBe(
+      "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host",
+    );
+  });
+
+  it("sshBootstrapInFlight() maps to 409", () => {
+    const err = VaultError.sshBootstrapInFlight();
+    expect(err.code).toBe(ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT);
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(
+      "SSH bootstrap in flight: another bootstrap of this secret is running",
+    );
+  });
+
+  it("sshBootstrapOnWindows() is SSH_CLIENT_UNSUPPORTED (501) with its fixed text", () => {
+    const err = VaultError.sshBootstrapOnWindows();
+    expect(err.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(err.statusCode).toBe(501);
+    expect(err.message).toBe(
+      "Unsupported ssh client: the ssh bootstrap is not served on a Windows vault host",
+    );
+  });
+
+  it("sshClientBelowFloor() names the version found, or that none was read", () => {
+    const unread = VaultError.sshClientBelowFloor(null, "8.4");
+    expect(unread.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(unread.statusCode).toBe(501);
+    expect(unread.message).toBe(
+      "Unsupported ssh client: its version could not be read; an ssh bootstrap needs OpenSSH 8.4 or later",
+    );
+    expect(unread.details).toBeUndefined();
+    const older = VaultError.sshClientBelowFloor("8.0", "8.4");
+    expect(older.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(older.statusCode).toBe(501);
+    expect(older.message).toBe(
+      "Unsupported ssh client: OpenSSH 8.0 is older than 8.4, which an ssh bootstrap needs",
+    );
+    expect(older.details).toBeUndefined();
   });
 
   it("misdirectedRequest() names the parsed hostname, or the missing header", () => {

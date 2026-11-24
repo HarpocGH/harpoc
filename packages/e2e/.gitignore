@@ -4,6 +4,7 @@
 /fixtures/pki/out/
 /fixtures/keys/out/
 /fixtures/repos/out/
+/fixtures/sshd-bootstrap/out/
 /evidence/
 # Generated Chapter 6 tables. The citable copies live in docs/thesis/generated/
 # — code here, artifacts there.

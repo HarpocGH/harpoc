@@ -189,6 +189,7 @@ describeLive("E-24, live: the vault's ssh reaches the judged host, whatever git 
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: [],
+    ssh_bootstrap: null,
   });
 
   it.each(ADDRESSES)(

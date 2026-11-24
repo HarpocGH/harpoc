@@ -1,7 +1,7 @@
 import { ErrorCode } from "@harpoc/shared";
 import type { UseSecretResponse } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InjectionGuard } from "./injection-guard.js";
 import { sanitizeUseSecretResult } from "./sanitize-result.js";
 
@@ -182,6 +182,22 @@ describe("sanitizeUseSecretResult", () => {
 
       expectAbsent(result.messages[1], BEARERISH);
       expect(result.messages[0]).toBe("hello");
+    });
+
+    it("ssh_bootstrap: a status result passes unchanged and is never read as an ssh result", () => {
+      const result: UseSecretResponse = {
+        type: "ssh_bootstrap",
+        key: "installed",
+        sudoers: "written",
+      };
+      const spy = vi.spyOn(guard, "sanitize");
+      try {
+        sanitizeUseSecretResult(result, guard);
+        expect(result).toEqual({ type: "ssh_bootstrap", key: "installed", sudoers: "written" });
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("control: text carrying no credential pattern is left byte-identical", () => {

@@ -79,6 +79,7 @@ describeGit("Git clone through the relay — today's clone semantics on real git
       proxy: false,
       ssh_agent_socket: false,
       local_dirs: [],
+      ssh_bootstrap: null,
     };
   }
 

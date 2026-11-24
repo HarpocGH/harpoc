@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import type { InjectionPolicyInput, ResponseMode } from "@harpoc/shared";
+import type { InjectionPolicyInput, ResponseMode, SshBootstrapPolicy } from "@harpoc/shared";
 import type { ApiClient, SetInjectionPolicyRequest } from "../api/client";
 import { ApiError } from "../api/client";
 import { toBase64 } from "../encoding";
@@ -259,7 +259,7 @@ export function PolicyEditor({
 }: {
   api: ApiClient;
   handle: string;
-  initial: InjectionPolicyInput;
+  initial: InjectionPolicyInput & { ssh_bootstrap?: SshBootstrapPolicy | null };
   onDone: () => void;
 }) {
   const [urls, setUrls] = useState((initial.url_allowlist ?? []).join(", "));
@@ -282,12 +282,13 @@ export function PolicyEditor({
       local_dirs: splitLines(localDirs),
       // Not edited here, and a PUT replaces the whole policy — resubmitting
       // them unchanged is the difference between "not edited" and "cleared".
-      // Covers env_allowlist, response_header_allowlist, smtp_recipient_allowlist
-      // and imap_read_only.
+      // Covers env_allowlist, response_header_allowlist, smtp_recipient_allowlist,
+      // imap_read_only and ssh_bootstrap.
       env_allowlist: initial.env_allowlist ?? [],
       response_header_allowlist: initial.response_header_allowlist ?? [],
       smtp_recipient_allowlist: initial.smtp_recipient_allowlist ?? [],
       imap_read_only: initial.imap_read_only ?? false,
+      ssh_bootstrap: initial.ssh_bootstrap ?? null,
       response_mode: mode,
       network_isolation: networkIsolation,
       fs_isolation: fsIsolation,
@@ -318,8 +319,8 @@ export function PolicyEditor({
       </p>
       <p class="empty">
         <code>env_allowlist</code>, <code>response_header_allowlist</code>,{" "}
-        <code>smtp_recipient_allowlist</code> and <code>imap_read_only</code> are not editable here
-        and are sent back unchanged.
+        <code>smtp_recipient_allowlist</code>, <code>imap_read_only</code> and{" "}
+        <code>ssh_bootstrap</code> are not editable here and are sent back unchanged.
       </p>
       <label for="policy-urls">URL allowlist (comma-separated)</label>
       <input

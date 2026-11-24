@@ -43,6 +43,7 @@ const POLICY: InjectionPolicy = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
 
 function action(engine: DbTlsEngine, host: string, port: number): DatabaseAction {

@@ -76,10 +76,10 @@ describe("enum member counts", () => {
     expect(Object.values(OAuthProviderPreset)).toHaveLength(5);
   });
 
-  it("ErrorCode has 121 members", () => {
+  it("ErrorCode has 127 members", () => {
     // Filter out reverse mappings (numeric keys) from TypeScript enum
     const members = Object.values(ErrorCode).filter((v) => typeof v === "string");
-    expect(members).toHaveLength(121);
+    expect(members).toHaveLength(127);
   });
 
   it("TokenPrincipalType has 3 members and excludes project", () => {

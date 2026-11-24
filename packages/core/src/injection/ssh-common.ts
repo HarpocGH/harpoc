@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { VaultError } from "@harpoc/shared";
+import type { SshPublicKey } from "./ssh-common-keys.js";
 
 /** A file written for one ssh invocation, removed with its directory on dispose. */
 export interface TempSshFile {
@@ -92,6 +93,20 @@ function quoteSshOptionValue(value: string): string {
   return `"${value}"`;
 }
 
+/** No configuration file, and strict host-key checking against the vault's pin and its empty global file alone. */
+function sshHostKeyArgs(knownHosts: Pick<KnownHostsFiles, "file" | "globalFile">): string[] {
+  return [
+    "-F",
+    "none",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    `UserKnownHostsFile=${quoteSshOptionValue(knownHosts.file)}`,
+    "-o",
+    `GlobalKnownHostsFile=${quoteSshOptionValue(knownHosts.globalFile)}`,
+  ];
+}
+
 /**
  * Hardened ssh options (thesis §4.5.7): strict host-key verification against the
  * pinned known_hosts alone (no TOFU, and no host-wide `ssh_known_hosts` — S9:
@@ -111,14 +126,7 @@ export function sshHardeningArgs(
   connectTimeoutSec = 15,
 ): string[] {
   return [
-    "-F",
-    "none",
-    "-o",
-    "StrictHostKeyChecking=yes",
-    "-o",
-    `UserKnownHostsFile=${quoteSshOptionValue(knownHosts.file)}`,
-    "-o",
-    `GlobalKnownHostsFile=${quoteSshOptionValue(knownHosts.globalFile)}`,
+    ...sshHostKeyArgs(knownHosts),
     "-o",
     "IdentitiesOnly=yes",
     "-i",
@@ -130,6 +138,81 @@ export function sshHardeningArgs(
     "-o",
     `ConnectTimeout=${connectTimeoutSec}`,
   ];
+}
+
+/**
+ * The ssh bootstrap's options: `sshHardeningArgs`'s host-key pairs, then password login as
+ * the one method through the forced askpass helper, no agent, no identity, no sharing, no
+ * forwarding, no terminal and no escape character. Both spellings of the keyboard-interactive
+ * switch: on 8.4 to 8.6 `KbdInteractiveAuthentication=no` alone does not turn the method off.
+ * `LogLevel=ERROR` drops the server's banner and keeps ssh's refusal line.
+ */
+export function sshPasswordLoginArgs(
+  knownHosts: Pick<KnownHostsFiles, "file" | "globalFile">,
+  connectTimeoutSec: number,
+): string[] {
+  return [
+    ...sshHostKeyArgs(knownHosts),
+    "-o",
+    "PreferredAuthentications=password",
+    "-o",
+    "PubkeyAuthentication=no",
+    "-o",
+    "KbdInteractiveAuthentication=no",
+    "-o",
+    "ChallengeResponseAuthentication=no",
+    "-o",
+    "PasswordAuthentication=yes",
+    "-o",
+    "NumberOfPasswordPrompts=1",
+    "-o",
+    "BatchMode=no",
+    "-o",
+    `ConnectTimeout=${connectTimeoutSec}`,
+    "-o",
+    "IdentityAgent=none",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "IdentityFile=none",
+    "-o",
+    "CheckHostIP=no",
+    "-o",
+    "UpdateHostKeys=no",
+    "-o",
+    "VerifyHostKeyDNS=no",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "RequestTTY=no",
+    "-o",
+    "EscapeChar=none",
+    "-o",
+    "LogLevel=ERROR",
+  ];
+}
+
+/** One known_hosts line per key: the bare host for port 22, `[host]:port` otherwise. */
+export function knownHostsLines(
+  host: string,
+  port: number,
+  keys: readonly SshPublicKey[],
+): string[] {
+  const name = port === 22 ? host : `[${host}]:${String(port)}`;
+  return keys.map((key) => `${name} ${key.line}`);
+}
+
+/** The password prompt OpenSSH builds for `user` on `host`, one blank after the colon. */
+export function sshPasswordPrompt(user: string, host: string): string {
+  return `${user}@${host}'s password: `;
 }
 
 /** The charset of `sshHostSchema` and `sshUserSchema`: 1–255 of letters, digits, `.`, `_`, `-`, not leading with `.`, `_` or `-`. */
@@ -161,6 +244,13 @@ export function isHostKeyFailure(text: string): boolean {
  * environment is not inherited.
  */
 export function buildSshEnv(authSock: string, envAllowlist: string[]): Record<string, string> {
+  const env = baseSshEnv(envAllowlist);
+  env.SSH_AUTH_SOCK = authSock;
+  return env;
+}
+
+/** `buildSshEnv` without the agent socket: PATH, on Windows SystemRoot and ProgramData, and the allowlisted names. */
+export function baseSshEnv(envAllowlist: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
   const path = process.env.PATH ?? process.env.Path;
   if (path) env.PATH = path;
@@ -172,7 +262,27 @@ export function buildSshEnv(authSock: string, envAllowlist: string[]): Record<st
     const v = process.env[name];
     if (v !== undefined) env[name] = v;
   }
-  env.SSH_AUTH_SOCK = authSock;
+  return env;
+}
+
+/**
+ * The ssh bootstrap's environment: `baseSshEnv` without the agent socket's and the display's
+ * variables, then the forced askpass helper and its three variables, written after the
+ * allowlisted names so an entry cannot shadow them.
+ */
+export function buildSshPasswordEnv(
+  envAllowlist: readonly string[],
+  helper: { launcher: string; prompt: string; word: string; password: string },
+): Record<string, string> {
+  const env = baseSshEnv(envAllowlist);
+  delete env.SSH_AUTH_SOCK;
+  delete env.DISPLAY;
+  delete env.WAYLAND_DISPLAY;
+  env.SSH_ASKPASS = helper.launcher;
+  env.SSH_ASKPASS_REQUIRE = "force";
+  env.HARPOC_SSH_PROMPT = helper.prompt;
+  env.HARPOC_SSH_WORD = helper.word;
+  env.HARPOC_SSH_PASSWORD = helper.password;
   return env;
 }
 

@@ -9,6 +9,18 @@ import {
   createMockEngine,
 } from "./__fixtures__/secrets-app.js";
 
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const BOOTSTRAP_BLOCK = {
+  host: "h1.example",
+  port: 2222,
+  user: "ubuntu",
+  host_keys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx"],
+  install_keys: [
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=",
+  ],
+  sudoers: true,
+};
+
 type ErrorBody = { error: string; message: string };
 type DataBody = { data: unknown };
 type DeletedBody = { data: { deleted: boolean } };
@@ -335,6 +347,29 @@ describe("secret routes", () => {
       expect(get.status).toBe(200);
       const body = (await get.json()) as { data: { local_dirs: string[] } };
       expect(body.data.local_dirs).toEqual(dirs);
+    });
+
+    it("PUT stores a bootstrap block and GET returns it unchanged (4b B1)", async () => {
+      const put = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ ...FULL_POLICY, ssh_bootstrap: BOOTSTRAP_BLOCK }),
+      });
+      expect(put.status).toBe(200);
+      const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+      expect(call.slice(0, 3)).toEqual([
+        "secret://test-key",
+        { ...FULL_POLICY, ssh_bootstrap: BOOTSTRAP_BLOCK },
+        { acknowledge_interpreters: false },
+      ]);
+      engine.getInjectionPolicy.mockResolvedValueOnce(call[1]);
+      const get = await app.request("/api/v1/secrets/test-key/injection-policy", {
+        method: "GET",
+        headers: AUTH,
+      });
+      expect(get.status).toBe(200);
+      const body = (await get.json()) as { data: { ssh_bootstrap: unknown } };
+      expect(body.data.ssh_bootstrap).toEqual(BOOTSTRAP_BLOCK);
     });
 
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {

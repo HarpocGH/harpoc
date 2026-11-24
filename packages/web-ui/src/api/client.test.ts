@@ -208,6 +208,7 @@ describe("api client", () => {
       proxy: true,
       ssh_agent_socket: true,
       local_dirs: [],
+      ssh_bootstrap: null,
       acknowledge_interpreters: true,
     };
     await api.putInjectionPolicy("secret://k1", policy);

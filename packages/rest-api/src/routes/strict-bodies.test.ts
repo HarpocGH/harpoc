@@ -37,7 +37,14 @@ const FULL_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
+
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const BOOTSTRAP_HOST_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
+const BOOTSTRAP_KEY =
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
 
 function createMockEngine() {
   const policy = {
@@ -276,6 +283,42 @@ describe("the injection-policy PUT requires local_dirs (S1)", () => {
     const json = (await res.json()) as { error: string; message: string };
     expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     expect(json.message).toBe('<root>: Unrecognized key: "sftp_local_dirs"');
+    expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe("the injection-policy PUT requires ssh_bootstrap (4b B1)", () => {
+  it("a PUT without ssh_bootstrap is 400 SCHEMA_VALIDATION_ERROR naming it", async () => {
+    const { app, engine } = build();
+    const partial = Object.fromEntries(
+      Object.entries(FULL_POLICY).filter(([key]) => key !== "ssh_bootstrap"),
+    );
+    const res = await send(app, "PUT", "/api/v1/secrets/k/injection-policy", partial);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; message: string };
+    expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(json.message).toBe("ssh_bootstrap: Invalid input: expected object, received undefined");
+    expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
+  it("a block without port is 400 SCHEMA_VALIDATION_ERROR naming the port", async () => {
+    const { app, engine } = build();
+    const res = await send(app, "PUT", "/api/v1/secrets/k/injection-policy", {
+      ...FULL_POLICY,
+      ssh_bootstrap: {
+        host: "h1.example",
+        user: "ubuntu",
+        host_keys: [BOOTSTRAP_HOST_KEY],
+        install_keys: [BOOTSTRAP_KEY],
+        sudoers: false,
+      },
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; message: string };
+    expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(json.message).toBe(
+      "ssh_bootstrap.port: Invalid input: expected number, received undefined",
+    );
     expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
   });
 });

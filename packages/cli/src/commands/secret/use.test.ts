@@ -945,6 +945,25 @@ describe("secret use — buildAction maps each documented flag (I24)", () => {
   };
   const IMAP_ARGS = ["--action", "imap", "--host", "127.0.0.1"];
   const IMAP_ACTION = { type: "imap", host: "127.0.0.1", port: 993, mailbox: "INBOX" };
+  const BOOTSTRAP_KEY =
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+  const BOOTSTRAP_ARGS = [
+    "--action",
+    "ssh",
+    "--operation",
+    "bootstrap",
+    "--host",
+    "h1.example",
+    "--user",
+    "ubuntu",
+  ];
+  const BOOT = {
+    type: "ssh",
+    operation: "bootstrap",
+    host: "h1.example",
+    user: "ubuntu",
+    public_key: BOOTSTRAP_KEY,
+  };
   let spies: CliSpies;
 
   beforeEach(() => {
@@ -1095,6 +1114,46 @@ describe("secret use — buildAction maps each documented flag (I24)", () => {
     await run(["secret://k", ...IMAP_ARGS, "--operation", "expunge", "--port", "1993"]);
     expect(actionOf()).toEqual({ ...IMAP_ACTION, port: 1993, operation: { kind: "expunge" } });
   });
+
+  it("--operation bootstrap with --public-key and --sudoers builds the bootstrap action", async () => {
+    await run(["secret://k", ...BOOTSTRAP_ARGS, "--public-key", BOOTSTRAP_KEY, "--sudoers"]);
+    expect(actionOf()).toEqual({ ...BOOT, sudoers: true });
+  });
+
+  it("--command beside --operation bootstrap is refused naming command, nothing run", async () => {
+    await expect(
+      run(["secret://k", ...BOOTSTRAP_ARGS, "--public-key", BOOTSTRAP_KEY, "--command", "id"]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      'Error: [SCHEMA_VALIDATION_ERROR] <root>: Unrecognized key: "command"',
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("--operation clone with --action ssh is refused", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "ssh",
+        "--host",
+        "h1.example",
+        "--user",
+        "ubuntu",
+        "--command",
+        "id",
+        "--operation",
+        "clone",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      "Error: [SCHEMA_VALIDATION_ERROR] operation: must be one of bootstrap",
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+  });
 });
 
 // B9 (M6): the git operations fetch and ls-remote and the repeatable --refspec,
@@ -1136,7 +1195,7 @@ describe("secret use — git fetch and ls-remote (B9)", () => {
     const description = (flag: string): string | undefined =>
       use?.options.find((o) => o.long === flag)?.description;
     expect(description("--operation")).toBe(
-      "Operation: clone|pull|push|fetch|ls-remote (git); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
     );
     expect(description("--refspec")).toBe(
       "Refspec selecting what to fetch from the repository (repeatable, git fetch)",
@@ -1801,5 +1860,11 @@ describe("summarizeResult renders every context", () => {
         stderr: "",
       }),
     ).toMatchObject({ type: "docker_registry", operation: "pull", exit_code: 1 });
+  });
+
+  it("ssh_bootstrap reports the key and the sudoers status", () => {
+    expect(
+      summarizeResult({ type: "ssh_bootstrap", key: "present", sudoers: "not_asked" }),
+    ).toEqual({ type: "ssh_bootstrap", key: "present", sudoers: "not_asked" });
   });
 });

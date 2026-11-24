@@ -19,6 +19,7 @@ import { isDecimalInteger } from "./decimal-integer.js";
 import { isValidHandle } from "./handle.js";
 import { LOOPBACK_URL_HOSTS } from "./host-allowlist.js";
 import { isValidRecipientPattern } from "./recipient-pattern.js";
+import { SSH_HOST_KEY_TYPES, SSH_INSTALL_KEY_TYPES, sshKeyLineType } from "./ssh-key-line.js";
 import {
   ActionType,
   AuditEventType,
@@ -446,27 +447,105 @@ const sshUserSchema = z
   .max(255)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "Invalid user format");
 
+const sshHostKeyLineSchema = z
+  .string()
+  .refine((line) => sshKeyLineType(line, SSH_HOST_KEY_TYPES) !== null, {
+    message: `Invalid host key: one of ${SSH_HOST_KEY_TYPES.join(", ")}, one space and its base64 key, nothing else`,
+  });
+const sshInstallKeyLineSchema = z
+  .string()
+  .refine((line) => sshKeyLineType(line, SSH_INSTALL_KEY_TYPES) !== null, {
+    message: `Invalid public key: one of ${SSH_INSTALL_KEY_TYPES.join(", ")}, one space and its base64 key, nothing else`,
+  });
+
 /**
- * SSH action — process-mediated injection. The vault spawns `ssh` with the
- * private key served through an ephemeral ssh-agent (signatures only, key never
- * on disk) and strict host-key verification against the pinned known_hosts.
+ * SSH action — process-mediated injection. Without `operation` the vault spawns
+ * `ssh` with the private key served through an ephemeral ssh-agent (signatures
+ * only, key never on disk) and strict host-key verification against the pinned
+ * known_hosts. With `operation: "bootstrap"` the vault logs in once by the
+ * stored password and installs `public_key` (design 4b B3): no command, no ssh
+ * option and no `timeout_ms` — the budget is the vault's.
  *
  * A non-22 `port` is pinned by OpenSSH's own `[host]:port` known_hosts form,
  * which OpenSSH looks up first; absent that entry it falls back to the
  * bare-host line when its key matches ("found matching key w/out port"), so a
  * bare pin binds a non-22 port too. The operator stores the line; the vault
  * never rewrites a pin.
+ *
+ * Bare for the `discriminatedUnion`-member reason `bareSftpActionSchema`
+ * documents; the two shapes are `refineSshAction`'s.
  */
-export const sshActionSchema = z.strictObject({
+const bareSshActionSchema = z.strictObject({
   type: z.literal(ActionType.SSH),
   host: sshHostSchema,
   user: sshUserSchema,
   port: z.number().int().min(1).max(65_535).optional(),
-  command: z.string().min(1).max(65_536),
+  command: z.string().min(1).max(65_536).optional(),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
+  operation: z.literal("bootstrap").optional(),
+  public_key: sshInstallKeyLineSchema.optional(),
+  sudoers: z.boolean().optional(),
 });
 
-export type SshAction = z.infer<typeof sshActionSchema>;
+type BareSshAction = z.infer<typeof bareSshActionSchema>;
+
+/** The `ssh` action without `operation`: today's shape, a command on the host. */
+export type SshAction = Omit<BareSshAction, "command" | "operation" | "public_key" | "sudoers"> & {
+  command: string;
+  operation?: undefined;
+  public_key?: undefined;
+  sudoers?: undefined;
+};
+
+/** The `ssh` action with `operation: "bootstrap"`: the first login by the stored password. */
+export type SshBootstrapAction = Omit<
+  BareSshAction,
+  "command" | "timeout_ms" | "operation" | "public_key"
+> & {
+  operation: "bootstrap";
+  public_key: string;
+  command?: undefined;
+  timeout_ms?: undefined;
+};
+
+const SSH_COMMAND_ONLY_KEYS = ["command", "timeout_ms"] as const;
+const SSH_BOOTSTRAP_ONLY_KEYS = ["operation", "public_key", "sudoers"] as const;
+
+/**
+ * The two shapes of the one `ssh` member, with the issues their two strict
+ * objects would raise: a key of the other shape is unrecognized, the shape's
+ * required key (`command`, `public_key`) is missing.
+ */
+function refineSshAction(data: BareSshAction, ctx: z.RefinementCtx): void {
+  const bootstrap = data.operation !== undefined;
+  const stray = (bootstrap ? SSH_COMMAND_ONLY_KEYS : SSH_BOOTSTRAP_ONLY_KEYS).filter(
+    (key) => data[key] !== undefined,
+  );
+  if (stray.length > 0) {
+    ctx.addIssue({ code: "unrecognized_keys", keys: [...stray], path: [], input: data });
+  }
+  const required = bootstrap ? "public_key" : "command";
+  if (data[required] === undefined) {
+    ctx.addIssue({ code: "invalid_type", expected: "string", input: undefined, path: [required] });
+  }
+}
+
+function isSshActionShape(
+  data: BareSshAction,
+): data is BareSshAction & (SshAction | SshBootstrapAction) {
+  return data.operation === undefined
+    ? data.command !== undefined && data.public_key === undefined && data.sudoers === undefined
+    : data.public_key !== undefined && data.command === undefined && data.timeout_ms === undefined;
+}
+
+/** Runs only where every check before it passed: it narrows the inferred type and adds no issue. */
+const NARROW_ONLY = {
+  when: (payload: { issues: readonly unknown[] }) => payload.issues.length === 0,
+};
+
+export const sshActionSchema = bareSshActionSchema
+  .superRefine(refineSshAction)
+  .refine(isSshActionShape, NARROW_ONLY);
 
 // ---------------------------------------------------------------------------
 // v1.3 extended-context action schemas (thesis-aligned; design-v1.3-contexts §4)
@@ -804,7 +883,7 @@ export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;
  * `z.strictObject` schemas (under zod 3 a `superRefine`-wrapped member was a
  * `ZodEffects` without `.shape` and threw at construction; zod 4 returns the
  * object itself, and the members stay bare so each rule is defined once);
- * the three members with a cross-field rule (database/smtp/sftp) get it
+ * the four members with a cross-field rule (database/smtp/sftp/ssh) get it
  * applied here, in one outer `.superRefine` dispatching by `type`, calling
  * the exact same refine function their standalone exports use — defined
  * once, enforced both ways.
@@ -822,20 +901,31 @@ export type DockerRegistryAction = z.infer<typeof dockerRegistryActionSchema>;
  * under a plain `z.union` those field errors get buried per-branch and both
  * surfaces fall back to a bare "Invalid input" instead of naming the field.
  */
-export const useSecretActionSchema = z
-  .discriminatedUnion("type", [
-    httpActionSchema,
-    processActionSchema,
-    mcpActionSchema,
-    bareDatabaseActionSchema,
-    gitActionSchema,
-    sshActionSchema,
-    bareSmtpActionSchema,
-    imapActionSchema,
-    websocketActionSchema,
-    bareSftpActionSchema,
-    dockerRegistryActionSchema,
-  ])
+const useSecretActionUnion = z.discriminatedUnion("type", [
+  httpActionSchema,
+  processActionSchema,
+  mcpActionSchema,
+  bareDatabaseActionSchema,
+  gitActionSchema,
+  bareSshActionSchema,
+  bareSmtpActionSchema,
+  imapActionSchema,
+  websocketActionSchema,
+  bareSftpActionSchema,
+  dockerRegistryActionSchema,
+]);
+
+type LooseUseSecretAction = z.output<typeof useSecretActionUnion>;
+
+function isUseSecretActionShape(
+  data: LooseUseSecretAction,
+): data is
+  | Exclude<LooseUseSecretAction, { type: "ssh" }>
+  | (BareSshAction & (SshAction | SshBootstrapAction)) {
+  return data.type !== "ssh" || isSshActionShape(data);
+}
+
+export const useSecretActionSchema = useSecretActionUnion
   .superRefine((data, ctx) => {
     switch (data.type) {
       case "smtp":
@@ -844,8 +934,11 @@ export const useSecretActionSchema = z
         return refineDatabaseAction(data, ctx);
       case "sftp":
         return refineSftpAction(data, ctx);
+      case "ssh":
+        return refineSshAction(data, ctx);
     }
-  });
+  })
+  .refine(isUseSecretActionShape, NARROW_ONLY);
 
 /** Discriminated union of context-specific use_secret action specifications. */
 export type UseSecretAction = z.infer<typeof useSecretActionSchema>;
@@ -893,20 +986,74 @@ const localDirsSchema = z
   )
   .max(100);
 
+const NUMERIC_LAST_LABEL = /(?:^|\.)(?:[0-9]+|0[xX][0-9a-fA-F]*)\.?$/;
+const PLAIN_DOTTED_QUAD =
+  /^(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$/;
+
+/**
+ * A host the address parser reads as IPv4 only in its plain dotted form (design 4b B1):
+ * a name whose last label is a decimal or `0x` number is one (the WHATWG URL parser's
+ * "ends in a number" test, which `inet_aton`'s forms all meet), and it must be four
+ * decimal numbers 0-255 without leading zeros.
+ */
+function isPlainSshHost(host: string): boolean {
+  return !NUMERIC_LAST_LABEL.test(host) || PLAIN_DOTTED_QUAD.test(host);
+}
+
+export const MAX_SSH_BOOTSTRAP_KEYS = 16;
+
+const sshBootstrapHostSchema = sshHostSchema.refine(isPlainSshHost, {
+  message: "Invalid host: an IPv4 address only as four decimal numbers 0-255 without leading zeros",
+});
+const sshBootstrapPortSchema = z.number().int().min(1).max(65_535);
+const sshBootstrapHostKeysSchema = z.array(sshHostKeyLineSchema).min(1).max(MAX_SSH_BOOTSTRAP_KEYS);
+const sshBootstrapInstallKeysSchema = z
+  .array(sshInstallKeyLineSchema)
+  .min(1)
+  .max(MAX_SSH_BOOTSTRAP_KEYS);
+
+/**
+ * The ssh bootstrap block as stored (design 4b B1): the one host, port and user the
+ * stored password may be sent to, the host's public keys (no trust on first use), the
+ * public keys a bootstrap may install, and the opt-in to the sudoers rule.
+ */
+export const sshBootstrapPolicySchema = z.strictObject({
+  host: sshBootstrapHostSchema,
+  port: sshBootstrapPortSchema,
+  user: sshUserSchema,
+  host_keys: sshBootstrapHostKeysSchema,
+  install_keys: sshBootstrapInstallKeysSchema,
+  sudoers: z.boolean(),
+});
+
+/** The block as an administrator supplies it: the port defaults to 22, the opt-in to `false`. */
+export const sshBootstrapPolicyInputSchema = z.strictObject({
+  host: sshBootstrapHostSchema,
+  port: sshBootstrapPortSchema.optional().default(22),
+  user: sshUserSchema,
+  host_keys: sshBootstrapHostKeysSchema,
+  install_keys: sshBootstrapInstallKeysSchema,
+  sudoers: z.boolean().optional().default(false),
+});
+
+export type SshBootstrapPolicy = z.output<typeof sshBootstrapPolicySchema>;
+export type SshBootstrapPolicyInput = z.input<typeof sshBootstrapPolicyInputSchema>;
+
 /**
  * Per-secret injection policy as stored and loaded: every field present, no
- * defaults, no unknown keys. The vault always writes all fourteen fields, so a
+ * defaults, no unknown keys. The vault always writes all fifteen fields, so a
  * decrypted blob that fails this schema is corruption (R2/C43), not a policy
- * from before a field existed — no such vault opens under v1.5. The four
+ * from before a field existed — no such vault opens under v1.5. The five
  * exceptions are read-side and live in core: the post-baseline fields
  * `strict_tree_exit` (2026-09-10), `proxy` (2026-11-06) and `ssh_agent_socket`
- * (2026-11-06) are defaulted to `false` and `local_dirs` (2026-11-18; read
- * from `sftp_local_dirs` where only that key is stored) to `[]` by
+ * (2026-11-06) are defaulted to `false`, `local_dirs` (2026-11-18; read
+ * from `sftp_local_dirs` where only that key is stored) to `[]` and
+ * `ssh_bootstrap` (2026-11-21) to `null` by
  * `loadInjectionPolicy` before this parse, because blobs written by the
  * prepared v1.5.0 tree carry the baseline ten, blobs written before
  * deployment model B's egress proxy carry eleven, blobs written before its
- * agent socket carry twelve, and blobs written before the local directories
- * carry thirteen.
+ * agent socket carry twelve, blobs written before the local directories
+ * carry thirteen, and blobs written before the bootstrap block carry fourteen.
  */
 export const injectionPolicySchema = z.strictObject({
   url_allowlist: urlAllowlistSchema,
@@ -923,6 +1070,7 @@ export const injectionPolicySchema = z.strictObject({
   proxy: z.boolean(),
   ssh_agent_socket: z.boolean(),
   local_dirs: localDirsSchema,
+  ssh_bootstrap: sshBootstrapPolicySchema.nullable(),
 });
 
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
@@ -941,6 +1089,7 @@ export const injectionPolicyInputSchema = z.strictObject({
   proxy: z.boolean().optional().default(false),
   ssh_agent_socket: z.boolean().optional().default(false),
   local_dirs: localDirsSchema.optional().default([]),
+  ssh_bootstrap: sshBootstrapPolicyInputSchema.nullable().optional().default(null),
 });
 
 /**
@@ -1001,6 +1150,14 @@ export const injectionPolicyInputSchema = z.strictObject({
  * directory (in a daemon also a path it declares) is refused whatever is
  * listed — the resolution and the refusals are the judgement of
  * `core/src/injection/local-path.ts`, not this schema's.
+ * `ssh_bootstrap` (default `null`) is the secret's ssh bootstrap block (design
+ * 4b B1): absent, every `ssh` `bootstrap` is refused; present, the secret
+ * serves the bootstrap alone, to the one host, port and user it names,
+ * verified against `host_keys` and installing one of `install_keys`, and
+ * `sudoers` allows the passwordless rule. Beside `proxy` or
+ * `ssh_agent_socket`, or on a secret that is not an `api_key`, it is refused
+ * by the engine (`INVALID_INPUT`, a failed `policy.grant` row), not by this
+ * schema.
  * The shape the vault stores, loads and returns: every field
  * present, no defaults — defaults apply at `injectionPolicyInputSchema`, never
  * on the stored blob.

@@ -1,11 +1,13 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
-import { expectVaultError } from "@harpoc/test-utils";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
+import { BLOCK, KEY_A } from "./injection/__fixtures__/ssh-public-keys.js";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -114,6 +116,38 @@ describe("useSecret — the door", () => {
         ErrorCode.INVALID_INPUT,
       );
       expect(err.message).toBe("Unsupported action type: ftp");
+      expect(resolveHandle).not.toHaveBeenCalled();
+      expect(getSecretValue).not.toHaveBeenCalled();
+      expect(nonReadAuditCount(engine)).toBe(before);
+    } finally {
+      resolveHandle.mockRestore();
+      getSecretValue.mockRestore();
+    }
+  });
+
+  it("refuses operation beside a command before the handle is read, with no row", async () => {
+    const resolveHandle = vi.spyOn(internals().secretManager, "resolveHandle");
+    const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
+    try {
+      const before = nonReadAuditCount(engine);
+      const err = await expectVaultError(
+        () =>
+          engine.useSecret(
+            HANDLE,
+            unparsed({
+              type: "ssh",
+              operation: "bootstrap",
+              host: "h",
+              user: "u",
+              public_key: KEY_A,
+              command: "id",
+            }),
+          ),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        "an ssh bootstrap takes type, operation, host, user, port, public_key and sudoers alone",
+      );
       expect(resolveHandle).not.toHaveBeenCalled();
       expect(getSecretValue).not.toHaveBeenCalled();
       expect(nonReadAuditCount(engine)).toBe(before);
@@ -286,6 +320,102 @@ describe("useSecret — the STARTTLS refusal of a malformed smtp action", () => 
       attachment_paths: ["/tmp/a.txt"],
       attachment_total_bytes: 0,
       error: ErrorCode.INVALID_INPUT,
+    });
+  });
+});
+
+const BOOTSTRAP_ONLY =
+  "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone";
+
+describe("useSecret — a secret with the bootstrap block serves the bootstrap alone", () => {
+  let password: string;
+
+  beforeEach(async () => {
+    password = randomBytes(18).toString("base64url");
+    await initWithSecret("k", password);
+    await engine.setInjectionPolicy(HANDLE, { ssh_bootstrap: BLOCK });
+  });
+
+  it.each([
+    {
+      type: "http",
+      method: "GET",
+      url: "https://api.example.com/",
+      injection: { type: "bearer" },
+    },
+    { type: "process", command: "harpoc-no-such-binary", env_var: "TOKEN" },
+    { type: "mcp", server: "docs", tool: "search" },
+    {
+      type: "database",
+      engine: "postgresql",
+      host: "db.example.com",
+      database: "app",
+      query: "SELECT 1",
+    },
+    { type: "git", operation: "clone", repository: "https://git.example.com/o/r.git" },
+    { type: "ssh", host: "h1.example", user: "ubuntu", command: "uptime" },
+    {
+      type: "smtp",
+      host: "smtp.example.com",
+      from: "ops@example.com",
+      to: ["dev@example.com"],
+      subject: "s",
+      text: "t",
+    },
+    { type: "imap", host: "imap.example.com", mailbox: "INBOX", operation: { kind: "search" } },
+    { type: "websocket", url: "wss://ws.example.com/", injection: { type: "bearer" } },
+    { type: "sftp", host: "h1.example", user: "ubuntu", operation: "list", remote_path: "/srv" },
+    { type: "docker_registry", operation: "pull", image: "registry.example.com/app:1" },
+    {
+      type: "sftp",
+      host: "h1.example",
+      user: "ubuntu",
+      operation: "bootstrap",
+      remote_path: "/srv",
+    },
+  ])(
+    "every other action is refused before the decrypt with one failed row — $type",
+    async (action) => {
+      const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
+      try {
+        const err = await expectVaultError(
+          () => engine.useSecret(HANDLE, unparsed(action)),
+          ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+        );
+        expectAbsent(err.message, password);
+        expect(err.message).toBe(BOOTSTRAP_ONLY);
+        expect(getSecretValue).not.toHaveBeenCalled();
+        const rows = useRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.success).toBe(false);
+        expect(rows[0]?.detail).toStrictEqual({
+          handle: HANDLE,
+          context: action.type,
+          error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+        });
+      } finally {
+        getSecretValue.mockRestore();
+      }
+    },
+  );
+
+  it("the status answers first", async () => {
+    await engine.revokeSecret(HANDLE);
+    await expectVaultError(
+      () =>
+        engine.useSecret(
+          HANDLE,
+          unparsed({ type: "process", command: "harpoc-no-such-binary", env_var: "TOKEN" }),
+        ),
+      ErrorCode.SECRET_REVOKED,
+    );
+    const rows = useRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail).toStrictEqual({
+      handle: HANDLE,
+      context: "process",
+      error: ErrorCode.SECRET_REVOKED,
     });
   });
 });

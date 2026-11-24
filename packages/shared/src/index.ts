@@ -19,6 +19,7 @@ export * from "./schema-issues.js";
 export * from "./schemas.js";
 export * from "./server-lifecycle.js";
 export * from "./socket-peer.js";
+export * from "./ssh-key-line.js";
 export * from "./token-endpoint-auth.js";
 export * from "./unix-socket-path.js";
 export * from "./version.js";

@@ -69,6 +69,8 @@ interface UseOptions {
   repository?: string;
   refspec?: string[];
   user?: string;
+  publicKey?: string;
+  sudoers?: boolean;
   // SMTP action
   from?: string;
   to?: string[];
@@ -152,10 +154,10 @@ export function registerSecretUseCommand(secret: Command): void {
     .option("--database <name>", "Database name (database action)")
     .option("--query <sql>", "SQL query (database action)")
     .option("--param <value>", "Query parameter (repeatable, database action)", collect, [])
-    // Git action (--operation is reused by imap/sftp/docker_registry below)
+    // Git action (--operation is reused by ssh/imap/sftp/docker_registry below)
     .option(
       "--operation <op>",
-      "Operation: clone|pull|push|fetch|ls-remote (git); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
     )
     .option("--repository <url>", "Git repository URL (git action)")
     .option(
@@ -166,6 +168,8 @@ export function registerSecretUseCommand(secret: Command): void {
     )
     // SSH action
     .option("--user <name>", "Remote user (ssh/sftp action)")
+    .option("--public-key <line>", "Public key to install, '<type> <base64>' (ssh bootstrap)")
+    .option("--sudoers", "Ask the bootstrap to install the sudoers rule (ssh bootstrap)")
     // SMTP action
     .option("--from <addr>", "Sender address (smtp action)")
     .option("--to <addr>", "Recipient address (repeatable, smtp action)", collect, [])
@@ -400,10 +404,13 @@ export function buildAction(
   if (actionType === "ssh") {
     return {
       type: "ssh",
+      operation: options.operation,
       host: options.host,
       port: parseNumericOption(options.port, "--port"),
       user: options.user,
       command: options.command,
+      public_key: options.publicKey,
+      sudoers: options.sudoers,
       timeout_ms,
     };
   }
@@ -648,6 +655,8 @@ export function summarizeResult(result: UseSecretResponse): Record<string, unkno
         stdout: preview(result.stdout),
         stderr: preview(result.stderr),
       });
+    case "ssh_bootstrap":
+      return compact({ type: result.type, key: result.key, sudoers: result.sudoers });
     case "smtp":
       return compact({
         type: result.type,

@@ -1,8 +1,20 @@
 import type { Command } from "commander";
-import type { ConnectionConfig, InjectionPolicy, ResponseMode } from "@harpoc/shared";
-import { injectionPolicyInputSchema, renderSchemaIssues, VaultError } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  InjectionPolicy,
+  ResponseMode,
+  SshBootstrapPolicy,
+} from "@harpoc/shared";
+import {
+  injectionPolicyInputSchema,
+  renderSchemaIssues,
+  sshBootstrapPolicySchema,
+  VaultError,
+} from "@harpoc/shared";
 import { resolveVaultDir, loadUnlockedEngine } from "../../utils/vault-loader.js";
 import { handleError, printJson, printSuccess } from "../../utils/output.js";
+import { parseIntOption } from "../../utils/options.js";
+import { MAX_PORT, MIN_PORT } from "../../utils/option-bounds.js";
 import { resolveTokenCallerForHandle, TOKEN_OPTION_DESCRIPTION } from "../../utils/token-caller.js";
 import { restModeOf, runRestMode } from "../../utils/rest-mode.js";
 
@@ -33,6 +45,14 @@ export interface AllowOptions {
   /** Tri-state: true (--ssh-agent-socket), false (--no-ssh-agent-socket), undefined (keep stored). */
   sshAgentSocket?: boolean;
   localDir?: string[];
+  bootstrapHost?: string;
+  bootstrapPort?: string;
+  bootstrapUser?: string;
+  bootstrapHostKey?: string[];
+  bootstrapKey?: string[];
+  /** Tri-state: true (--bootstrap-sudoers), false (--no-bootstrap-sudoers), undefined (keep stored). */
+  bootstrapSudoers?: boolean;
+  clearBootstrap?: boolean;
   acknowledgeInterpreter?: boolean;
   clear?: boolean;
   show?: boolean;
@@ -55,7 +75,41 @@ const EMPTY_POLICY: InjectionPolicy = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
+
+type MergedPolicy = Omit<InjectionPolicy, "ssh_bootstrap"> & {
+  ssh_bootstrap: Partial<SshBootstrapPolicy> | null;
+};
+
+function givenBootstrapFlags(options: AllowOptions): string[] {
+  const flags: Array<[string, boolean]> = [
+    ["--bootstrap-host", options.bootstrapHost !== undefined],
+    ["--bootstrap-port", options.bootstrapPort !== undefined],
+    ["--bootstrap-user", options.bootstrapUser !== undefined],
+    ["--bootstrap-host-key", (options.bootstrapHostKey?.length ?? 0) > 0],
+    ["--bootstrap-key", (options.bootstrapKey?.length ?? 0) > 0],
+    ["--bootstrap-sudoers", options.bootstrapSudoers === true],
+    ["--no-bootstrap-sudoers", options.bootstrapSudoers === false],
+  ];
+  return flags.filter(([, given]) => given).map(([flag]) => flag);
+}
+
+function mergeBootstrap(
+  stored: SshBootstrapPolicy | null,
+  options: AllowOptions,
+): Partial<SshBootstrapPolicy> | null {
+  if (options.clearBootstrap) return null;
+  if (givenBootstrapFlags(options).length === 0) return stored;
+  return {
+    host: options.bootstrapHost ?? stored?.host,
+    port: options.bootstrapPort === undefined ? stored?.port : Number(options.bootstrapPort),
+    user: options.bootstrapUser ?? stored?.user,
+    host_keys: options.bootstrapHostKey?.length ? options.bootstrapHostKey : stored?.host_keys,
+    install_keys: options.bootstrapKey?.length ? options.bootstrapKey : stored?.install_keys,
+    sudoers: options.bootstrapSudoers ?? stored?.sudoers,
+  };
+}
 
 /**
  * Merge the provided flag groups into the current policy. Groups the caller
@@ -70,7 +124,7 @@ const EMPTY_POLICY: InjectionPolicy = {
  * requiring the caller to restate every existing entry. `--clear` still
  * empties the list first, same as the other groups.
  */
-export function mergePolicy(current: InjectionPolicy, options: AllowOptions): InjectionPolicy {
+export function mergePolicy(current: InjectionPolicy, options: AllowOptions): MergedPolicy {
   const base = options.clear ? EMPTY_POLICY : current;
   return {
     url_allowlist: options.url?.length ? options.url : base.url_allowlist,
@@ -91,6 +145,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): In
     proxy: options.proxy ?? base.proxy,
     ssh_agent_socket: options.sshAgentSocket ?? base.ssh_agent_socket,
     local_dirs: options.localDir?.length ? options.localDir : base.local_dirs,
+    ssh_bootstrap: mergeBootstrap(base.ssh_bootstrap, options),
   };
 }
 
@@ -111,6 +166,13 @@ function countSetFlags(options: AllowOptions): number {
     (options.proxy !== undefined ? 1 : 0) +
     (options.sshAgentSocket !== undefined ? 1 : 0) +
     (options.localDir?.length ?? 0) +
+    (options.bootstrapHost !== undefined ? 1 : 0) +
+    (options.bootstrapPort !== undefined ? 1 : 0) +
+    (options.bootstrapUser !== undefined ? 1 : 0) +
+    (options.bootstrapHostKey?.length ?? 0) +
+    (options.bootstrapKey?.length ?? 0) +
+    (options.bootstrapSudoers !== undefined ? 1 : 0) +
+    (options.clearBootstrap ? 1 : 0) +
     (options.clear ? 1 : 0)
   );
 }
@@ -119,6 +181,28 @@ function assertLocalDirs(dirs: string[] | undefined): void {
   for (const dir of dirs ?? []) {
     if (dir.trim() === "") throw VaultError.invalidInput("--local-dir: empty path");
     if (dir.startsWith("-")) throw VaultError.invalidInput("--local-dir: a flag, not a path");
+  }
+}
+
+function assertBootstrapFlags(options: AllowOptions): void {
+  const given = givenBootstrapFlags(options);
+  if (options.clearBootstrap && given.length > 0) {
+    throw VaultError.invalidInput(`--clear-bootstrap conflicts with ${given.join(", ")}`);
+  }
+  const port =
+    options.bootstrapPort === undefined
+      ? undefined
+      : parseIntOption(options.bootstrapPort, "bootstrap-port", MIN_PORT, MAX_PORT);
+  const parts = sshBootstrapPolicySchema.partial().safeParse({
+    host: options.bootstrapHost,
+    port,
+    user: options.bootstrapUser,
+    host_keys: options.bootstrapHostKey?.length ? options.bootstrapHostKey : undefined,
+    install_keys: options.bootstrapKey?.length ? options.bootstrapKey : undefined,
+    sudoers: options.bootstrapSudoers,
+  });
+  if (!parts.success) {
+    throw VaultError.schemaValidation(renderSchemaIssues(parts.error));
   }
 }
 
@@ -241,6 +325,30 @@ export function registerSecretAllowCommand(secret: Command): void {
       [],
     )
     .option(
+      "--bootstrap-host <host>",
+      "SSH bootstrap: the host the stored password may be sent to — a name, or an IPv4 address in plain dotted form; the agent's action must name it alike",
+    )
+    .option("--bootstrap-port <port>", "SSH bootstrap: the host's port (default 22)")
+    .option("--bootstrap-user <user>", "SSH bootstrap: the account the stored password belongs to")
+    .option(
+      "--bootstrap-host-key <line>",
+      "SSH bootstrap: a public key of the host as '<type> <base64>', read at the host's console from /etc/ssh/ssh_host_*_key.pub without its comment (repeatable, replaces the stored list)",
+      collect,
+      [],
+    )
+    .option(
+      "--bootstrap-key <line>",
+      "SSH bootstrap: a public key the bootstrap may install, '<type> <base64>' without options or comment (repeatable, replaces the stored list)",
+      collect,
+      [],
+    )
+    .option(
+      "--bootstrap-sudoers",
+      "SSH bootstrap: allow the bootstrap to install the rule '#<uid> ALL=(ALL:ALL) NOPASSWD: ALL' for the account",
+    )
+    .option("--no-bootstrap-sudoers", "Remove a stored sudoers opt-in of the bootstrap block")
+    .option("--clear-bootstrap", "Remove the stored ssh bootstrap block")
+    .option(
       "--acknowledge-interpreter",
       "Explicitly acknowledge allowlisting a known interpreter (sh, bash, python, node, ...) or exec wrapper (sudo, xargs, find, tar, ...) — collapses the capability ladder for this secret; refused and audited otherwise",
     )
@@ -252,6 +360,7 @@ export function registerSecretAllowCommand(secret: Command): void {
       const vaultDir = resolveVaultDir(cmd.optsWithGlobals().vaultDir);
       try {
         assertLocalDirs(options.localDir);
+        assertBootstrapFlags(options);
         const rest = restModeOf(cmd);
         if (rest) {
           await runRestMode(rest, async (client) => {

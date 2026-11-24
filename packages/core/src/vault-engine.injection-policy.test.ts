@@ -10,9 +10,17 @@ import { AAD_INJECTION_POLICY } from "@harpoc/shared";
 import type { InjectionPolicyInput } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents, registryOf } from "./__fixtures__/engine-seams.js";
+import { registerAgents, registryOf, seedLiveStdioEntry } from "./__fixtures__/engine-seams.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
-import type { McpConnectionEntry } from "./injection/mcp-registry.js";
+import {
+  BLOCK,
+  FP_A,
+  FP_B,
+  FP_HOST,
+  HOST_KEY,
+  KEY_A,
+  KEY_B,
+} from "./injection/__fixtures__/ssh-public-keys.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -76,30 +84,6 @@ afterEach(async () => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-/**
- * Publish a ready stdio entry into the engine's registry without spawning a
- * child: the terminate-on-enable paths only need something live to tear down.
- */
-async function seedLiveStdioEntry(secretId: string): Promise<void> {
-  const client = { onclose: undefined, close: () => Promise.resolve() };
-  await registryOf(engine).acquire(secretId, () =>
-    Promise.resolve({
-      secretId,
-      serverName: "docs",
-      transportKind: "stdio",
-      client: client as unknown as McpConnectionEntry["client"],
-      state: "connecting",
-      crashed: false,
-      credentialFingerprint: "cred-fp",
-      configFingerprint: "config-fp",
-      isolation: { network: false, fs: false },
-      strictTreeExit: false,
-      spawnedAt: Date.now(),
-      lastUsedAt: Date.now(),
-    } satisfies McpConnectionEntry),
-  );
-}
-
 describe("injection policy", () => {
   beforeEach(async () => {
     await engine.initVault("password");
@@ -145,6 +129,7 @@ describe("injection policy", () => {
       proxy: false,
       ssh_agent_socket: false,
       local_dirs: [],
+      ssh_bootstrap: null,
     });
   });
 
@@ -288,6 +273,152 @@ describe("injection policy", () => {
     ).toBe(false);
   });
 
+  it("round-trips ssh_bootstrap, reads it absent when omitted, and records it in the POLICY_GRANT detail as fingerprints", async () => {
+    await engine.setInjectionPolicy("secret://pol", { ssh_bootstrap: BLOCK });
+    expect((await engine.getInjectionPolicy("secret://pol")).ssh_bootstrap).toEqual(BLOCK);
+    const detail = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail;
+    expect(detail?.ssh_bootstrap).toEqual({
+      host: "h1.example",
+      port: 22,
+      user: "ubuntu",
+      host_keys: [FP_HOST],
+      install_keys: [FP_A, FP_B],
+      sudoers: true,
+    });
+    for (const line of [HOST_KEY, KEY_A, KEY_B]) {
+      expect(JSON.stringify(detail).includes(line.split(" ")[1] as string)).toBe(false);
+    }
+
+    await engine.setInjectionPolicy("secret://pol", {});
+    expect((await engine.getInjectionPolicy("secret://pol")).ssh_bootstrap).toBeNull();
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.ssh_bootstrap,
+    ).toBeNull();
+  });
+
+  it.each(["oauth_token", "certificate"] as const)(
+    "refuses the block on a secret that is not an api_key, with a failed policy.grant row: %s",
+    async (type) => {
+      await engine.createSecret({ name: "typed", type });
+      const secretId = await engine.resolveSecretId("secret://typed");
+      const { store } = engine as unknown as { store: SqliteStore };
+
+      const err = await expectVaultError(
+        () => engine.setInjectionPolicy("secret://typed", { ssh_bootstrap: BLOCK }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe("ssh_bootstrap needs a secret of type api_key");
+      const grants = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+      expect(grants.filter((row) => row.success)).toHaveLength(0);
+      const failed = grants.filter((row) => !row.success);
+      expect(failed.map((row) => row.secret_id)).toEqual([secretId]);
+      expect(failed.map((row) => row.detail)).toEqual([
+        {
+          policy: "injection",
+          handle: "secret://typed",
+          error: ErrorCode.INVALID_INPUT,
+          reason: "ssh_bootstrap_secret_type",
+        },
+      ]);
+      expect(store.getInjectionPolicy(secretId)).toBeUndefined();
+    },
+  );
+
+  it("refuses the block beside proxy, and beside ssh_agent_socket", async () => {
+    await engine.setInjectionPolicy("secret://pol", { host_allowlist: ["a.example"] });
+    const first = await engine.getInjectionPolicy("secret://pol");
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const cases = [
+      [{ proxy: true }, "ssh_bootstrap cannot stand beside proxy", "ssh_bootstrap_with_proxy"],
+      [
+        { ssh_agent_socket: true },
+        "ssh_bootstrap cannot stand beside ssh_agent_socket",
+        "ssh_bootstrap_with_ssh_agent_socket",
+      ],
+    ] as const;
+
+    for (const [beside, message, reason] of cases) {
+      const err = await expectVaultError(
+        () => engine.setInjectionPolicy("secret://pol", { ssh_bootstrap: BLOCK, ...beside }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(message);
+      const [row] = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+      expect(row?.success).toBe(false);
+      expect(row?.secret_id).toBe(secretId);
+      expect(row?.detail).toEqual({
+        policy: "injection",
+        handle: "secret://pol",
+        error: ErrorCode.INVALID_INPUT,
+        reason,
+      });
+    }
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT }).filter((row) => row.success),
+    ).toHaveLength(1);
+    expect(await engine.getInjectionPolicy("secret://pol")).toEqual(first);
+  });
+
+  it("answers the three refusals in their order: the type, then proxy, then ssh_agent_socket", async () => {
+    await engine.createSecret({ name: "typed", type: "oauth_token" });
+    const all = { ssh_bootstrap: BLOCK, proxy: true, ssh_agent_socket: true };
+
+    const onType = await expectVaultError(
+      () => engine.setInjectionPolicy("secret://typed", all),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(onType.message).toBe("ssh_bootstrap needs a secret of type api_key");
+    const beside = await expectVaultError(
+      () => engine.setInjectionPolicy("secret://pol", all),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(beside.message).toBe("ssh_bootstrap cannot stand beside proxy");
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .map((row) => row.detail?.reason),
+    ).toEqual(["ssh_bootstrap_with_proxy", "ssh_bootstrap_secret_type"]);
+  });
+
+  it("the admin gate answers first", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    registerAgents(engine, "policy-reader");
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "policy-reader", permissions: ["read"] },
+      "operator",
+    );
+
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy(
+          "secret://pol",
+          { ssh_bootstrap: BLOCK, proxy: true },
+          undefined,
+          {
+            principal_type: "agent",
+            principal_id: "policy-reader",
+            interface: "cli",
+          },
+        ),
+      ErrorCode.ACCESS_DENIED,
+    );
+    expect(err.message).toBe("Access denied: Principal lacks 'admin' permission on this secret");
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .filter((row) => row.detail?.policy === "injection")
+        .map((row) => row.detail),
+    ).toEqual([
+      {
+        policy: "injection",
+        handle: "secret://pol",
+        required_permission: "admin",
+        error: ErrorCode.ACCESS_DENIED,
+        interface: "cli",
+      },
+    ]);
+  });
+
   it("loads a twelve-field blob written before ssh_agent_socket existed as false — the third post-baseline read default (B3)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
@@ -361,6 +492,46 @@ describe("injection policy", () => {
     });
     const loaded = await engine.getInjectionPolicy("secret://pol");
     expect(loaded.local_dirs).toEqual([]);
+    expect(loaded.ssh_agent_socket).toBe(true);
+    expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
+  it("loads a fourteen-field blob written before the block existed with the block absent — the fifth post-baseline read default", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const fourteenFields = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["sftp.example.com"],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: true,
+      local_dirs: [],
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(fourteenFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.ssh_bootstrap).toBeNull();
     expect(loaded.ssh_agent_socket).toBe(true);
     expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
     expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
@@ -683,7 +854,7 @@ describe("injection policy", () => {
 
   it("terminates a live stdio child when fs_isolation is enabled", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
-    await seedLiveStdioEntry(secretId);
+    await seedLiveStdioEntry(engine, secretId);
     const terminate = vi.spyOn(registryOf(engine), "terminate");
 
     await engine.setInjectionPolicy("secret://pol", { fs_isolation: true });
@@ -699,7 +870,7 @@ describe("injection policy", () => {
 
   it("terminates a live stdio child when strict_tree_exit is enabled (D2, 2026-09-10)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
-    await seedLiveStdioEntry(secretId);
+    await seedLiveStdioEntry(engine, secretId);
     const terminate = vi.spyOn(registryOf(engine), "terminate");
 
     await engine.setInjectionPolicy("secret://pol", { strict_tree_exit: true });
@@ -713,9 +884,28 @@ describe("injection policy", () => {
     expect(terminates[0]?.detail?.reason).toBe("strict_tree_exit_enabled");
   });
 
+  it("setting the block ends a live stdio child, once, under its own reason", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(engine, secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", {
+      ssh_bootstrap: BLOCK,
+      network_isolation: true,
+    });
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "ssh_bootstrap_enabled", {
+      session_id: expect.any(String),
+    });
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("ssh_bootstrap_enabled");
+  });
+
   it("attributes the terminate row to the caller that flipped the policy", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
-    await seedLiveStdioEntry(secretId);
+    await seedLiveStdioEntry(engine, secretId);
     registerAgents(engine, "policy-admin");
     engine.grantPolicy(
       {
@@ -741,7 +931,7 @@ describe("injection policy", () => {
 
   it("terminates once with the network reason when both isolation flags are enabled", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
-    await seedLiveStdioEntry(secretId);
+    await seedLiveStdioEntry(engine, secretId);
     const terminate = vi.spyOn(registryOf(engine), "terminate");
 
     await engine.setInjectionPolicy("secret://pol", {
@@ -760,7 +950,7 @@ describe("injection policy", () => {
 
   it("control: a policy set without either isolation flag leaves the child alive", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
-    await seedLiveStdioEntry(secretId);
+    await seedLiveStdioEntry(engine, secretId);
     const terminate = vi.spyOn(registryOf(engine), "terminate");
 
     await engine.setInjectionPolicy("secret://pol", { url_allowlist: [] });

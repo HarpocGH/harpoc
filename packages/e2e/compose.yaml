@@ -162,6 +162,54 @@ services:
       timeout: 5s
       retries: 45
 
+  # The targets of the `ssh` `bootstrap` rows: a real sshd with password login, a
+  # password user in the sudo group and a real visudo. One Dockerfile, two bases:
+  # sudo on Ubuntu 24.04 and sudo-rs on Ubuntu 26.04, which ships it as `sudo`.
+  # The accounts' password is generated (fixtures/sshd-bootstrap/out/password)
+  # and reaches the container as a read-only file, never as an argument or a
+  # variable. Published on 55xxx ports: the block pins `[127.0.0.1]:<port>`.
+  sshd-bootstrap-sudo:
+    build:
+      context: ./fixtures/sshd-bootstrap
+      args:
+        BASE: ubuntu:24.04
+        SUDO_PACKAGE: sudo
+        SUDO_BANNER: "Sudo version 1.9."
+    image: harpoc-e2e-sshd-bootstrap-sudo
+    volumes:
+      - ./fixtures/sshd-bootstrap/out/hostkey_ed25519:/bootstrap/hostkey:ro
+      - ./fixtures/sshd-bootstrap/out/password:/bootstrap/password:ro
+    command: ["/usr/local/sbin/start.sh"]
+    ports:
+      - "127.0.0.1:55122:2222"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  sshd-bootstrap-sudo-rs:
+    build:
+      context: ./fixtures/sshd-bootstrap
+      args:
+        BASE: ubuntu:26.04
+        SUDO_PACKAGE: sudo-rs
+        SUDO_BANNER: "sudo-rs 0."
+    image: harpoc-e2e-sshd-bootstrap-sudo-rs
+    volumes:
+      - ./fixtures/sshd-bootstrap/out/hostkey_ed25519:/bootstrap/hostkey:ro
+      - ./fixtures/sshd-bootstrap/out/password:/bootstrap/password:ro
+    # sshd from 9.8 drops an address after refused or broken logins; the rows
+    # must not depend on each other's order.
+    command: ["/usr/local/sbin/start.sh", "-o", "PerSourcePenalties=no"]
+    ports:
+      - "127.0.0.1:55123:2222"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
   # TLS echo backend for the `http` context's demonstration cell — the first
   # real TLS handshake on the http path (until Phase 3 only the database arms
   # shook hands). Reflects the injected credential in several encodings, in the

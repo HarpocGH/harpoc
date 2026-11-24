@@ -30,6 +30,9 @@ import { registerRevokeSecret } from "./revoke-secret.js";
 import { registerCheckHealth } from "./check-health.js";
 import { registerStartOauthFlow } from "./start-oauth-flow.js";
 
+const SSH_BOOTSTRAP_KEY =
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+
 function mockEngine(): VaultEngine {
   return {
     listSecrets: vi.fn().mockReturnValue([
@@ -566,7 +569,17 @@ describe("MCP Tools", () => {
       it("advertises the ssh arm's exact key set", async () => {
         const arm = armFor(await actionArms(), "ssh");
         expect(Object.keys(arm.properties ?? {}).sort()).toEqual(
-          ["type", "host", "user", "command", "port", "timeout_ms"].sort(),
+          [
+            "type",
+            "host",
+            "user",
+            "command",
+            "port",
+            "timeout_ms",
+            "operation",
+            "public_key",
+            "sudoers",
+          ].sort(),
         );
       });
 
@@ -628,6 +641,18 @@ describe("MCP Tools", () => {
           "Target allowlists, local directories, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode, strict tree exit and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
         );
       });
+
+      it("describes the bootstrap: its shape, that the key is the block's, and that the agent gets a status and no output", async () => {
+        const tool = (await listTools(server)).find((t) => t.name === "use_secret");
+        const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
+          { description?: string } | undefined;
+        expect(action?.description).toContain(
+          "SSH: {type:'ssh', host, user, command, port?}, or {type:'ssh', operation:'bootstrap', host, user, public_key, port?, sudoers?} — the first login by the secret's stored password, which installs public_key ('<type> <base64>', no comment) and with sudoers a passwordless sudo rule; host, user, port, the key and sudoers must be what the secret's bootstrap block allows, and the result is a status and no output: {type:'ssh_bootstrap', key, sudoers}.",
+        );
+        expect(tool?.description).toContain(
+          "an SSH command or the first login to a host by its stored password",
+        );
+      });
     });
 
     it("rejects a malformed smtp action at the schema boundary (validation refusal)", async () => {
@@ -645,6 +670,49 @@ describe("MCP Tools", () => {
       expect(result.isError).toBe(true);
       expect(getToolText(result)).toContain("Input validation error");
       expect(getToolText(result)).toMatch(/action\.from: Invalid email address/);
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("a command action without command, and a bootstrap with timeout_ms, are refused at the schema boundary naming the field", async () => {
+      const commandless = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { type: "ssh", host: "h1.example", user: "ubuntu" },
+      });
+      expect(commandless.isError).toBe(true);
+      expect(getToolText(commandless)).toContain(
+        "command: Invalid input: expected string, received undefined",
+      );
+      const timed = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "ssh",
+          operation: "bootstrap",
+          host: "h1.example",
+          user: "ubuntu",
+          public_key: SSH_BOOTSTRAP_KEY,
+          timeout_ms: 5,
+        },
+      });
+      expect(timed.isError).toBe(true);
+      expect(getToolText(timed)).toContain('Unrecognized key: "timeout_ms"');
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("refuses a bootstrap with a command at the schema boundary", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: {
+          type: "ssh",
+          operation: "bootstrap",
+          host: "h1.example",
+          user: "ubuntu",
+          public_key: SSH_BOOTSTRAP_KEY,
+          command: "id",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(getToolText(result)).toContain("Input validation error");
+      expect(getToolText(result)).toMatch(/action: Unrecognized key: "command"/);
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
@@ -845,6 +913,20 @@ describe("MCP Tools", () => {
           messages: ["echo [REDACTED]"],
           close_code: 1000,
         });
+      });
+
+      it("ssh bootstrap: the action reaches the engine verbatim; the status result comes back as text", async () => {
+        const data = await dispatch(
+          {
+            type: "ssh",
+            operation: "bootstrap",
+            host: "h1.example",
+            user: "ubuntu",
+            public_key: SSH_BOOTSTRAP_KEY,
+          },
+          { type: "ssh_bootstrap", key: "installed", sudoers: "written" },
+        );
+        expect(data).toEqual({ type: "ssh_bootstrap", key: "installed", sudoers: "written" });
       });
     });
 

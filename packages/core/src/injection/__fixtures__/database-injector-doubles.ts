@@ -62,6 +62,7 @@ export function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolic
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: [],
+    ssh_bootstrap: null,
     ...overrides,
   };
 }

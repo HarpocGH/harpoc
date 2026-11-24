@@ -9,7 +9,9 @@ import {
   agentSocketCaller,
   AuditEventType,
   ErrorCode,
+  injectionPolicyInputSchema,
   RATE_LIMIT_USE_SECRET,
+  SecretStatus,
   SecretType,
   tokenlessStdioCaller,
 } from "@harpoc/shared";
@@ -21,7 +23,9 @@ import {
   registerAgents,
   registryOf,
   retainDecryptedValues,
+  storeInjectionPolicyBlob,
 } from "./__fixtures__/engine-seams.js";
+import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import {
   buildUserauthRequest,
   fixtureKnownHostsLine,
@@ -61,6 +65,12 @@ const HOST_B = fixturePublicBlob("ecdsa521_openssh");
 const HOST_C = fixturePublicBlob("rsa_pem");
 const SESSION = Buffer.alloc(32, 0x5a);
 const NOT_A_KEY = "api-token-value-not-a-key-b3";
+const MARK_AT = 1_700_000_000_000;
+const BOOTSTRAP_BESIDE_SOCKET = injectionPolicyInputSchema.parse({
+  host_allowlist: ["github.test"],
+  ssh_agent_socket: true,
+  ssh_bootstrap: BLOCK,
+});
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -228,6 +238,38 @@ describe("listAgentSocketIdentities — the keys a consumer's socket lists", () 
     engine.deactivateAgent(CONSUMER);
     expect(await engine.listAgentSocketIdentities(caller(), null)).toEqual([]);
     expect(await engine.listAgentSocketIdentities(agentSocketCaller("ghost"), null)).toEqual([]);
+  });
+
+  it("a secret whose stored policy holds the block beside ssh_agent_socket is neither derived nor listed", async () => {
+    for (const name of ["deploy-ed", "api-token"]) {
+      storeInjectionPolicyBlob(engine, ids[name] as string, BOOTSTRAP_BESIDE_SOCKET);
+    }
+    const retained = retainDecryptedValues(engine);
+
+    const listed = await engine.listAgentSocketIdentities(caller(), null);
+    expect(retained).toHaveLength(1);
+    expect(listed).toEqual([{ publicKeyBlob: EC_KEY, comment: "secret://deploy-ec" }]);
+    expect(useRows()).toHaveLength(0);
+    expect(listingRows().map((row) => row.detail?.["count"])).toEqual([1]);
+  });
+
+  it("a listing skips a secret with a mark and ends nothing", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    await engine.rotateSecret(
+      "secret://deploy-ed",
+      new Uint8Array(Buffer.from(readFixture("ecdsa384_openssh"))),
+    );
+    const id = ids["deploy-ed"] as string;
+    store().claimBootstrapMark(id, "claim-other", MARK_AT);
+    const retained = retainDecryptedValues(engine);
+
+    const listed = await engine.listAgentSocketIdentities(caller(), null);
+    expect(listed).toEqual([{ publicKeyBlob: EC_KEY, comment: "secret://deploy-ec" }]);
+    expect(retained).toHaveLength(0);
+    expect(store().getSecret(id)?.status).toBe(SecretStatus.ACTIVE);
+    expect(store().readBootstrapMark(id)).toEqual({ claim: "claim-other", at: MARK_AT });
+    expect(useRows()).toHaveLength(0);
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE })).toHaveLength(0);
   });
 
   it("an expired key drops out without the lazy transition — the enumeration writes its one vault.read row and no other", async () => {
@@ -840,6 +882,116 @@ describe("signForAgentSocket — the secret refusals, in use_secret's order", ()
       error: ErrorCode.ACCESS_DENIED,
       interface: "ssh_agent",
     });
+  });
+
+  it("a served key whose stored policy gains the block is SSH_BOOTSTRAP_NOT_ALLOWED ahead of the opt-in and the binding", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(engine, ids["deploy-ed"] as string, BOOTSTRAP_BESIDE_SOCKET);
+    const retained = retainDecryptedValues(engine);
+
+    for (const binding of [boundTo(HOST_A), null]) {
+      const err = await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, binding)),
+        ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+      );
+      expect(err.message).toBe(
+        "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
+      );
+    }
+    expect(retained).toHaveLength(0);
+    const expected = {
+      context: "ssh_agent",
+      key_type: "ssh-ed25519",
+      error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+      interface: "ssh_agent",
+    };
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([expected, expected]);
+  });
+
+  it("a derived key whose stored policy holds the block beside ssh_agent_socket: false is SSH_BOOTSTRAP_NOT_ALLOWED, not the opt-in's ACCESS_DENIED", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(
+      engine,
+      ids["deploy-ed"] as string,
+      injectionPolicyInputSchema.parse({ host_allowlist: ["github.test"], ssh_bootstrap: BLOCK }),
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+    );
+    expect(err.message).toBe(
+      "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
+    );
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([
+      {
+        context: "ssh_agent",
+        key_type: "ssh-ed25519",
+        error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+        interface: "ssh_agent",
+      },
+    ]);
+  });
+
+  it("a revoked derived key whose stored policy holds the block is SECRET_REVOKED: the status ahead of the block", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(engine, ids["deploy-ed"] as string, BOOTSTRAP_BESIDE_SOCKET);
+    await engine.revokeSecret("secret://deploy-ed");
+    const retained = retainDecryptedValues(engine);
+
+    await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([
+      {
+        handle: "secret://deploy-ed",
+        context: "ssh_agent",
+        key_type: "ssh-ed25519",
+        error: ErrorCode.SECRET_REVOKED,
+        interface: "ssh_agent",
+      },
+    ]);
+  });
+
+  it("a mark ends a served key at its signature", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    const id = ids["deploy-ed"] as string;
+    store().claimBootstrapMark(id, "claim-other", MARK_AT);
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+    );
+    expect(err.message).toBe(
+      "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host",
+    );
+    expect(retained).toHaveLength(0);
+    const rows = useRows(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: CONSUMER });
+    expect(rows[0]?.detail).toEqual({
+      context: "ssh_agent",
+      key_type: "ssh-ed25519",
+      error: ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+      secret_ended: true,
+      mark_at: MARK_AT,
+      interface: "ssh_agent",
+    });
+    const revokes = engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE, secretId: id });
+    expect(revokes).toHaveLength(1);
+    expect(revokes[0]).toMatchObject({ success: true, principal_id: CONSUMER });
+    expect(revokes[0]?.detail).toEqual({
+      handle: "secret://deploy-ed",
+      reason: "ssh_bootstrap",
+      interface: "ssh_agent",
+    });
+    expect(store().getSecret(id)?.status).toBe(SecretStatus.REVOKED);
+    expect(store().readBootstrapMark(id)).toBeUndefined();
   });
 
   it("a served key that expired is SECRET_EXPIRED ahead of the opt-in and the binding, with the lazy transition's row", async () => {

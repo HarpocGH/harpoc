@@ -30,6 +30,30 @@ export function isUniqueConstraintError(err: unknown): boolean {
   );
 }
 
+/** A bootstrap's mark on a secret (`vault_meta`): the claim of the call that wrote it and when. */
+export interface BootstrapMark {
+  claim: string;
+  at: number;
+}
+
+const BOOTSTRAP_MARK_KEY_PREFIX = "ssh_bootstrap_mark:";
+
+function parseBootstrapMark(value: string): BootstrapMark {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    parsed = undefined;
+  }
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const { claim, at } = parsed as { claim?: unknown; at?: unknown };
+    if (typeof claim === "string" && typeof at === "number" && Number.isFinite(at)) {
+      return { claim, at };
+    }
+  }
+  return { claim: "", at: 0 };
+}
+
 /** Filters for querying secrets. */
 export interface SecretFilter {
   project?: string;
@@ -395,6 +419,31 @@ export class SqliteStore {
 
   deleteMeta(key: string): void {
     this.db.prepare("DELETE FROM vault_meta WHERE key = ?").run(key);
+  }
+
+  claimBootstrapMark(secretId: string, claim: string, at: number): boolean {
+    try {
+      this.db
+        .prepare("INSERT INTO vault_meta (key, value) VALUES (?, ?)")
+        .run(BOOTSTRAP_MARK_KEY_PREFIX + secretId, JSON.stringify({ claim, at }));
+      return true;
+    } catch (err) {
+      if (isUniqueConstraintError(err)) return false;
+      throw err;
+    }
+  }
+
+  readBootstrapMark(secretId: string): BootstrapMark | undefined {
+    const value = this.getMeta(BOOTSTRAP_MARK_KEY_PREFIX + secretId);
+    return value === undefined ? undefined : parseBootstrapMark(value);
+  }
+
+  clearBootstrapMark(secretId: string): boolean {
+    return (
+      this.db
+        .prepare("DELETE FROM vault_meta WHERE key = ?")
+        .run(BOOTSTRAP_MARK_KEY_PREFIX + secretId).changes > 0
+    );
   }
 
   // ---------------------------------------------------------------------------

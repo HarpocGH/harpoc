@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ErrorCode } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { STDIN_ECHO_SCRIPT, STDIN_OPEN_PIPE_SCRIPT } from "./__fixtures__/spawn-children.js";
 import { sweepDescendants } from "./descendant-sweep.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import {
@@ -405,6 +406,27 @@ describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper
     );
     expect(r.exit_code).toBe(0);
     expect(JSON.parse(r.stdout)).toEqual(tricky);
+  }, 60_000);
+
+  it("standard input reaches the payload through the wrapper", async () => {
+    const lines = "first line\nsecond line\nthird line\n";
+    const input = Buffer.from(lines);
+    const r = await spawnCaptured(NODE, ["-e", STDIN_ECHO_SCRIPT], {
+      env: ENV,
+      timeoutMs: 20_000,
+      stdin: input,
+    });
+    expect(r).toMatchObject({ exit_code: 0, tree_kill: "job" });
+    expect(r.stdout).toBe(lines);
+  }, 60_000);
+
+  it("without a buffer the payload's standard input is an open pipe through the wrapper, never written and never ended", async () => {
+    const r = await spawnCaptured(NODE, ["-e", STDIN_OPEN_PIPE_SCRIPT], {
+      env: ENV,
+      timeoutMs: 20_000,
+    });
+    expect(r).toMatchObject({ exit_code: 0, tree_kill: "job" });
+    expect(r.stdout).toBe("open");
   }, 60_000);
 });
 

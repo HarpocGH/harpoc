@@ -1,4 +1,6 @@
 import type { ImapAction, UseSecretAction } from "@harpoc/shared";
+import { MAX_SSH_KEY_LINE_CHARS } from "@harpoc/shared";
+import { isSshName } from "./ssh-common.js";
 
 const CONTEXTS: Record<UseSecretAction["type"], true> = {
   http: true,
@@ -21,6 +23,44 @@ export function actionShapeRefusal(action: unknown): string | undefined {
   const type: unknown = (action as { type?: unknown }).type;
   if (typeof type !== "string") return `Unsupported action type: ${typeof type}`;
   if (!Object.hasOwn(CONTEXTS, type)) return `Unsupported action type: ${type}`;
+  if (type === "ssh") return sshBootstrapShapeRefusal(action as Record<string, unknown>);
+  return undefined;
+}
+
+const SSH_BOOTSTRAP_KEYS: Record<string, true> = {
+  type: true,
+  operation: true,
+  host: true,
+  user: true,
+  port: true,
+  public_key: true,
+  sudoers: true,
+};
+
+function sshBootstrapShapeRefusal(action: Record<string, unknown>): string | undefined {
+  if (action.operation === undefined) return undefined;
+  if (action.operation !== "bootstrap") return 'ssh operation must be "bootstrap"';
+  for (const [key, value] of Object.entries(action)) {
+    if (value !== undefined && !Object.hasOwn(SSH_BOOTSTRAP_KEYS, key)) {
+      return "an ssh bootstrap takes type, operation, host, user, port, public_key and sudoers alone";
+    }
+  }
+  if (!isSshName(action.host) || !isSshName(action.user)) {
+    return "an ssh bootstrap's host and user must be names of letters, digits, '.', '_' and '-'";
+  }
+  const port = action.port;
+  if (
+    port !== undefined &&
+    !(Number.isInteger(port) && (port as number) >= 1 && (port as number) <= 65_535)
+  ) {
+    return "an ssh bootstrap's port must be an integer from 1 to 65535";
+  }
+  if (typeof action.public_key !== "string" || action.public_key.length > MAX_SSH_KEY_LINE_CHARS) {
+    return "an ssh bootstrap's public_key must be a string of at most 4096 characters";
+  }
+  if (action.sudoers !== undefined && typeof action.sudoers !== "boolean") {
+    return "an ssh bootstrap's sudoers must be a boolean";
+  }
   return undefined;
 }
 

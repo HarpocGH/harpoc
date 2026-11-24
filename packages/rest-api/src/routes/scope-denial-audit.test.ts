@@ -47,6 +47,7 @@ const FULL_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
 const CREATE_BODY = { name: "k", type: "api_key" };
 const USE_BODY = {

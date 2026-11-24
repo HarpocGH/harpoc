@@ -128,6 +128,7 @@ export class RestClient implements VaultClient {
         proxy: policy.proxy,
         ssh_agent_socket: policy.ssh_agent_socket,
         local_dirs: policy.local_dirs,
+        ssh_bootstrap: policy.ssh_bootstrap,
         acknowledge_interpreters: options?.acknowledge_interpreters ?? false,
       },
     );

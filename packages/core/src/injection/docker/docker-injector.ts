@@ -12,6 +12,8 @@ import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from
 import { redactErrorMessage } from "../output-sanitizer.js";
 import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedResult } from "../spawn-captured.js";
+import { writeHelperFiles } from "../spawn-captured-helpers.js";
+import type { HelperFiles, HelperFilesSpec } from "../spawn-captured-helpers.js";
 import type { TreeKillMechanism } from "../win32-job-wrapper.js";
 
 /**
@@ -69,6 +71,13 @@ const out = JSON.stringify({
 });
 process.stdout.write(out + "\\n");
 `;
+
+const DOCKER_HELPER_FILES: HelperFilesSpec = {
+  prefix: "harpoc-docker-helper-",
+  script: "docker-credential-harpoc.mjs",
+  launcher: { posix: "docker-credential-harpoc", win32: "docker-credential-harpoc.cmd" },
+  source: DOCKER_CREDENTIAL_HELPER_SRC,
+};
 
 /**
  * Metadata-only audit projection of a docker-registry operation (spec §7.2) —
@@ -197,28 +206,6 @@ function writeDockerConfig(registry: string): { dir: string; dispose: () => void
   // so docker reads only this.
   const config = JSON.stringify({ credHelpers: { [registry]: "harpoc" } });
   writeFileSync(join(dir, "config.json"), config, { mode: 0o600 });
-  return { dir, dispose: () => disposeDir(dir) };
-}
-
-/**
- * A private dir holding the credential-helper launcher docker resolves by name
- * (`docker-credential-harpoc`), plus the embedded `.mjs` it execs. Mirrors
- * git-injector's `writeAskpass`: a `.cmd` launcher on win32, a `sh` launcher
- * otherwise, both exec `node <helper.mjs>`. The credential is passed to the
- * helper via env, never argv.
- */
-function writeCredentialHelper(): { dir: string; dispose: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "harpoc-docker-helper-"));
-  const helper = join(dir, "docker-credential-harpoc.mjs");
-  writeFileSync(helper, DOCKER_CREDENTIAL_HELPER_SRC, { mode: 0o700 });
-  const node = process.execPath;
-  if (process.platform === "win32") {
-    const launcher = join(dir, "docker-credential-harpoc.cmd");
-    writeFileSync(launcher, `@"${node}" "${helper}" %*\r\n`, { mode: 0o700 });
-  } else {
-    const launcher = join(dir, "docker-credential-harpoc");
-    writeFileSync(launcher, `#!/bin/sh\nexec "${node}" "${helper}" "$@"\n`, { mode: 0o700 });
-  }
   return { dir, dispose: () => disposeDir(dir) };
 }
 
@@ -352,12 +339,9 @@ async function runDocker(
   );
 
   const config = writeDockerConfig(credentialKey);
-  // The helper is created INSIDE the try so `config.dispose()` still runs if
-  // `writeCredentialHelper()` throws (mkdtemp/writeFile failure) — otherwise the
-  // credential-free config tmpdir would leak on that pre-try throw path.
-  let helper: { dir: string; dispose: () => void } | undefined;
+  let helper: HelperFiles | undefined;
   try {
-    helper = writeCredentialHelper();
+    helper = writeHelperFiles(DOCKER_HELPER_FILES, (err) => err);
     const env = baseDockerEnv(policy.env_allowlist);
     env.DOCKER_CONFIG = config.dir;
     // Prepend the helper dir so docker resolves docker-credential-harpoc there.

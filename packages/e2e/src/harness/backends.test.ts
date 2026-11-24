@@ -17,6 +17,7 @@ import {
   assertFleetUp,
   parseComposeRows,
 } from "./backends.js";
+import { SSHD_BOOTSTRAP } from "./bootstrap.js";
 
 /**
  * Plain TCP, deliberately NOT a TLS handshake: PostgreSQL 16 only starts TLS
@@ -122,6 +123,13 @@ describe("backend fleet", () => {
     assertFleetUp("sshd-rogue");
     expect(await canOpenTcp(SSHD_PINNED.host, SSHD_PINNED.port)).toBe(true);
     expect(await canOpenTcp(SSHD_ROGUE.host, SSHD_ROGUE.port)).toBe(true);
+  });
+
+  it("reaches the two sshd-bootstrap containers on 127.0.0.1 at their own 55xxx ports", async () => {
+    for (const target of Object.values(SSHD_BOOTSTRAP)) {
+      assertFleetUp(target.service);
+      expect(await canOpenTcp(target.host, target.port)).toBe(true);
+    }
   });
 
   it("reaches the git-http containers on their plain and TLS ports", async () => {

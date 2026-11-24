@@ -3,6 +3,9 @@ import type {
   ImapAction,
   SftpAction,
   SmtpAction,
+  SshAction,
+  SshBootstrapAction,
+  SshBootstrapResult,
   UseSecretAction,
   WebsocketAction,
 } from "@harpoc/shared";
@@ -51,6 +54,14 @@ export type _PinWebsocketActionAcceptedByUseSecret = Pin<
 export type _PinSftpActionAcceptedByUseSecret = Pin<Extends<SftpAction, UseSecretActionParam>>;
 export type _PinDockerRegistryActionAcceptedByUseSecret = Pin<
   Extends<DockerRegistryAction, UseSecretActionParam>
+>;
+
+export type _PinSshActionAcceptedByUseSecret = Pin<Extends<SshAction, UseSecretActionParam>>;
+export type _PinSshBootstrapActionAcceptedByUseSecret = Pin<
+  Extends<SshBootstrapAction, UseSecretActionParam>
+>;
+export type _PinSshBootstrapResultReturnedByUseSecret = Pin<
+  Extends<SshBootstrapResult, Awaited<ReturnType<VaultClient["useSecret"]>>>
 >;
 
 // Belt-and-suspenders: pin VaultClient.useSecret's parameter directly against

@@ -74,6 +74,12 @@ export enum ErrorCode {
   SSH_NOT_CONFIGURED = "SSH_NOT_CONFIGURED",
   INVALID_SSH_CONFIG = "INVALID_SSH_CONFIG",
   SSH_CLIENT_UNSUPPORTED = "SSH_CLIENT_UNSUPPORTED",
+  SSH_BOOTSTRAP_NOT_ALLOWED = "SSH_BOOTSTRAP_NOT_ALLOWED",
+  SSH_PASSWORD_NOT_OFFERED = "SSH_PASSWORD_NOT_OFFERED",
+  SSH_PASSWORD_REFUSED = "SSH_PASSWORD_REFUSED",
+  SSH_BOOTSTRAP_STEP_FAILED = "SSH_BOOTSTRAP_STEP_FAILED",
+  SSH_BOOTSTRAP_UNCONFIRMED = "SSH_BOOTSTRAP_UNCONFIRMED",
+  SSH_BOOTSTRAP_IN_FLIGHT = "SSH_BOOTSTRAP_IN_FLIGHT",
   GIT_OPERATION_FAILED = "GIT_OPERATION_FAILED",
   GIT_UNSUPPORTED_TRANSPORT = "GIT_UNSUPPORTED_TRANSPORT",
   INVALID_GIT_CONFIG = "INVALID_GIT_CONFIG",
@@ -233,6 +239,12 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.SSH_NOT_CONFIGURED]: 400,
   [ErrorCode.INVALID_SSH_CONFIG]: 400,
   [ErrorCode.SSH_CLIENT_UNSUPPORTED]: 501,
+  [ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED]: 403,
+  [ErrorCode.SSH_PASSWORD_NOT_OFFERED]: 502,
+  [ErrorCode.SSH_PASSWORD_REFUSED]: 502,
+  [ErrorCode.SSH_BOOTSTRAP_STEP_FAILED]: 502,
+  [ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED]: 502,
+  [ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT]: 409,
   [ErrorCode.GIT_OPERATION_FAILED]: 502,
   [ErrorCode.GIT_UNSUPPORTED_TRANSPORT]: 400,
   [ErrorCode.INVALID_GIT_CONFIG]: 400,
@@ -354,6 +366,23 @@ const UNLOCK_KEY_SOURCE_UNSAFE_TEXT: Record<UnlockKeySourceUnsafeReason, string>
   acl: "grants access to an account other than this process's account, SYSTEM and Administrators",
   acl_unverified: "has an access list that could not be read",
 };
+
+/** Why a use was refused by a secret's bootstrap block (design 4b B2, B3) — a closed vocabulary, never a host, user, port or key (hard rule 4, H1 E-2). */
+export type SshBootstrapRefusalReason =
+  "no_block" | "target" | "key" | "sudoers" | "bootstrap_only";
+
+const SSH_BOOTSTRAP_NOT_ALLOWED_TEXT: Record<SshBootstrapRefusalReason, string> = {
+  no_block: "SSH bootstrap not allowed: the secret's injection policy holds no bootstrap block",
+  target: "SSH bootstrap not allowed: host, user or port is not the bootstrap block's",
+  key: "SSH bootstrap not allowed: the public key is not one the bootstrap block lists",
+  sudoers: "SSH bootstrap not allowed: the bootstrap block does not allow the sudoers rule",
+  bootstrap_only:
+    "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
+};
+
+/** What the remote script says became of the sudoers drop-in, as the vault reads its status line. */
+export type SshBootstrapDropInWord =
+  "written" | "present" | "not_asked" | "not_attempted" | "refused";
 
 export class VaultError extends Error {
   readonly code: ErrorCode;
@@ -764,6 +793,67 @@ export class VaultError extends Error {
 
   static invalidSshConfig(message: string): VaultError {
     return new VaultError(ErrorCode.INVALID_SSH_CONFIG, message);
+  }
+
+  static sshBootstrapNotAllowed(reason: SshBootstrapRefusalReason): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+      SSH_BOOTSTRAP_NOT_ALLOWED_TEXT[reason],
+    );
+  }
+
+  static sshPasswordNotOffered(): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_PASSWORD_NOT_OFFERED,
+      "SSH bootstrap refused: the server does not offer password login",
+    );
+  }
+
+  static sshPasswordRefused(): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_PASSWORD_REFUSED,
+      "SSH bootstrap refused: the server refused the stored password; repeating the bootstrap can lock the vault host out of the server",
+    );
+  }
+
+  static sshBootstrapStepFailed(
+    dropIn: SshBootstrapDropInWord,
+    key: "not_attempted" | "failed",
+  ): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_BOOTSTRAP_STEP_FAILED,
+      `SSH bootstrap failed: no key was installed (sudoers: ${dropIn}, key: ${key})`,
+    );
+  }
+
+  static sshBootstrapUnconfirmed(): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+      "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host",
+    );
+  }
+
+  static sshBootstrapInFlight(): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT,
+      "SSH bootstrap in flight: another bootstrap of this secret is running",
+    );
+  }
+
+  static sshBootstrapOnWindows(): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_CLIENT_UNSUPPORTED,
+      "Unsupported ssh client: the ssh bootstrap is not served on a Windows vault host",
+    );
+  }
+
+  static sshClientBelowFloor(found: string | null, floor: string): VaultError {
+    return new VaultError(
+      ErrorCode.SSH_CLIENT_UNSUPPORTED,
+      found === null
+        ? `Unsupported ssh client: its version could not be read; an ssh bootstrap needs OpenSSH ${floor} or later`
+        : `Unsupported ssh client: OpenSSH ${found} is older than ${floor}, which an ssh bootstrap needs`,
+    );
   }
 
   static gitOperationFailed(detail?: string): VaultError {

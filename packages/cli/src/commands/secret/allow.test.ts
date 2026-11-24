@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionConfig, InjectionPolicy } from "@harpoc/shared";
+import type { ConnectionConfig, InjectionPolicy, SshBootstrapPolicy } from "@harpoc/shared";
+import { expectAbsent } from "@harpoc/test-utils";
 
 const { mockEngine } = vi.hoisted(() => ({
   mockEngine: {
@@ -49,6 +50,7 @@ const STORED_POLICY: InjectionPolicy = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
 
 const current: InjectionPolicy = {
@@ -66,7 +68,27 @@ const current: InjectionPolicy = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [],
+  ssh_bootstrap: null,
 };
+
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
+const KEY_A =
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+const KEY_B =
+  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDiRlhkneupuv3jgo1YA59JtrC+7Q9ocZXT54nv4vvv+77sjQ4T/HHrNVmc0ia2WVSMzcUQiBdgrdSYHcUp4P1dlo0Y552j00fGAo1KeQX93kqrQCpIm3QnKeYE4LpWjkdBdKI0xDLiak2HfYfC63uqcz0tNIKO1nQdlETEGe7tSQyVV/2KrIf8fTfRCRzSEXVxb4wgiZmSp4dcBqYYAIYulxSnJQaJr/idz/Md+Adqsz0GQIuspKHhajbpDakIMx+pJYv9LeIyKVFsu0AJMvn+mcz5W5dQpjdd+ECnNj1Kt1+9afM5fXOwakSqPYkX3Z52c9V6Bi4yT4mXIKt5eMrPWkMivj6imynq8WCGWTgZeIH2rFCmfRTiJh4jd70gm7SHCw9As/XER4bcyawV8Wh13sHICyTFpIbtoSHkUFYMJ8fS59ALDICSjypVUL6qUKrhV1lkqfObz4hGJCXk1K2jiE+cuRaq7Bp5qfpmkKMx6KzrdbNeNcSMGV7h+EWTJ9U=";
+const BLOCK: SshBootstrapPolicy = {
+  host: "h1.example",
+  port: 22,
+  user: "ubuntu",
+  host_keys: [HOST_KEY],
+  install_keys: [KEY_A],
+  sudoers: false,
+};
+const HOST_KEY_TEXT =
+  "Invalid host key: one of ssh-ed25519, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521, ssh-rsa, one space and its base64 key, nothing else";
+const PUBLIC_KEY_TEXT =
+  "Invalid public key: one of ssh-ed25519, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521, ssh-rsa, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com, one space and its base64 key, nothing else";
 
 describe("mergePolicy", () => {
   it("preserves omitted groups — a --url update cannot reset the response mode", () => {
@@ -151,6 +173,7 @@ describe("mergePolicy", () => {
       proxy: false,
       ssh_agent_socket: false,
       local_dirs: [],
+      ssh_bootstrap: null,
     });
   });
 
@@ -716,7 +739,196 @@ describe("secret allow command — local directories (S1)", () => {
   });
 });
 
-describe("secret allow command — each of the 15 flag groups alone is a set (T5)", () => {
+describe("secret allow command — the ssh bootstrap block (4b B1)", () => {
+  const STORED_BLOCK: InjectionPolicy = { ...STORED_POLICY, ssh_bootstrap: BLOCK };
+  const blocksWritten = (): unknown[] =>
+    mockEngine.setInjectionPolicy.mock.calls.map(
+      (call) => (call[1] as InjectionPolicy).ssh_bootstrap,
+    );
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_BLOCK });
+  });
+
+  it("the bootstrap flags set a block on a secret without one: port 22 and no sudoers by default", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+    await run([
+      "secret://k",
+      "--bootstrap-host",
+      "h1.example",
+      "--bootstrap-user",
+      "ubuntu",
+      "--bootstrap-host-key",
+      HOST_KEY,
+      "--bootstrap-key",
+      KEY_A,
+    ]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      [
+        "secret://k",
+        {
+          ...STORED_POLICY,
+          ssh_bootstrap: {
+            host: "h1.example",
+            port: 22,
+            user: "ubuntu",
+            host_keys: [HOST_KEY],
+            install_keys: [KEY_A],
+            sudoers: false,
+          },
+        },
+        { acknowledge_interpreters: false },
+        undefined,
+      ],
+    ]);
+  });
+
+  it("one bootstrap flag replaces its part of a stored block, nothing else", async () => {
+    await run(["secret://k", "--bootstrap-key", KEY_B]);
+    await run(["secret://k", "--bootstrap-port", "2222"]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      [
+        "secret://k",
+        { ...STORED_POLICY, ssh_bootstrap: { ...BLOCK, install_keys: [KEY_B] } },
+        { acknowledge_interpreters: false },
+        undefined,
+      ],
+      [
+        "secret://k",
+        { ...STORED_POLICY, ssh_bootstrap: { ...BLOCK, port: 2222 } },
+        { acknowledge_interpreters: false },
+        undefined,
+      ],
+    ]);
+  });
+
+  it("--bootstrap-sudoers and --no-bootstrap-sudoers set and clear the opt-in; neither keeps it (commander tri-state pin)", async () => {
+    await run(["secret://k", "--bootstrap-sudoers"]);
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      ssh_bootstrap: { ...BLOCK, sudoers: true },
+    });
+    await run(["secret://k", "--no-bootstrap-sudoers"]);
+    await run(["secret://k", "--bootstrap-user", "deploy"]);
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_BLOCK });
+    await run(["secret://k", "--bootstrap-user", "deploy"]);
+    expect(blocksWritten()).toEqual([
+      { ...BLOCK, sudoers: true },
+      { ...BLOCK, sudoers: false },
+      { ...BLOCK, user: "deploy", sudoers: true },
+      { ...BLOCK, user: "deploy", sudoers: false },
+    ]);
+  });
+
+  it("--clear-bootstrap removes the block and nothing else", async () => {
+    await run(["secret://k", "--clear-bootstrap"]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      ["secret://k", { ...STORED_POLICY }, { acknowledge_interpreters: false }, undefined],
+    ]);
+  });
+
+  it("--clear resets the block to null unless bootstrap flags rebuild it", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({
+      ...STORED_POLICY,
+      ssh_bootstrap: { ...BLOCK, port: 2222, sudoers: true },
+    });
+    await run(["secret://k", "--clear"]);
+    await run([
+      "secret://k",
+      "--clear",
+      "--bootstrap-host",
+      "h2.example",
+      "--bootstrap-user",
+      "deploy",
+      "--bootstrap-host-key",
+      KEY_B,
+      "--bootstrap-key",
+      KEY_B,
+    ]);
+    expect(blocksWritten()).toEqual([
+      null,
+      {
+        host: "h2.example",
+        port: 22,
+        user: "deploy",
+        host_keys: [KEY_B],
+        install_keys: [KEY_B],
+        sudoers: false,
+      },
+    ]);
+  });
+
+  it("a part on a secret without a block is refused naming what the block lacks, nothing written", async () => {
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED_POLICY });
+    await expect(run(["secret://k", "--bootstrap-key", KEY_A])).rejects.toThrow("process.exit");
+    const stderr = spies.stderr();
+    expect(stderr).toMatch(/^Error: \[SCHEMA_VALIDATION_ERROR\] /);
+    expect(stderr).toContain("ssh_bootstrap.host: ");
+    expect(stderr).toContain("ssh_bootstrap.user: ");
+    expect(stderr).toContain("ssh_bootstrap.host_keys: ");
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, string[], string]>([
+    [
+      "--clear-bootstrap beside bootstrap flags",
+      ["--clear-bootstrap", "--bootstrap-host", "h", "--bootstrap-key", KEY_A],
+      "Error: [INVALID_INPUT] --clear-bootstrap conflicts with --bootstrap-host, --bootstrap-key",
+    ],
+    [
+      "a port that is no decimal number",
+      ["--bootstrap-port", "0x16"],
+      'Error: [INVALID_INPUT] Invalid bootstrap-port "0x16". Must be 1-65535.',
+    ],
+    [
+      "an IPv4 host in another spelling",
+      ["--bootstrap-host", "127.1"],
+      "Error: [SCHEMA_VALIDATION_ERROR] host: Invalid host: an IPv4 address only as four decimal numbers 0-255 without leading zeros",
+    ],
+    [
+      "a .pub line with its comment",
+      ["--bootstrap-key", `${KEY_A} me@laptop`],
+      `Error: [SCHEMA_VALIDATION_ERROR] install_keys.0: ${PUBLIC_KEY_TEXT}`,
+    ],
+    [
+      "an ssh-keyscan line",
+      ["--bootstrap-host-key", `h1.example ${HOST_KEY}`],
+      `Error: [SCHEMA_VALIDATION_ERROR] host_keys.0: ${HOST_KEY_TEXT}`,
+    ],
+  ])("refused before the vault opens: %s", async (_case, args, line) => {
+    await expect(run(["secret://k", ...args])).rejects.toThrow("process.exit");
+    expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+    expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, string[], string, RegExp]>([
+    [
+      "a .pub line with its comment",
+      ["--bootstrap-key", `${KEY_A} me@laptop`],
+      KEY_A,
+      /^Error: \[SCHEMA_VALIDATION_ERROR\] install_keys\.0: Invalid public key: one of [^\n]+, one space and its base64 key, nothing else$/,
+    ],
+    [
+      "an ssh-keyscan line",
+      ["--bootstrap-host-key", `h1.example ${HOST_KEY}`],
+      HOST_KEY,
+      /^Error: \[SCHEMA_VALIDATION_ERROR\] host_keys\.0: Invalid host key: one of [^\n]+, one space and its base64 key, nothing else$/,
+    ],
+  ])(
+    "a refusal names the form and never echoes the pasted line: %s",
+    async (_case, args, key, form) => {
+      await expect(run(["secret://k", ...args])).rejects.toThrow("process.exit");
+      const stderr = spies.stderr();
+      expectAbsent(stderr, key.split(" ")[1] as string, "the refusal");
+      expect(stderr).toMatch(form);
+    },
+  );
+});
+
+describe("secret allow command — each of the 16 flag groups alone is a set (T5)", () => {
   const STORED: InjectionPolicy = { ...STORED_POLICY, imap_read_only: false };
 
   beforeEach(() => {
@@ -761,6 +973,7 @@ describe("secret allow command — each of the 15 flag groups alone is a set (T5
     { flag: "--ssh-agent-socket", args: ["--ssh-agent-socket"], set: { ssh_agent_socket: true } },
     { flag: "--local-dir", args: ["--local-dir", "/srv/out"], set: { local_dirs: ["/srv/out"] } },
     { flag: "--clear", args: ["--clear"], set: { command_allowlist: [] } },
+    { flag: "--clear-bootstrap", args: ["--clear-bootstrap"], set: { ssh_bootstrap: null } },
   ])("$flag alone is a set, not a show", async ({ args, set }) => {
     await run(["secret://k", ...args]);
     expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
@@ -773,5 +986,42 @@ describe("secret allow command — each of the 15 flag groups alone is a set (T5
     await run(["secret://k", "--acknowledge-interpreter"]);
     expect(mockEngine.setInjectionPolicy).not.toHaveBeenCalled();
     expect(spies.stdout()).toBe(JSON.stringify(STORED, null, 2));
+  });
+});
+
+describe("secret allow command — each bootstrap flag alone is a set on a stored block (4b B1)", () => {
+  const STORED: InjectionPolicy = { ...STORED_POLICY, ssh_bootstrap: BLOCK };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEngine.getInjectionPolicy.mockResolvedValue({ ...STORED });
+  });
+
+  it.each<{ flag: string; args: string[]; set: Partial<SshBootstrapPolicy> }>([
+    {
+      flag: "--bootstrap-host",
+      args: ["--bootstrap-host", "h2.example"],
+      set: { host: "h2.example" },
+    },
+    { flag: "--bootstrap-port", args: ["--bootstrap-port", "2222"], set: { port: 2222 } },
+    { flag: "--bootstrap-user", args: ["--bootstrap-user", "deploy"], set: { user: "deploy" } },
+    {
+      flag: "--bootstrap-host-key",
+      args: ["--bootstrap-host-key", KEY_B],
+      set: { host_keys: [KEY_B] },
+    },
+    { flag: "--bootstrap-key", args: ["--bootstrap-key", KEY_B], set: { install_keys: [KEY_B] } },
+    { flag: "--bootstrap-sudoers", args: ["--bootstrap-sudoers"], set: { sudoers: true } },
+  ])("$flag alone is a set, not a show", async ({ args, set }) => {
+    await run(["secret://k", ...args]);
+    expect(mockEngine.setInjectionPolicy.mock.calls).toEqual([
+      [
+        "secret://k",
+        { ...STORED, ssh_bootstrap: { ...BLOCK, ...set } },
+        { acknowledge_interpreters: false },
+        undefined,
+      ],
+    ]);
+    expect(spies.stdout()).toBe("");
   });
 });

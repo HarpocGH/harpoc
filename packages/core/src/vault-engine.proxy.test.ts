@@ -3,11 +3,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, SecretType } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  injectionPolicyInputSchema,
+  SecretStatus,
+  SecretType,
+} from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import type { ProxyTarget } from "./vault-engine.js";
-import { registerAgents, registryOf, retainDecryptedValues } from "./__fixtures__/engine-seams.js";
+import {
+  registerAgents,
+  registryOf,
+  retainDecryptedValues,
+  storeInjectionPolicyBlob,
+} from "./__fixtures__/engine-seams.js";
+import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
 
@@ -19,6 +31,19 @@ const PLAINTEXT = "ghp-proxy-credential-b2";
 const HANDLE = "secret://gh";
 const TARGET: ProxyTarget = { method: "GET", origin: "https://api.github.com", path: "/user" };
 const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+const BOOTSTRAP_ONLY =
+  "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone";
+const BOOTSTRAP_ONLY_ROW = {
+  context: "proxy",
+  method: "GET",
+  origin: "https://api.github.com",
+  path: "/user",
+  error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+  interface: "proxy",
+};
+const MARK_AT = 1_700_000_000_000;
+const UNCONFIRMED =
+  "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host";
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -43,6 +68,7 @@ function useRows(id?: string) {
 }
 
 const allZero = (buf: Uint8Array): boolean => buf.every((b) => b === 0);
+const liveStore = (): SqliteStore => (engine as unknown as { store: SqliteStore }).store;
 
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-proxy-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -250,6 +276,155 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       path: "/user",
       error: ErrorCode.PROXY_PLACEHOLDER_DENIED,
       interface: "proxy",
+    });
+  });
+
+  it("refuses a secret with the bootstrap block SSH_BOOTSTRAP_NOT_ALLOWED ahead of the opt-in, before any decrypt", async () => {
+    await engine.setInjectionPolicy(HANDLE, {
+      url_allowlist: ["https://api.github.com/*"],
+      ssh_bootstrap: BLOCK,
+    });
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+    );
+    expectAbsent(err.message, PLAINTEXT);
+    expect(err.message).toBe(BOOTSTRAP_ONLY);
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+    expect(rows[0]?.detail).toEqual(BOOTSTRAP_ONLY_ROW);
+  });
+
+  it("a stored policy that holds the block beside proxy: true is refused the same way", async () => {
+    storeInjectionPolicyBlob(
+      engine,
+      secretId,
+      injectionPolicyInputSchema.parse({
+        url_allowlist: ["https://api.github.com/*"],
+        proxy: true,
+        ssh_bootstrap: BLOCK,
+      }),
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+    );
+    expectAbsent(err.message, PLAINTEXT);
+    expect(err.message).toBe(BOOTSTRAP_ONLY);
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+    expect(rows[0]?.detail).toEqual(BOOTSTRAP_ONLY_ROW);
+  });
+
+  it("a revoked secret that holds the block answers SECRET_REVOKED: the status ahead of the block", async () => {
+    await engine.setInjectionPolicy(HANDLE, {
+      url_allowlist: ["https://api.github.com/*"],
+      ssh_bootstrap: BLOCK,
+    });
+    await engine.revokeSecret(HANDLE);
+    const retained = retainDecryptedValues(engine);
+
+    await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toEqual({
+      handle: HANDLE,
+      context: "proxy",
+      method: "GET",
+      origin: "https://api.github.com",
+      path: "/user",
+      error: ErrorCode.SECRET_REVOKED,
+      interface: "proxy",
+    });
+  });
+
+  it.each([
+    { optIn: "on", policy: { url_allowlist: ["https://api.github.com/*"], proxy: true } },
+    { optIn: "off", policy: { url_allowlist: ["https://api.github.com/*"] } },
+  ])(
+    "a mark ends the secret on the proxy's path, before the opt-in and any decrypt — the opt-in $optIn",
+    async ({ policy }) => {
+      await engine.setInjectionPolicy(HANDLE, policy);
+      liveStore().claimBootstrapMark(secretId, "claim-other", MARK_AT);
+      const retained = retainDecryptedValues(engine);
+
+      const err = await expectVaultError(
+        () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+        ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+      );
+      expectAbsent(err.message, PLAINTEXT);
+      expect(err.message).toBe(UNCONFIRMED);
+      expect(retained).toHaveLength(0);
+      const rows = useRows(secretId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+      expect(rows[0]?.detail).toEqual({
+        context: "proxy",
+        method: "GET",
+        origin: "https://api.github.com",
+        path: "/user",
+        error: ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+        secret_ended: true,
+        mark_at: MARK_AT,
+        interface: "proxy",
+      });
+      const revokes = engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE, secretId });
+      expect(revokes).toHaveLength(1);
+      expect(revokes[0]).toMatchObject({ success: true, principal_id: "alice" });
+      expect(revokes[0]?.detail).toEqual({
+        handle: HANDLE,
+        reason: "ssh_bootstrap",
+        interface: "proxy",
+      });
+      expect(liveStore().getSecret(secretId)?.status).toBe(SecretStatus.REVOKED);
+      expect(liveStore().readBootstrapMark(secretId)).toBeUndefined();
+    },
+  );
+
+  it("a held mark refuses a proxied request in flight", async () => {
+    liveStore().claimBootstrapMark(secretId, "claim-other", MARK_AT);
+    (engine as unknown as { bootstrapHolds: Map<string, string> }).bootstrapHolds.set(
+      secretId,
+      "claim-other",
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT,
+    );
+    expect(err.message).toBe(
+      "SSH bootstrap in flight: another bootstrap of this secret is running",
+    );
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+    expect(rows[0]?.detail).toEqual({
+      context: "proxy",
+      method: "GET",
+      origin: "https://api.github.com",
+      path: "/user",
+      error: ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT,
+      interface: "proxy",
+    });
+    expect(engine.queryAudit({ eventType: AuditEventType.SECRET_REVOKE })).toHaveLength(0);
+    expect(liveStore().getSecret(secretId)?.status).toBe(SecretStatus.ACTIVE);
+    expect(liveStore().readBootstrapMark(secretId)).toEqual({
+      claim: "claim-other",
+      at: MARK_AT,
     });
   });
 

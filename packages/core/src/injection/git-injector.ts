@@ -68,6 +68,8 @@ import {
 import type { DaemonPaths } from "./local-path.js";
 import { redactCaptured, spawnCaptured } from "./spawn-captured.js";
 import type { SpawnCapturedResult } from "./spawn-captured.js";
+import { writeHelperFiles } from "./spawn-captured-helpers.js";
+import type { HelperFiles, HelperFilesSpec } from "./spawn-captured-helpers.js";
 import { EphemeralSshAgent } from "./ssh-agent/index.js";
 import {
   assertNativeWin32SshClient,
@@ -232,6 +234,13 @@ const isUser = /^\\s*username\\b/i.test(prompt);
 const out = isUser ? (process.env.HARPOC_GIT_USERNAME || "") : (process.env.HARPOC_GIT_PASSWORD || "");
 process.stdout.write(out + "\\n");
 `;
+
+const GIT_ASKPASS_FILES: HelperFilesSpec = {
+  prefix: "harpoc-git-",
+  script: "askpass.mjs",
+  launcher: { posix: "askpass.sh", win32: "askpass.cmd" },
+  source: ASKPASS_HELPER_SRC,
+};
 
 /**
  * Config the vault forces on every HTTPS invocation. `http.followRedirects=false`
@@ -603,9 +612,9 @@ export class GitInjector {
       throw err;
     }
     const timeoutMs = action.timeout_ms ?? DEFAULT_GIT_TIMEOUT_MS;
-    let askpass: { launcher: string; dispose: () => void };
+    let askpass: HelperFiles;
     try {
-      askpass = writeAskpass();
+      askpass = writeHelperFiles(GIT_ASKPASS_FILES, tempFileFailure);
     } catch (err) {
       hooks.dispose();
       const failure = tempFileFailure(err);
@@ -2280,42 +2289,6 @@ function createEmptyHooksDir(): { dir: string; dispose: () => void } {
   }
   return {
     dir,
-    dispose: () => {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    },
-  };
-}
-
-/** Vault-authored askpass launcher + helper in a temp dir; credential passed via env, not argv. */
-function writeAskpass(): { launcher: string; dispose: () => void } {
-  let dir: string;
-  try {
-    dir = mkdtempSync(join(tmpdir(), "harpoc-git-"));
-  } catch (err) {
-    throw tempFileFailure(err);
-  }
-  const helper = join(dir, "askpass.mjs");
-  const node = process.execPath;
-  let launcher: string;
-  try {
-    writeFileSync(helper, ASKPASS_HELPER_SRC, { mode: 0o700 });
-    if (process.platform === "win32") {
-      launcher = join(dir, "askpass.cmd");
-      writeFileSync(launcher, `@"${node}" "${helper}" %*\r\n`, { mode: 0o700 });
-    } else {
-      launcher = join(dir, "askpass.sh");
-      writeFileSync(launcher, `#!/bin/sh\nexec "${node}" "${helper}" "$@"\n`, { mode: 0o700 });
-    }
-  } catch (err) {
-    rmSync(dir, { recursive: true, force: true });
-    throw tempFileFailure(err);
-  }
-  return {
-    launcher,
     dispose: () => {
       try {
         rmSync(dir, { recursive: true, force: true });

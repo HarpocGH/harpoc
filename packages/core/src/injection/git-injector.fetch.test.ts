@@ -93,6 +93,7 @@ describeGit("Git fetch through the relay — real git over smart HTTP (M6)", () 
       proxy: false,
       ssh_agent_socket: false,
       local_dirs: [],
+      ssh_bootstrap: null,
     };
   }
 

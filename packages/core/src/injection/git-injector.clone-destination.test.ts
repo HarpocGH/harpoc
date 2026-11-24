@@ -105,6 +105,7 @@ function policy(urlAllowlist: string[] = ["https://8.8.8.8/*"]): InjectionPolicy
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: [],
+    ssh_bootstrap: null,
   };
 }
 

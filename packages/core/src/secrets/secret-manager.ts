@@ -428,6 +428,16 @@ export class SecretManager {
       throw VaultError.secretRevoked(handle);
     }
 
+    this.revokeResolved(secret, onCommit);
+  }
+
+  /**
+   * The status write of `revokeSecret`, with `onCommit` in its transaction, for
+   * a record the engine has judged; a throw of `onCommit` rolls it back.
+   *
+   * @internal Engine seam, not part of the `@harpoc/core` public API.
+   */
+  revokeResolved(secret: Secret, onCommit?: (secretId: string) => void): void {
     this.store.transaction(() => {
       this.store.updateSecret(secret.id, {
         status: SecretStatus.REVOKED,

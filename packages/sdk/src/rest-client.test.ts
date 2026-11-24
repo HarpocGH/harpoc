@@ -28,6 +28,18 @@ const FULL_POLICY = {
   proxy: false,
   ssh_agent_socket: false,
   local_dirs: [] as string[],
+  ssh_bootstrap: null,
+};
+// The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const BOOTSTRAP_BLOCK = {
+  host: "h1.example",
+  port: 2222,
+  user: "ubuntu",
+  host_keys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx"],
+  install_keys: [
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=",
+  ],
+  sudoers: true,
 };
 
 const HANDLE = "secret://proj/k";
@@ -712,6 +724,26 @@ describe("RestClient", () => {
       });
     });
 
+    it("setInjectionPolicy sends ssh_bootstrap in the whole-policy body (4b B1)", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", {
+        ...FULL_POLICY,
+        ssh_bootstrap: BOOTSTRAP_BLOCK,
+      });
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", FULL_POLICY);
+      const [withBlock, without] = fetchSpy.mock.calls.map(
+        (call) =>
+          JSON.parse((call as [string, RequestInit])[1].body as string) as Record<string, unknown>,
+      );
+      expect(withBlock).toStrictEqual({
+        ...FULL_POLICY,
+        ssh_bootstrap: BOOTSTRAP_BLOCK,
+        acknowledge_interpreters: false,
+      });
+      expect((without as Record<string, unknown>)["ssh_bootstrap"]).toBeNull();
+    });
+
     it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
       mockFetchResponse({ updated: true });
       const full = {
@@ -729,6 +761,7 @@ describe("RestClient", () => {
         proxy: true,
         ssh_agent_socket: true,
         local_dirs: ["/srv/out"],
+        ssh_bootstrap: BOOTSTRAP_BLOCK,
       };
       await client.setInjectionPolicy("secret://k", full);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];

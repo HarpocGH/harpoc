@@ -1,10 +1,4 @@
-import {
-  createHash,
-  createHmac,
-  createPrivateKey,
-  timingSafeEqual,
-  X509Certificate,
-} from "node:crypto";
+import { createHmac, createPrivateKey, timingSafeEqual, X509Certificate } from "node:crypto";
 import {
   closeSync,
   fchmodSync,
@@ -47,7 +41,12 @@ import type {
   SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
   SmtpAction,
+  SshAction,
   SshAgentUnboundReason,
+  SshBootstrapAction,
+  SshBootstrapPolicy,
+  SshBootstrapRefusalReason,
+  SshBootstrapResult,
   TokenPrincipalType,
   UpdateAgentInput,
   UseSecretAction,
@@ -106,6 +105,9 @@ import {
   SESSION_CLEANUP_INTERVAL_MS,
   TokenPrincipalType as TokenPrincipalTypeValues,
   SESSION_SLIDE_INTERVAL_MS,
+  SSH_BOOTSTRAP_TIMEOUT_MS,
+  SSH_HOST_KEY_TYPES,
+  SSH_INSTALL_KEY_TYPES,
   TOKEN_LABEL_MAX_LENGTH,
   VaultError,
   VaultState,
@@ -150,6 +152,7 @@ import {
   matchesHostAllowlist,
   matchesPlainUpstream,
   matchesUrlAllowlist,
+  resolveAndMatchCommand,
   resolveExecutable,
 } from "./injection/allowlist.js";
 import { DatabaseInjector } from "./injection/database-injector.js";
@@ -185,6 +188,11 @@ import type {
 import { hostsForHostKey } from "./injection/ssh-agent/known-hosts.js";
 import { SshReader } from "./injection/ssh-agent/ssh-wire.js";
 import { parseUserauthRequest } from "./injection/ssh-agent/userauth-request.js";
+import type { SshPublicKey } from "./injection/ssh-common-keys.js";
+import { parseSshPublicKey, sameSshKey, sshKeyFingerprint } from "./injection/ssh-common-keys.js";
+import { refuseUnsupportedSshClient } from "./injection/ssh-common-version.js";
+import type { BootstrapOutcome, SpawnAuditFields } from "./injection/ssh-injector-bootstrap.js";
+import { refuseWindowsVaultHost, runBootstrap } from "./injection/ssh-injector-bootstrap.js";
 import { SshInjector } from "./injection/ssh-injector.js";
 import { validateUrl } from "./injection/url-validator.js";
 import type { WebsocketExecution } from "./injection/websocket-injector.js";
@@ -450,6 +458,13 @@ export type WebsocketExecutor = typeof executeWebsocketAction;
 export type SftpExecutor = typeof executeSftpAction;
 export type DockerExecutor = typeof executeDockerRegistryAction;
 
+/** The ssh bootstrap's injector, as the engine reaches it: the Windows refusal, the client's version, the one spawn. */
+export interface SshBootstrapSeam {
+  refuseVaultHost: typeof refuseWindowsVaultHost;
+  refuseOldClient: typeof refuseUnsupportedSshClient;
+  run: typeof runBootstrap;
+}
+
 /** How an engine's keys were installed — the unlock-key slot is administered after a password unlock only. */
 type UnlockMethod = "password" | "credential" | "session";
 
@@ -484,6 +499,7 @@ interface UnlockedState {
   websocketExecutor: WebsocketExecutor;
   sftpExecutor: SftpExecutor;
   dockerExecutor: DockerExecutor;
+  sshBootstrap: SshBootstrapSeam;
 }
 
 const DAY_MS = 86_400_000;
@@ -647,9 +663,110 @@ function isServableNow(secret: Secret): boolean {
   );
 }
 
-/** `ssh-keygen -l`'s SHA256 fingerprint of a public key blob — the one fact a row records about a key no secret holds. */
-function sshKeyFingerprint(blob: Uint8Array): string {
-  return `SHA256:${createHash("sha256").update(blob).digest("base64").replace(/=+$/, "")}`;
+/** The block's key lines read with their list; a line that does not parse is corruption. */
+function parseBlockKeys(lines: readonly string[], types: readonly string[]): SshPublicKey[] {
+  return lines.map((line) => {
+    const key = parseSshPublicKey(line, types);
+    if (key === null) throw VaultError.vaultCorrupted("an ssh_bootstrap key line does not parse");
+    return key;
+  });
+}
+
+/** The block as a policy.grant row records it: every key line as its fingerprint. */
+function bootstrapBlockDetail(block: SshBootstrapPolicy | null): Record<string, unknown> | null {
+  if (block === null) return null;
+  const fingerprints = (lines: readonly string[], types: readonly string[]): string[] =>
+    parseBlockKeys(lines, types).map((key) => sshKeyFingerprint(key.blob));
+  return {
+    host: block.host,
+    port: block.port,
+    user: block.user,
+    host_keys: fingerprints(block.host_keys, SSH_HOST_KEY_TYPES),
+    install_keys: fingerprints(block.install_keys, SSH_INSTALL_KEY_TYPES),
+    sudoers: block.sudoers,
+  };
+}
+
+const SSH_BOOTSTRAP_PASSWORD_MAX_BYTES = 1023;
+
+const SSH_PASSWORD_SHAPE_REFUSED =
+  "the stored value cannot be an ssh password: it is empty, is no UTF-8 text, holds a line break or a NUL byte, or is longer than 1023 bytes";
+
+/** Whether a stored value can be the bootstrap's password: one line of UTF-8 text without a NUL byte, 1 to 1023 bytes. */
+function isSshPassword(value: Uint8Array): boolean {
+  if (value.length === 0 || value.length > SSH_BOOTSTRAP_PASSWORD_MAX_BYTES) return false;
+  if (value.includes(0x0d) || value.includes(0x0a) || value.includes(0x00)) return false;
+  const view = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  const again = Buffer.from(view.toString("utf8"), "utf8");
+  try {
+    return again.equals(view);
+  } finally {
+    wipeBuffer(again);
+  }
+}
+
+/** What the judgement of a bootstrap action hands its run: the block's parsed keys, the opt-in asked, the resolved client and the row form `B`. */
+interface BootstrapPlan {
+  block: SshBootstrapPolicy;
+  installKey: SshPublicKey;
+  hostKeys: SshPublicKey[];
+  sudoers: boolean;
+  sshPath: string;
+  detail: Record<string, unknown>;
+}
+
+/** The claim's transaction, as the call reads it after the commit. */
+type BootstrapClaim =
+  | { kind: "taken" }
+  | { kind: "unusable"; current: Secret | undefined }
+  | { kind: "refused"; error: VaultError; endsChild: boolean };
+
+const SPAWN_AUDIT_KEYS = [
+  "exit_code",
+  "timed_out",
+  "truncated",
+  "network_isolation",
+  "isolation_mechanism",
+  "fs_isolation",
+  "fs_isolation_mechanism",
+  "sanitized",
+  "descendant_sweep",
+  "tree_kill",
+  "strict_tree_exit",
+] as const satisfies readonly (keyof SpawnAuditFields)[];
+
+function spawnAuditDetail(spawn: BootstrapOutcome["spawn"]): Record<string, unknown> {
+  const given: Partial<SpawnAuditFields> = spawn ?? {};
+  const picked: Record<string, unknown> = {};
+  for (const key of SPAWN_AUDIT_KEYS) {
+    if (given[key] !== undefined) picked[key] = given[key];
+  }
+  return picked;
+}
+
+/** The outcome's row: `B`, what the outcome was, whether the secret ended, the spawn seam's fields. */
+function bootstrapOutcomeDetail(
+  detail: Record<string, unknown>,
+  outcome: BootstrapOutcome,
+  ended: boolean,
+  markGone: boolean,
+): Record<string, unknown> {
+  const said =
+    outcome.kind === "done"
+      ? { key: outcome.key, drop_in: outcome.sudoers }
+      : outcome.kind === "refused" && outcome.status !== undefined
+        ? { error: outcome.error.code, drop_in: outcome.status.dropIn, key: outcome.status.key }
+        : outcome.kind === "refused" || outcome.kind === "not_spawned"
+          ? { error: outcome.error.code }
+          : { error: ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED };
+  return {
+    ...detail,
+    outcome: outcome.kind,
+    ...said,
+    secret_ended: ended,
+    ...(markGone ? { mark: "gone" } : {}),
+    ...spawnAuditDetail(outcome.spawn),
+  };
 }
 
 /** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
@@ -741,6 +858,11 @@ export class VaultEngine {
   private websocketExecutor: WebsocketExecutor = executeWebsocketAction;
   private sftpExecutor: SftpExecutor = executeSftpAction;
   private dockerExecutor: DockerExecutor = executeDockerRegistryAction;
+  private sshBootstrap: SshBootstrapSeam = {
+    refuseVaultHost: refuseWindowsVaultHost,
+    refuseOldClient: refuseUnsupportedSshClient,
+    run: runBootstrap,
+  };
   private daemonPaths: DaemonPaths | undefined;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -764,6 +886,8 @@ export class VaultEngine {
     string,
     { version: number; ctIv: string; publicKeyBlob: Buffer | null }
   >();
+  /** The bootstrap marks this engine's running calls hold: the claim by secret id. Cleared by `wipeKeys`. */
+  private readonly bootstrapHolds = new Map<string, string>();
   /**
    * The agent sockets' per-secret signature buckets and per-consumer signature
    * and listing buckets (`sign:<consumer>`, `listing:<consumer>`), `use_secret`'s budget
@@ -1465,13 +1589,7 @@ export class VaultEngine {
         handle,
         (secretId) => {
           revokedId = secretId;
-          s.auditLogger.log({
-            eventType: AuditEventType.SECRET_REVOKE,
-            secretId,
-            ...callerColumns(caller),
-            detail: { handle, ...callerInterfaceDetail(caller) },
-            sessionId: this.sessionId ?? undefined,
-          });
+          this.auditRevocation(s, secretId, handle, caller);
         },
         secret,
       );
@@ -1486,12 +1604,36 @@ export class VaultEngine {
     // out indefinitely (L2). Terminated after the revoke commits, so a failed
     // teardown cannot roll the revocation back.
     if (revokedId) {
-      await s.mcpRegistry.terminate(
-        revokedId,
-        "secret_revoked",
-        attributionFromCaller(caller, this.sessionId),
-      );
+      await this.endRevokedChild(s, revokedId, caller);
     }
+  }
+
+  private auditRevocation(
+    s: UnlockedState,
+    secretId: string,
+    handle: string,
+    caller: CallerContext | undefined,
+    extra?: Record<string, unknown>,
+  ): void {
+    s.auditLogger.log({
+      eventType: AuditEventType.SECRET_REVOKE,
+      secretId,
+      ...callerColumns(caller),
+      detail: { handle, ...extra, ...callerInterfaceDetail(caller) },
+      sessionId: this.sessionId ?? undefined,
+    });
+  }
+
+  private async endRevokedChild(
+    s: UnlockedState,
+    secretId: string,
+    caller: CallerContext | undefined,
+  ): Promise<void> {
+    await s.mcpRegistry.terminate(
+      secretId,
+      "secret_revoked",
+      attributionFromCaller(caller, this.sessionId),
+    );
   }
 
   /**
@@ -1522,11 +1664,14 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     const shapeRefusal = actionShapeRefusal(action);
     if (shapeRefusal !== undefined) throw VaultError.invalidInput(shapeRefusal);
+    const bootstrap: SshBootstrapAction | undefined =
+      action.type === "ssh" && action.operation === "bootstrap" ? action : undefined;
 
     let secret: Secret | undefined;
     let attribution: AuditAttribution | undefined;
     let policy: InjectionPolicy;
     let imapConnection: ConnectionConfig | undefined;
+    let plan: BootstrapPlan | undefined;
     let value: Uint8Array;
     try {
       try {
@@ -1606,6 +1751,39 @@ export class VaultEngine {
         throw toUseError(err);
       }
 
+      if (bootstrap === undefined) {
+        try {
+          this.refuseBootstrapOnly(
+            s,
+            secret.id,
+            policy,
+            { handle, context: action.type },
+            attribution,
+          );
+        } catch (err) {
+          await s.mcpRegistry.terminate(secret.id, "ssh_bootstrap_enabled", attribution);
+          throw err;
+        }
+        await this.refuseOnBootstrapMark(
+          s,
+          secret,
+          handle,
+          { handle, context: action.type },
+          caller,
+          attribution,
+        );
+      } else {
+        plan = await this.judgeBootstrapAction(
+          s,
+          handle,
+          bootstrap,
+          secret,
+          policy,
+          caller,
+          attribution,
+        );
+      }
+
       // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
       // before any spawn, and before the credential is even decrypted. The
       // spawned `docker` CLI is a thin client: the daemon the vault never
@@ -1635,21 +1813,33 @@ export class VaultEngine {
       // the config store.
       imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
 
-      this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
+      if (plan === undefined) this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
 
+      let resolvedId: string | undefined;
       try {
-        if (secret.type === SecretType.OAUTH_TOKEN) {
+        if (plan !== undefined) {
+          value = await s.secretManager.getSecretValue(handle, (id) => (resolvedId = id));
+          if (resolvedId !== secret.id) {
+            wipeBuffer(value);
+            throw VaultError.secretRevoked(handle);
+          }
+        } else if (secret.type === SecretType.OAUTH_TOKEN) {
           const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
           value = new Uint8Array(Buffer.from(accessToken, "utf8"));
         } else {
           value = await s.secretManager.getSecretValue(handle);
         }
-      } catch (err) {
+      } catch (thrown) {
+        if (plan !== undefined && !this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+        const err =
+          plan !== undefined && resolvedId !== undefined && resolvedId !== secret.id
+            ? VaultError.secretRevoked(handle)
+            : thrown;
         this.auditDenied(
           s,
           AuditEventType.SECRET_USE,
           err,
-          { handle, context: action.type },
+          plan !== undefined ? plan.detail : { handle, context: action.type },
           secret.id,
           caller,
         );
@@ -1681,6 +1871,18 @@ export class VaultEngine {
     }
 
     try {
+      if (plan !== undefined) {
+        return await this.runSshBootstrap(
+          s,
+          handle,
+          plan,
+          secret,
+          policy,
+          value,
+          caller,
+          attribution,
+        );
+      }
       // Exhaustive dispatch over the action union (thesis §5.3.1): every
       // context has an explicit arm and the default funnels into the
       // never-typed assertNever — a seventh action type without an arm is a
@@ -1799,7 +2001,7 @@ export class VaultEngine {
         case "ssh": {
           const config = this.loadConnectionConfig(s, secret.id);
           return await s.sshInjector.executeWithSecret(
-            action,
+            action as SshAction,
             value,
             policy,
             config,
@@ -2074,7 +2276,10 @@ export class VaultEngine {
       // injector-authored arms audit the VaultErrors they throw; a raw throw
       // provably had no row, so it gets the engine's (N16). An audit write that
       // fails here is itself routed through the same throw — the failure to
-      // record replaces the original error, redacted (D1a-3).
+      // record replaces the original error, redacted (D1a-3). A bootstrap's
+      // error alone leaves as it stands: its text is the vault's own, with at
+      // most the handle the caller sent, and a password stripped from a text
+      // the reader knows shows where it occurs.
       if (!(err instanceof VaultError)) {
         try {
           this.auditUse(
@@ -2085,15 +2290,17 @@ export class VaultEngine {
             attribution,
           );
         } catch (auditErr) {
-          throw redactErrorMessage(
+          const unrecorded =
             auditErr instanceof VaultError
               ? auditErr
-              : VaultError.internalError("the audit write failed unexpectedly"),
-            Buffer.from(value).toString("utf8"),
-          );
+              : VaultError.internalError("the audit write failed unexpectedly");
+          if (plan !== undefined) throw unrecorded;
+          throw redactErrorMessage(unrecorded, Buffer.from(value).toString("utf8"));
         }
       }
-      throw redactErrorMessage(toVaultError(err), Buffer.from(value).toString("utf8"));
+      const thrown = toVaultError(err);
+      if (plan !== undefined) throw thrown;
+      throw redactErrorMessage(thrown, Buffer.from(value).toString("utf8"));
     } finally {
       wipeBuffer(value);
     }
@@ -2104,6 +2311,7 @@ export class VaultEngine {
    * M4). `use_secret`'s ladder for a token caller — resolve the handle, the
    * caller's `use` grant, the secret's status, each refusal the failed
    * `secret.use` row `use_secret` writes, `context: "proxy"` — then the
+   * bootstrap block, a bootstrap mark, the
    * secret's `proxy` opt-in, the judgement of the target's plain reading, and
    * the URL allowlist over the origin and path of its TLS reading where the
    * plain one does not hold, all before the credential is decrypted or an
@@ -2187,6 +2395,8 @@ export class VaultEngine {
       throw err;
     }
 
+    this.refuseBootstrapOnly(s, secret.id, policy, request, attribution);
+    await this.refuseOnBootstrapMark(s, secret, handle, request, caller, attribution);
     if (!policy.proxy) {
       this.auditUse(
         s,
@@ -2309,7 +2519,9 @@ export class VaultEngine {
    * The identities a consumer's ssh-agent socket lists (deployment model B,
    * M5): the public half of every SSH key on which the consumer holds `use`
    * (or `admin`), whose policy opts into the socket (`ssh_agent_socket`) and
-   * which is active, each under its handle — and on a bound connection only
+   * holds no bootstrap block, which carries no bootstrap mark and which is
+   * active, each under its handle — and
+   * on a bound connection only
    * those whose pinned `ssh.known_hosts` holds the bound host key (R-P3, RT-1:
    * the pin alone — `host_allowlist` is judged at the signature, so ssh offers
    * the key and a refusal is recorded). It draws on the consumer's listing
@@ -2371,6 +2583,7 @@ export class VaultEngine {
    * R-P2). `use_secret`'s ladder for the consumer: the registry gate (the
    * socket has no token to revoke, so a deactivation takes effect here), the
    * key blob to the secret holding it, the `use` grant, the status, the
+   * bootstrap block, a bootstrap mark, the
    * `ssh_agent_socket` opt-in — then the binding, on the engine's own parse of
    * the bytes it signs (RC-B3-9: the responder parses nothing): not refused for
    * forwarding, bound (`session-bind@openssh.com`), the data a userauth request
@@ -2454,6 +2667,10 @@ export class VaultEngine {
       refuse(VaultError.sshAgentUnbound(reason), { reason });
 
     const policy = this.loadInjectionPolicy(s, secret.id);
+    if (policy.ssh_bootstrap !== null) {
+      throw refuse(VaultError.sshBootstrapNotAllowed("bootstrap_only"));
+    }
+    await this.refuseOnBootstrapMark(s, secret, handle, detail, caller, attribution);
     if (!policy.ssh_agent_socket) {
       throw refuse(
         VaultError.accessDenied(
@@ -2517,6 +2734,8 @@ export class VaultEngine {
       const secret = s.store.getSecret(secretId);
       if (!secret || !isServableNow(secret) || isVaultManagedCertificate(s.store, secret)) continue;
       const policy = this.loadInjectionPolicy(s, secretId);
+      if (policy.ssh_bootstrap !== null) continue;
+      if (s.store.readBootstrapMark(secretId) !== undefined) continue;
       if (!policy.ssh_agent_socket) continue;
       const handle = this.handleOf(s, secret);
       const publicKeyBlob = await this.agentSocketPublicKey(s, secret, handle);
@@ -2826,6 +3045,274 @@ export class VaultEngine {
     throw err;
   }
 
+  /** B2: writes `{ ...row, error: "SSH_BOOTSTRAP_NOT_ALLOWED" }` (failed) and throws, where the policy holds the block. */
+  private refuseBootstrapOnly(
+    s: UnlockedState,
+    secretId: string,
+    policy: InjectionPolicy,
+    row: Record<string, unknown>,
+    attribution: AuditAttribution | undefined,
+  ): void {
+    if (policy.ssh_bootstrap === null) return;
+    const err = VaultError.sshBootstrapNotAllowed("bootstrap_only");
+    this.auditUse(s, secretId, { ...row, error: err.code }, false, attribution);
+    throw err;
+  }
+
+  /** Inside the caller's transaction: where the secret's row is not revoked, the status and the `secret.revoke` row `{ handle, reason: "ssh_bootstrap" }`; the mark removed either way. Answers whether it set the status. */
+  private endSecretForBootstrap(
+    s: UnlockedState,
+    secretId: string,
+    handle: string,
+    caller: CallerContext | undefined,
+  ): boolean {
+    const row = s.store.getSecret(secretId);
+    const ends = row !== undefined && row.status !== SecretStatus.REVOKED;
+    if (ends) {
+      s.secretManager.revokeResolved(row, (id) =>
+        this.auditRevocation(s, id, handle, caller, { reason: "ssh_bootstrap" }),
+      );
+    }
+    s.store.clearBootstrapMark(secretId);
+    return ends;
+  }
+
+  private async refuseOnBootstrapMark(
+    s: UnlockedState,
+    secret: Secret,
+    handle: string,
+    row: Record<string, unknown>,
+    caller: CallerContext | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<void> {
+    const mark = s.store.readBootstrapMark(secret.id);
+    if (mark === undefined) return;
+    if (this.bootstrapHolds.get(secret.id) === mark.claim) {
+      const err = VaultError.sshBootstrapInFlight();
+      this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
+      throw err;
+    }
+    const err = VaultError.sshBootstrapUnconfirmed();
+    const met = s.store.transaction(() => {
+      const current = s.store.readBootstrapMark(secret.id);
+      if (current === undefined) return false;
+      const ended = this.endSecretForBootstrap(s, secret.id, handle, caller);
+      this.auditUse(
+        s,
+        secret.id,
+        { ...row, error: err.code, secret_ended: ended, mark_at: current.at },
+        false,
+        attribution,
+      );
+      return true;
+    });
+    if (!met) return;
+    await this.endRevokedChild(s, secret.id, caller);
+    throw err;
+  }
+
+  /**
+   * B3 for an ssh bootstrap, before the decrypt and in its order: the block's four tests, the
+   * mark, the Windows vault host, `ssh` on `command_allowlist`, the client's version. Each refusal
+   * is a failed `secret.use` row of the bootstrap's form `B`, the block's four with a `reason`.
+   * The plan carries the block's parsed keys: the action's line only selects one of them.
+   */
+  private async judgeBootstrapAction(
+    s: UnlockedState,
+    handle: string,
+    action: SshBootstrapAction,
+    secret: Secret,
+    policy: InjectionPolicy,
+    caller: CallerContext | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<BootstrapPlan> {
+    const host: unknown = action.host;
+    const user: unknown = action.user;
+    const port: unknown = action.port ?? 22;
+    const line: unknown = action.public_key;
+    const sudoers = action.sudoers === true;
+    const sent = typeof line === "string" ? parseSshPublicKey(line, SSH_INSTALL_KEY_TYPES) : null;
+    const detail: Record<string, unknown> = {
+      context: "ssh",
+      operation: "bootstrap",
+      host,
+      port,
+      user,
+      ...(sent === null ? {} : { key_fingerprint: sshKeyFingerprint(sent.blob) }),
+      sudoers,
+    };
+    const refuse = (reason: SshBootstrapRefusalReason): VaultError => {
+      const err = VaultError.sshBootstrapNotAllowed(reason);
+      this.auditUse(s, secret.id, { ...detail, error: err.code, reason }, false, attribution);
+      return err;
+    };
+
+    const block = policy.ssh_bootstrap;
+    if (block === null) throw refuse("no_block");
+    const hostKeys = parseBlockKeys(block.host_keys, SSH_HOST_KEY_TYPES);
+    const installKeys = parseBlockKeys(block.install_keys, SSH_INSTALL_KEY_TYPES);
+    if (host !== block.host || user !== block.user || port !== block.port) throw refuse("target");
+    const installKey = sent === null ? undefined : installKeys.find((key) => sameSshKey(key, sent));
+    if (installKey === undefined) throw refuse("key");
+    if (sudoers && !block.sudoers) throw refuse("sudoers");
+
+    await this.refuseOnBootstrapMark(s, secret, handle, detail, caller, attribution);
+
+    let sshPath: string;
+    try {
+      s.sshBootstrap.refuseVaultHost();
+      sshPath = resolveAndMatchCommand("ssh", policy.command_allowlist, controlledPathDirs());
+      await s.sshBootstrap.refuseOldClient(sshPath, policy.env_allowlist);
+    } catch (err) {
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      if (err instanceof VaultError) {
+        this.auditUse(s, secret.id, { ...detail, error: err.code }, false, attribution);
+      }
+      throw err;
+    }
+    if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+    return { block, installKey, hostKeys, sudoers, sshPath, detail };
+  }
+
+  /**
+   * B7 for a judged bootstrap, from the dispatch, whose choke point wipes the value and throws a
+   * bootstrap's errors as they stand, so no `VaultError` thrown here may hold a byte of the host's
+   * or of the value:
+   * the value's shape; the mark claimed with the row that began, in one transaction that reads
+   * the secret's status again; the hold noted before the first wait; one call of the injector;
+   * then, only with the keys the call began under, the outcome's transaction — its row, and
+   * where the outcome may have installed a key the secret's end — and the status or the refusal.
+   */
+  private async runSshBootstrap(
+    s: UnlockedState,
+    handle: string,
+    plan: BootstrapPlan,
+    secret: Secret,
+    policy: InjectionPolicy,
+    value: Uint8Array,
+    caller: CallerContext | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<SshBootstrapResult> {
+    if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+    const row = plan.detail;
+    if (!isSshPassword(value)) {
+      const err = VaultError.invalidSshConfig(SSH_PASSWORD_SHAPE_REFUSED);
+      this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
+      throw err;
+    }
+
+    const claim = generateUUIDv7();
+    const claimed = s.store.transaction((): BootstrapClaim => {
+      const current = s.store.getSecret(secret.id);
+      if (
+        current === undefined ||
+        current.status !== SecretStatus.ACTIVE ||
+        (current.expires_at !== null && current.expires_at <= Date.now())
+      ) {
+        return { kind: "unusable", current };
+      }
+      if (s.store.claimBootstrapMark(secret.id, claim, Date.now())) {
+        this.auditUse(s, secret.id, { ...row, began: true }, true, attribution);
+        return { kind: "taken" };
+      }
+      const mark = s.store.readBootstrapMark(secret.id) ?? { claim: "", at: 0 };
+      if (this.bootstrapHolds.get(secret.id) === mark.claim) {
+        const error = VaultError.sshBootstrapInFlight();
+        this.auditUse(s, secret.id, { ...row, error: error.code }, false, attribution);
+        return { kind: "refused", error, endsChild: false };
+      }
+      const error = VaultError.sshBootstrapUnconfirmed();
+      const ended = this.endSecretForBootstrap(s, secret.id, handle, caller);
+      this.auditUse(
+        s,
+        secret.id,
+        { ...row, error: error.code, secret_ended: ended, mark_at: mark.at },
+        false,
+        attribution,
+      );
+      return { kind: "refused", error, endsChild: true };
+    });
+    if (claimed.kind === "unusable") {
+      let refusal: unknown = VaultError.secretRevoked(handle);
+      try {
+        if (claimed.current !== undefined) s.secretManager.assertUsable(claimed.current, handle);
+      } catch (err) {
+        refusal = err;
+      }
+      if (refusal instanceof VaultError) {
+        this.auditUse(s, secret.id, { ...row, error: refusal.code }, false, attribution);
+      }
+      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+      throw refusal;
+    }
+    if (claimed.kind === "refused") {
+      if (claimed.endsChild) await this.endRevokedChild(s, secret.id, caller);
+      throw claimed.error;
+    }
+    this.bootstrapHolds.set(secret.id, claim);
+
+    let outcome: BootstrapOutcome;
+    let ends: boolean;
+    try {
+      try {
+        outcome = await s.sshBootstrap.run({
+          sshPath: plan.sshPath,
+          host: plan.block.host,
+          port: plan.block.port,
+          user: plan.block.user,
+          hostKeys: plan.hostKeys,
+          installKey: plan.installKey,
+          sudoers: plan.sudoers,
+          password: Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+          policy,
+          budgetMs: SSH_BOOTSTRAP_TIMEOUT_MS,
+        });
+      } catch (err) {
+        if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+        if (err instanceof VaultError) {
+          this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
+        }
+        throw err;
+      }
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      const read = outcome;
+      ends = s.store.transaction(() => {
+        const mark = s.store.readBootstrapMark(secret.id);
+        const held = mark !== undefined && mark.claim === claim;
+        const stays = read.kind === "refused" || read.kind === "not_spawned";
+        const ending = held && !stays;
+        const ended = ending && this.endSecretForBootstrap(s, secret.id, handle, caller);
+        if (held && stays) s.store.clearBootstrapMark(secret.id);
+        this.auditUse(
+          s,
+          secret.id,
+          bootstrapOutcomeDetail(row, read, ended, !held),
+          read.kind === "done",
+          attribution,
+        );
+        return ending;
+      });
+    } finally {
+      if (this.bootstrapHolds.get(secret.id) === claim) this.bootstrapHolds.delete(secret.id);
+    }
+
+    if (ends) await this.endRevokedChild(s, secret.id, caller);
+    switch (outcome.kind) {
+      case "done":
+        return { type: "ssh_bootstrap", key: outcome.key, sudoers: outcome.sudoers };
+      case "refused":
+      case "not_spawned":
+        throw outcome.error;
+      default:
+        throw VaultError.sshBootstrapUnconfirmed();
+    }
+  }
+
+  /** Whether the engine still holds the keys a call began under: unlocked, and its live audit logger the call's. */
+  private holdsCallKeys(s: UnlockedState): boolean {
+    return this.state === VaultState.UNLOCKED && this.auditLogger === s.auditLogger;
+  }
+
   /**
    * Write the `secret.use` row for a context whose injector returns a
    * metadata-only projection instead of logging its own row (the v1.3
@@ -2852,10 +3339,11 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all fourteen fields, so a miss (other
-   * than the post-baseline `strict_tree_exit`, `proxy`, `ssh_agent_socket` and
-   * `local_dirs`, defaulted below) or an extra key (other than `local_dirs`'s
-   * first name `sftp_local_dirs` standing alone, moved below) is corruption.
+   * (R2/C43): the writer always emits all fifteen fields, so a miss (other
+   * than the post-baseline `strict_tree_exit`, `proxy`, `ssh_agent_socket`,
+   * `local_dirs` and `ssh_bootstrap`, defaulted below) or an extra key (other
+   * than `local_dirs`'s first name `sftp_local_dirs` standing alone, moved
+   * below) is corruption.
    */
   private loadInjectionPolicy(s: UnlockedState, secretId: string): InjectionPolicy {
     const row = s.store.getInjectionPolicy(secretId);
@@ -2875,6 +3363,7 @@ export class VaultEngine {
         proxy: false,
         ssh_agent_socket: false,
         local_dirs: [],
+        ssh_bootstrap: null,
       };
     }
     const bytes = decrypt(
@@ -2891,12 +3380,13 @@ export class VaultEngine {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
     }
     // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06; S1,
-    // 2026-11-18): blobs written by the prepared v1.5.0 tree carry the baseline
-    // ten, blobs written before the egress proxy eleven, blobs written before
-    // the agent socket twelve, blobs written before the local directories
-    // thirteen, so these four fields — and only these — default on read; no
+    // 2026-11-18; 4b B1, 2026-11-21): blobs written by the prepared v1.5.0 tree
+    // carry the baseline ten, blobs written before the egress proxy eleven,
+    // blobs written before the agent socket twelve, blobs written before the
+    // local directories thirteen, blobs written before the bootstrap block
+    // fourteen, so these five fields — and only these — default on read; no
     // rewrite (policy writes are POLICY_GRANT events). The writer writes all
-    // fourteen; any other miss stays corruption (R2/C43).
+    // fifteen; any other miss stays corruption (R2/C43).
     if (
       typeof raw === "object" &&
       raw !== null &&
@@ -2941,6 +3431,14 @@ export class VaultEngine {
       !Object.hasOwn(raw, "local_dirs")
     ) {
       (raw as Record<string, unknown>)["local_dirs"] = [];
+    }
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "ssh_bootstrap")
+    ) {
+      (raw as Record<string, unknown>)["ssh_bootstrap"] = null;
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -3000,6 +3498,30 @@ export class VaultEngine {
         handle,
       },
     );
+
+    if (input.ssh_bootstrap !== null) {
+      const refuse = (message: string, reason: string): never =>
+        this.refuseAudited(
+          s,
+          AuditEventType.POLICY_GRANT,
+          VaultError.invalidInput(message),
+          { policy: "injection", handle, reason },
+          caller,
+          { secretId: secret.id },
+        );
+      if (secret.type !== SecretType.API_KEY) {
+        refuse("ssh_bootstrap needs a secret of type api_key", "ssh_bootstrap_secret_type");
+      }
+      if (input.proxy) {
+        refuse("ssh_bootstrap cannot stand beside proxy", "ssh_bootstrap_with_proxy");
+      }
+      if (input.ssh_agent_socket) {
+        refuse(
+          "ssh_bootstrap cannot stand beside ssh_agent_socket",
+          "ssh_bootstrap_with_ssh_agent_socket",
+        );
+      }
+    }
 
     const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
     const pathDirs = controlledPathDirs();
@@ -3074,6 +3596,7 @@ export class VaultEngine {
           proxy: input.proxy,
           ssh_agent_socket: input.ssh_agent_socket,
           local_dir_count: input.local_dirs.length,
+          ssh_bootstrap: bootstrapBlockDetail(input.ssh_bootstrap),
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -3104,16 +3627,24 @@ export class VaultEngine {
     // next use respawns the child wrapped as demanded (D51), and the posture
     // recorded on the registry entry is McpInjector's backstop for a policy
     // tightened from a separate process, whose engine cannot reach this
-    // registry. One terminate covers every demand; network, fs, strict is
-    // the precedence.
-    if (input.network_isolation || input.fs_isolation || input.strict_tree_exit) {
+    // registry; the bootstrap block's is the use path's refusal. One
+    // terminate covers every demand; the bootstrap block, network, fs,
+    // strict is the precedence.
+    if (
+      input.ssh_bootstrap !== null ||
+      input.network_isolation ||
+      input.fs_isolation ||
+      input.strict_tree_exit
+    ) {
       await s.mcpRegistry.terminate(
         secret.id,
-        input.network_isolation
-          ? "network_isolation_enabled"
-          : input.fs_isolation
-            ? "fs_isolation_enabled"
-            : "strict_tree_exit_enabled",
+        input.ssh_bootstrap !== null
+          ? "ssh_bootstrap_enabled"
+          : input.network_isolation
+            ? "network_isolation_enabled"
+            : input.fs_isolation
+              ? "fs_isolation_enabled"
+              : "strict_tree_exit_enabled",
         attributionFromCaller(caller, this.sessionId),
       );
     }
@@ -6948,6 +7479,7 @@ export class VaultEngine {
       websocketExecutor: this.websocketExecutor,
       sftpExecutor: this.sftpExecutor,
       dockerExecutor: this.dockerExecutor,
+      sshBootstrap: this.sshBootstrap,
     };
   }
 
@@ -7021,6 +7553,7 @@ export class VaultEngine {
     this.mcpRegistry?.killAllSync();
     this.oauthRefreshInFlight.clear();
     this.agentSocketBlobs.clear();
+    this.bootstrapHolds.clear();
 
     this.secretManager = null;
     this.policyEngine = null;

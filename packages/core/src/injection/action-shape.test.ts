@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { UseSecretAction } from "@harpoc/shared";
 import { actionShapeRefusal, imapOperationRefusal } from "./action-shape.js";
+import { BOOT } from "./__fixtures__/ssh-public-keys.js";
 
 const CONTEXTS = [
   "http",
@@ -52,6 +53,74 @@ describe("actionShapeRefusal", () => {
       expect(actionShapeRefusal({ type })).toBe(`Unsupported action type: ${rendered}`);
     }
     expect(actionShapeRefusal({})).toBe("Unsupported action type: undefined");
+  });
+});
+
+describe("actionShapeRefusal — the ssh bootstrap's shape", () => {
+  const OPERATION = 'ssh operation must be "bootstrap"';
+  const ALONE =
+    "an ssh bootstrap takes type, operation, host, user, port, public_key and sudoers alone";
+  const NAMES =
+    "an ssh bootstrap's host and user must be names of letters, digits, '.', '_' and '-'";
+  const PORT = "an ssh bootstrap's port must be an integer from 1 to 65535";
+  const KEY = "an ssh bootstrap's public_key must be a string of at most 4096 characters";
+  const SUDOERS = "an ssh bootstrap's sudoers must be a boolean";
+
+  it("passes an ssh action without operation, whatever else it carries", () => {
+    const actions = [
+      { type: "ssh" },
+      { type: "ssh", host: "h1.example", user: "ubuntu", command: "id", timeout_ms: 5 },
+      { type: "ssh", operation: undefined, host: "-h", user: 7, command: "id", public_key: 5 },
+      { type: "ssh", port: "22", sudoers: "yes", public_key: "k".repeat(4097), extra: true },
+    ];
+    for (const action of actions) expect(actionShapeRefusal(action)).toBeUndefined();
+  });
+
+  it.each<[string, unknown, string]>([
+    [
+      "an operation other than bootstrap",
+      { type: "ssh", operation: "copy", host: "h", user: "u", command: "id" },
+      OPERATION,
+    ],
+    ["an operation of null", { ...BOOT, operation: null }, OPERATION],
+    ["an operation that is an object", { ...BOOT, operation: { kind: "bootstrap" } }, OPERATION],
+    ["an operation that is an array", { ...BOOT, operation: ["bootstrap"] }, OPERATION],
+    [
+      "an operation that is a String object",
+      { ...BOOT, operation: Object("bootstrap") as unknown },
+      OPERATION,
+    ],
+    ["a command beside the operation", { ...BOOT, command: "id" }, ALONE],
+    ["a timeout_ms beside the operation", { ...BOOT, timeout_ms: 5 }, ALONE],
+    ["a dash-led host", { ...BOOT, host: "-h" }, NAMES],
+    ["a host of 256 characters", { ...BOOT, host: "h".repeat(256) }, NAMES],
+    ["a user that is a number", { ...BOOT, user: 7 }, NAMES],
+    ["port 0", { ...BOOT, port: 0 }, PORT],
+    ["port 65536", { ...BOOT, port: 65_536 }, PORT],
+    ["port 22.5", { ...BOOT, port: 22.5 }, PORT],
+    ['port "22"', { ...BOOT, port: "22" }, PORT],
+    ["a public_key that is a number", { ...BOOT, public_key: 5 }, KEY],
+    ["a public_key of 4097 characters", { ...BOOT, public_key: "k".repeat(4097) }, KEY],
+    ['sudoers "yes"', { ...BOOT, sudoers: "yes" }, SUDOERS],
+  ])("refuses a malformed bootstrap, each with its fixed text — %s", (_label, action, text) => {
+    expect(actionShapeRefusal(action)).toBe(text);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["port 1", { port: 1 }],
+    ["port 65535", { port: 65_535 }],
+    ["a public_key of 4096 characters", { public_key: "k".repeat(4096) }],
+  ])("passes a bootstrap at the edge of each bound — %s", (_label, fields) => {
+    expect(actionShapeRefusal({ ...BOOT, ...fields })).toBeUndefined();
+  });
+
+  it("passes a well-formed bootstrap", () => {
+    expect(actionShapeRefusal(BOOT)).toBeUndefined();
+    expect(
+      actionShapeRefusal({ ...BOOT, port: 2222, sudoers: false, command: undefined }),
+    ).toBeUndefined();
+    const bare = Object.assign(Object.create(null) as object, BOOT);
+    expect(actionShapeRefusal(bare)).toBeUndefined();
   });
 });
 

@@ -118,6 +118,51 @@ describe("vault_meta", () => {
     expect(() => store.deleteMeta("never-set")).not.toThrow();
     expect(store.getMeta("kept")).toBe("value");
   });
+
+  it("claimBootstrapMark writes its row once", () => {
+    const id = "secret-a";
+
+    expect(store.claimBootstrapMark(id, "c1", 1000)).toBe(true);
+    expect(store.claimBootstrapMark(id, "c2", 2000)).toBe(false);
+
+    expect(store.getMeta("ssh_bootstrap_mark:" + id)).toBe('{"claim":"c1","at":1000}');
+    expect(store.claimBootstrapMark("secret-b", "c2", 2000)).toBe(true);
+  });
+
+  it("readBootstrapMark answers none, the claim with its time, and a value that is no mark as a mark nobody holds", () => {
+    expect(store.readBootstrapMark("secret-a")).toBeUndefined();
+
+    store.claimBootstrapMark("secret-a", "c1", 1000);
+    expect(store.readBootstrapMark("secret-a")).toEqual({ claim: "c1", at: 1000 });
+    expect(store.readBootstrapMark("secret-b")).toBeUndefined();
+
+    for (const value of [
+      "x",
+      "null",
+      "[]",
+      '"c1"',
+      '{"claim":"c1"}',
+      '{"at":1000}',
+      '{"claim":1,"at":1000}',
+      '{"claim":"c1","at":"1000"}',
+      '{"claim":"c1","at":1e999}',
+    ]) {
+      store.setMeta("ssh_bootstrap_mark:secret-b", value);
+      expect(store.readBootstrapMark("secret-b")).toEqual({ claim: "", at: 0 });
+    }
+  });
+
+  it("clearBootstrapMark removes the row and says whether it did", () => {
+    store.claimBootstrapMark("secret-a", "c1", 1000);
+    store.claimBootstrapMark("secret-b", "c2", 2000);
+
+    expect(store.clearBootstrapMark("secret-a")).toBe(true);
+    expect(store.clearBootstrapMark("secret-a")).toBe(false);
+
+    expect(store.getMeta("ssh_bootstrap_mark:secret-a")).toBeUndefined();
+    expect(store.readBootstrapMark("secret-b")).toEqual({ claim: "c2", at: 2000 });
+    expect(store.claimBootstrapMark("secret-a", "c3", 3000)).toBe(true);
+  });
 });
 
 describe("secrets CRUD", () => {

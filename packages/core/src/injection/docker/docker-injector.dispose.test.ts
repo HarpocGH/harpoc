@@ -7,11 +7,17 @@ import { executeDockerRegistryAction } from "./docker-injector.js";
 
 // The credential-helper dir is created by the SECOND `mkdtempSync` in
 // `runDocker` (the DOCKER_CONFIG dir is the first). Fail only that second call
-// so `writeCredentialHelper()` throws AFTER `writeDockerConfig()` created a real
+// (or, where `state.failing` is "write", the first write under it) so
+// `writeHelperFiles()` throws AFTER `writeDockerConfig()` created a real
 // tmpdir — the exact ordering FIX 2 protects: config must dispose even when the
-// helper write fails before the `try`. Config dirs the real `mkdtempSync`
-// handed out are recorded so the test can prove they were removed.
-const state = vi.hoisted(() => ({ configDirs: [] as string[] }));
+// helper write fails. Config and helper dirs the real `mkdtempSync` handed out
+// are recorded so the test can prove they were removed.
+const state = vi.hoisted(() => ({
+  configDirs: [] as string[],
+  helperDirs: [] as string[],
+  failing: "mkdtemp" as "mkdtemp" | "write",
+  writeError: undefined as Error | undefined,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -19,13 +25,22 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     mkdtempSync: ((prefix: string) => {
       const p = String(prefix);
-      if (p.includes("harpoc-docker-helper-")) {
+      if (p.includes("harpoc-docker-helper-") && state.failing === "mkdtemp") {
         throw new Error("mkdtemp helper boom");
       }
       const dir = actual.mkdtempSync(prefix);
       if (p.includes("harpoc-docker-config-")) state.configDirs.push(dir);
+      if (p.includes("harpoc-docker-helper-")) state.helperDirs.push(dir);
       return dir;
     }) as typeof actual.mkdtempSync,
+    writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
+      const under = String(args[0]).includes("harpoc-docker-helper-");
+      if (under && state.failing === "write" && state.writeError === undefined) {
+        state.writeError = new Error("write helper boom");
+        throw state.writeError;
+      }
+      actual.writeFileSync(...args);
+    }) as typeof actual.writeFileSync,
   };
 });
 
@@ -45,6 +60,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     proxy: false,
     ssh_agent_socket: false,
     local_dirs: [],
+    ssh_bootstrap: null,
     ...overrides,
   };
 }
@@ -64,6 +80,9 @@ let savedPath: string | undefined;
 
 beforeEach(() => {
   state.configDirs.length = 0;
+  state.helperDirs.length = 0;
+  state.failing = "mkdtemp";
+  state.writeError = undefined;
   binDir = mkdtempSync(join(tmpdir(), "harpoc-docker-bin-"));
   const name = process.platform === "win32" ? "docker.exe" : "docker";
   dockerPath = join(binDir, name);
@@ -76,6 +95,9 @@ afterEach(() => {
   if (savedPath === undefined) delete process.env.PATH;
   else process.env.PATH = savedPath;
   rmSync(binDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  for (const dir of state.helperDirs) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 function allowed(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
@@ -87,7 +109,7 @@ function allowed(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
 }
 
 describe("executeDockerRegistryAction — config dir disposal when the helper write throws", () => {
-  it("disposes the DOCKER_CONFIG tmpdir even though writeCredentialHelper() throws before the try", async () => {
+  it("disposes the DOCKER_CONFIG tmpdir even though writeHelperFiles() throws", async () => {
     await expect(executeDockerRegistryAction(PULL_ACTION, SECRET, allowed())).rejects.toThrow(
       "mkdtemp helper boom",
     );
@@ -96,7 +118,21 @@ describe("executeDockerRegistryAction — config dir disposal when the helper wr
     expect(state.configDirs).toHaveLength(1);
     const configDir = state.configDirs[0] as string;
     // ...and must not leak: FIX 2 moves the helper write inside the try, so the
-    // finally disposes config on this pre-try throw path too.
+    // finally disposes config on this throw path too.
     expect(existsSync(configDir)).toBe(false);
+  });
+
+  it("removes the helper's directory when the helper's write fails", async () => {
+    state.failing = "write";
+    let thrown: unknown;
+    try {
+      await executeDockerRegistryAction(PULL_ACTION, SECRET, allowed());
+    } catch (err) {
+      thrown = err;
+    }
+    expect(state.writeError).toBeDefined();
+    expect(thrown).toBe(state.writeError);
+    expect(state.helperDirs).toHaveLength(1);
+    expect(existsSync(state.helperDirs[0] as string)).toBe(false);
   });
 });

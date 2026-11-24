@@ -215,6 +215,24 @@ describe("takeVaultCopy", () => {
     });
   });
 
+  it("the copy carries a bootstrap mark", async () => {
+    const key = "ssh_bootstrap_mark:secret-a";
+    const value = '{"claim":"c1","at":1000}';
+    source.prepare("INSERT INTO vault_meta (key, value) VALUES (?, ?)").run(key, value);
+
+    await takeVaultCopy(request());
+
+    readCopy(tmpPath, (copy) => {
+      expect(metaKeys(copy)).toEqual([
+        "failed_attempts",
+        "lockout_until",
+        "schema_version",
+        "ssh_bootstrap_mark:secret-a",
+      ]);
+      expect(metaValue(copy, key)).toBe(value);
+    });
+  });
+
   it("the source is untouched", async () => {
     await takeVaultCopy(request());
 

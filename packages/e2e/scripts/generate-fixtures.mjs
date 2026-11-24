@@ -71,8 +71,10 @@ function resolveBash() {
 }
 
 const name = process.argv[2];
-if (!["pki", "keys", "repos"].includes(name ?? "")) {
-  console.error(`generate-fixtures: unknown fixture set "${name}" (pki | keys | repos)`);
+if (!["pki", "keys", "repos", "sshd-bootstrap"].includes(name ?? "")) {
+  console.error(
+    `generate-fixtures: unknown fixture set "${name}" (pki | keys | repos | sshd-bootstrap)`,
+  );
   process.exit(1);
 }
 const script = fileURLToPath(new URL(`../fixtures/${name}/generate.sh`, import.meta.url)).replace(

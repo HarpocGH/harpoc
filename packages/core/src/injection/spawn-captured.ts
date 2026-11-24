@@ -89,6 +89,8 @@ export interface SpawnCapturedOptions {
    * timeout path.
    */
   strictTreeExit?: boolean;
+  /** Written to the child's standard input, which is then ended; zeroed when the call settles. */
+  stdin?: Buffer;
 }
 
 /**
@@ -201,8 +203,9 @@ export function redactCaptured(text: string, secrets: readonly string[] | undefi
 /**
  * Spawn a subprocess with no shell (`shell:false`), capture stdout/stderr into
  * capped buffers, enforce a timeout (SIGKILL on exceed) and redact injected
- * credential strings from the captured output. Shared by the process, Git and
- * SSH contexts so the process-mediated capture discipline is defined once.
+ * credential strings from the captured output. Shared by the process, Git,
+ * SSH, SFTP and Docker contexts so the process-mediated capture discipline is
+ * defined once.
  *
  * The returned promise always settles: the timeout kills the child's whole
  * process group, settlement is driven by the child's own `'exit'` with a
@@ -234,6 +237,18 @@ export function redactCaptured(text: string, secrets: readonly string[] | undefi
  * exit-code semantics hold for every wrapper.
  */
 export async function spawnCaptured(
+  command: string,
+  args: string[],
+  opts: SpawnCapturedOptions,
+): Promise<SpawnCapturedResult> {
+  try {
+    return await spawnUnwiped(command, args, opts);
+  } finally {
+    opts.stdin?.fill(0);
+  }
+}
+
+async function spawnUnwiped(
   command: string,
   args: string[],
   opts: SpawnCapturedOptions,
@@ -304,6 +319,11 @@ export async function spawnCaptured(
         ...(strict ? { strict_tree_exit: true as const } : {}),
       });
       return;
+    }
+
+    if (opts.stdin !== undefined) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(opts.stdin);
     }
 
     let timedOut = false;

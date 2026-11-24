@@ -135,3 +135,26 @@ describe("SqliteStore.transaction write-lock acquisition (M7)", () => {
     expect(store.getMeta("after")).toBe("1");
   });
 });
+
+describe("SqliteStore.claimBootstrapMark inside a transaction", () => {
+  it("a claim another connection committed answers false, and the transaction around it stays usable", () => {
+    const other = otherConnection();
+    try {
+      other
+        .prepare("INSERT INTO vault_meta (key, value) VALUES (?, ?)")
+        .run("ssh_bootstrap_mark:secret-a", '{"claim":"theirs","at":1000}');
+    } finally {
+      other.close();
+    }
+
+    const claimed = store.transaction(() => {
+      const answer = store.claimBootstrapMark("secret-a", "ours", 2000);
+      store.setMeta("after_claim", "written");
+      return answer;
+    });
+
+    expect(claimed).toBe(false);
+    expect(store.getMeta("after_claim")).toBe("written");
+    expect(store.readBootstrapMark("secret-a")).toEqual({ claim: "theirs", at: 1000 });
+  });
+});
