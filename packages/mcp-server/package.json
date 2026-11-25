@@ -42,7 +42,7 @@
     "@modelcontextprotocol/core": "^2.3.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "lint": "eslint src/"

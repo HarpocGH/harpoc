@@ -371,6 +371,14 @@ describe("bin entries", () => {
     const bin = pkgJson.bin as Record<string, string>;
     expect(bin["harpoc-mcp"]).toBe("./dist/index.js");
   });
+
+  it.each(["cli", "mcp-server"])("%s's build marks its bin executable", (pkg) => {
+    const raw = readFileSync(resolve(monorepoRoot, "packages", pkg, "package.json"), "utf-8");
+    const scripts = (JSON.parse(raw) as { scripts: Record<string, string> }).scripts;
+    expect(scripts.build).toBe(
+      `tsc && node -e "require('node:fs').chmodSync('dist/index.js', 0o755)"`,
+    );
+  });
 });
 
 const DEPENDENCY_BLOCKS = [

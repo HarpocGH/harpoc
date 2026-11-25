@@ -538,6 +538,15 @@ describe("compiled binary smoke: vault directory and database modes (L11)", () =
   );
 });
 
+describe("compiled binary smoke: the built entry's mode", () => {
+  it.runIf(process.platform !== "win32")(
+    "dist/index.js carries the execute bits a link to it runs by",
+    () => {
+      expect(statSync(CLI_PATH).mode & 0o111).toBe(0o111);
+    },
+  );
+});
+
 describe("compiled binary smoke: an empty --vault-dir (I27)", () => {
   it("refuses INVALID_INPUT through the root preAction hook before any vault opens", async () => {
     const result = await runCli(["--vault-dir", "  ", "lock"]);

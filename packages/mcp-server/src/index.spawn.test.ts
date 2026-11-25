@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -333,4 +333,13 @@ describe("harpoc-mcp declares the daemon under --http alone (spawned binary)", (
     expect(result.stderr).toContain("Error: Vault is locked.");
     expect(result.code).toBe(1);
   }, 30_000);
+});
+
+describe("harpoc-mcp's built entry's mode", () => {
+  it.runIf(process.platform !== "win32")(
+    "dist/index.js carries the execute bits a link to it runs by",
+    () => {
+      expect(statSync(MCP_ENTRY).mode & 0o111).toBe(0o111);
+    },
+  );
 });
