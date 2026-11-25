@@ -1,5 +1,5 @@
 import type { ImapAction, UseSecretAction } from "@harpoc/shared";
-import { MAX_SSH_KEY_LINE_CHARS } from "@harpoc/shared";
+import { isValidName, MAX_SSH_KEY_LINE_CHARS } from "@harpoc/shared";
 import { isSshName } from "./ssh-common.js";
 
 const CONTEXTS: Record<UseSecretAction["type"], true> = {
@@ -24,6 +24,23 @@ export function actionShapeRefusal(action: unknown): string | undefined {
   if (typeof type !== "string") return `Unsupported action type: ${typeof type}`;
   if (!Object.hasOwn(CONTEXTS, type)) return `Unsupported action type: ${type}`;
   if (type === "ssh") return sshBootstrapShapeRefusal(action as Record<string, unknown>);
+  if (type === "sftp") return sftpRenderShapeRefusal(action as Record<string, unknown>);
+  return undefined;
+}
+
+const SFTP_RENDER_FORBIDDEN_KEYS = ["host", "user", "port", "remote_path", "local_path"] as const;
+
+function sftpRenderShapeRefusal(action: Record<string, unknown>): string | undefined {
+  if (action.operation !== "render") return undefined;
+  for (const key of SFTP_RENDER_FORBIDDEN_KEYS) {
+    if (action[key] !== undefined) {
+      return "an sftp render takes no host, user, port, remote_path or local_path";
+    }
+  }
+  const entry = action.entry;
+  if (typeof entry !== "string" || !isValidName(entry)) {
+    return "an sftp render's entry must be a name of letters, digits, '_' and '-' of at most 255 characters";
+  }
   return undefined;
 }
 

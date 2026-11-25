@@ -200,6 +200,18 @@ describe("sanitizeUseSecretResult", () => {
       }
     });
 
+    it("sftp_render: a status result passes unchanged", () => {
+      const result: UseSecretResponse = { type: "sftp_render", status: "written" };
+      const spy = vi.spyOn(guard, "sanitize");
+      try {
+        sanitizeUseSecretResult(result, guard);
+        expect(result).toEqual({ type: "sftp_render", status: "written" });
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("control: text carrying no credential pattern is left byte-identical", () => {
       const result: UseSecretResponse = {
         type: "ssh",

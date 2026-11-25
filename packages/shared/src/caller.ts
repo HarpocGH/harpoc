@@ -96,13 +96,43 @@ export function isAdminUserCaller(caller: CallerContext): boolean {
 /** The branch a token-scope check refused on — the `reason` every `access.denied` row carries (D2g, 2026-09-23). */
 export type ScopeRefusalReason = "permission" | "project" | "secret" | "governance";
 
+/** A token's project and secret-name claims; a `CallerContext` is one. */
+export type TokenNameScope = Readonly<Pick<VaultApiToken, "project" | "secrets">>;
+
+/**
+ * The token's project and secret-name scope for one handle: the branch that
+ * refuses it, or `undefined` where the scope admits it. Nothing thrown,
+ * nothing audited — each caller answers the refusal in its own way.
+ */
+export function tokenScopeRefusal(
+  scope: TokenNameScope,
+  project: string | undefined,
+  secretName: string | undefined,
+): "project" | "secret" | undefined {
+  // Project scope check
+  if (scope.project && project !== undefined && project !== scope.project) {
+    return "project";
+  }
+  // Deny individual access to global (project-less) secrets for project-scoped tokens
+  if (scope.project && secretName !== undefined && project === undefined) {
+    return "project";
+  }
+
+  // Secret name scope check (name patterns, thesis §4.7)
+  if (secretName !== undefined && !matchesSecretNameScope(secretName, scope.secrets)) {
+    return "secret";
+  }
+  return undefined;
+}
+
 /**
  * Enforce 3-dimensional token scope (permission, project, secret-name
  * patterns — `*` wildcards, thesis §4.7). The single scope predicate shared by
  * every token-bearing interface that checks scope outside a ScopeGuard: the
  * REST middleware and the CLI token path both call it (relocated here from
  * rest-api so the CLI can enforce identical semantics without a Hono
- * dependency — the `applyTokenEndpointAuth` precedent). Mirrors
+ * dependency — the `applyTokenEndpointAuth` precedent). Its project and
+ * secret-name branches are tokenScopeRefusal, shared with
  * ScopeGuard.checkAccess() from mcp-server, which adds the per-call
  * revocation recheck the long-lived MCP transports need. `onRefusal` is
  * invoked once, immediately before the throw, with the branch that refused, so
@@ -121,19 +151,12 @@ export function checkTokenScope(
     throw VaultError.accessDenied(`Token lacks permission: ${permission}`);
   }
 
-  // 2. Project scope check
-  if (token.project && project !== undefined && project !== token.project) {
+  const refusal = tokenScopeRefusal(token, project, secretName);
+  if (refusal === "project") {
     onRefusal?.("project");
-    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
+    throw VaultError.accessDenied(`Token is scoped to project: ${token.project as string}`);
   }
-  // Deny individual access to global (project-less) secrets for project-scoped tokens
-  if (token.project && secretName !== undefined && project === undefined) {
-    onRefusal?.("project");
-    throw VaultError.accessDenied(`Token is scoped to project: ${token.project}`);
-  }
-
-  // 3. Secret name scope check (name patterns, thesis §4.7)
-  if (secretName !== undefined && !matchesSecretNameScope(secretName, token.secrets)) {
+  if (refusal === "secret") {
     onRefusal?.("secret");
     throw VaultError.accessDenied("Token does not grant access to this secret");
   }

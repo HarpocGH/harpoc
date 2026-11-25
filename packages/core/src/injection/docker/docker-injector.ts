@@ -305,7 +305,7 @@ export async function executeDockerRegistryAction(
   } catch (rawErr) {
     // Every throw out of the injector passes redactErrorMessage: a thrown
     // message is a model-visible channel no result-shaped redaction touches.
-    throw redactErrorMessage(rawErr, secret);
+    throw redactErrorMessage(rawErr, [secret]);
   }
 }
 

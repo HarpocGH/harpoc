@@ -29,6 +29,7 @@ const FULL_POLICY = {
   ssh_agent_socket: false,
   local_dirs: [] as string[],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 // The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
 const BOOTSTRAP_BLOCK = {
@@ -40,6 +41,27 @@ const BOOTSTRAP_BLOCK = {
     "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=",
   ],
   sudoers: true,
+};
+/** A render field with an entry and an approval: the client passes it through as it is. */
+const RENDER = {
+  entries: [
+    {
+      name: "env",
+      host: "h1.example",
+      port: 22,
+      user: "deploy",
+      path: "/srv/app/.env",
+      host_keys: BOOTSTRAP_BLOCK.host_keys,
+      template: "TOKEN={{secret://bot-token}}\n",
+    },
+  ],
+  approvals: [
+    {
+      key: "0193b1c2-0000-7000-8000-000000000001",
+      entry: "env",
+      digest: "7c6a834469ef5a6c2a4b422775e89bf38a601de3f618e3615c684734ca914b66",
+    },
+  ],
 };
 
 const HANDLE = "secret://proj/k";
@@ -744,6 +766,26 @@ describe("RestClient", () => {
       expect((without as Record<string, unknown>)["ssh_bootstrap"]).toBeNull();
     });
 
+    it("setInjectionPolicy sends render in the whole-policy body", async () => {
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", { ...FULL_POLICY, render: RENDER });
+      mockFetchResponse({ updated: true });
+      await client.setInjectionPolicy("secret://k", FULL_POLICY);
+      const [withRender, without] = fetchSpy.mock.calls.map(
+        (call) =>
+          JSON.parse((call as [string, RequestInit])[1].body as string) as Record<string, unknown>,
+      );
+      expect(withRender).toStrictEqual({
+        ...FULL_POLICY,
+        render: RENDER,
+        acknowledge_interpreters: false,
+      });
+      expect((without as Record<string, unknown>)["render"]).toStrictEqual({
+        entries: [],
+        approvals: [],
+      });
+    });
+
     it("setInjectionPolicy serializes every injectionPolicyInputSchema key when supplied (drift pin)", async () => {
       mockFetchResponse({ updated: true });
       const full = {
@@ -762,6 +804,7 @@ describe("RestClient", () => {
         ssh_agent_socket: true,
         local_dirs: ["/srv/out"],
         ssh_bootstrap: BOOTSTRAP_BLOCK,
+        render: RENDER,
       };
       await client.setInjectionPolicy("secret://k", full);
       const call = fetchSpy.mock.calls[0] as [string, RequestInit];

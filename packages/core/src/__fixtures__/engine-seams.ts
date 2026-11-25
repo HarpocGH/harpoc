@@ -1,9 +1,10 @@
 import { AAD_INJECTION_POLICY, AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
 import { encrypt } from "../crypto/aes-gcm.js";
 import type { McpConnectionEntry, McpConnectionRegistry } from "../injection/mcp-registry.js";
+import type { RenderControl, RenderPlan, RenderRun } from "../injection/sftp-render.js";
 import type { SecretManager } from "../secrets/secret-manager.js";
 import type { SqliteStore } from "../storage/sqlite-store.js";
-import type { VaultEngine } from "../vault-engine.js";
+import type { SftpRenderSeam, VaultEngine } from "../vault-engine.js";
 
 /**
  * Register the agent identities a suite mints tokens or grants for — the v1.4
@@ -95,6 +96,38 @@ export function storeInjectionPolicyBlob(
     created_at: now,
     updated_at: now,
   });
+}
+
+/** What the render seam's stand-in answers where its script answers nothing: the file written, no child flag. */
+export const RENDER_WRITTEN: RenderRun = {
+  kind: "ran",
+  outcome: { written: "yes" },
+  spawn: { network_isolation: false, fs_isolation: false },
+};
+
+/**
+ * Replace the engine's render seam (test seam — private field): the client's
+ * version passes, `run` records each call's plan and control by reference and
+ * answers what `script` answers, `RENDER_WRITTEN` where it answers nothing. A
+ * script may wait on a promise its row settles; one that reads the content
+ * copies it, since the engine zeroes it once the call has ended.
+ */
+export function installRenderSeam(
+  engine: VaultEngine,
+  script?: (plan: RenderPlan, control: RenderControl) => unknown,
+  overrides: Partial<SftpRenderSeam> = {},
+): { plan: RenderPlan; control: RenderControl }[] {
+  const calls: { plan: RenderPlan; control: RenderControl }[] = [];
+  (engine as unknown as { sftpRender: SftpRenderSeam }).sftpRender = {
+    refuseOldClient: () => Promise.resolve(),
+    run: async (plan, control) => {
+      calls.push({ plan, control });
+      const answer = await script?.(plan, control);
+      return (answer ?? RENDER_WRITTEN) as RenderRun;
+    },
+    ...overrides,
+  };
+  return calls;
 }
 
 /**

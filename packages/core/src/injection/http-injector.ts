@@ -284,7 +284,7 @@ export class HttpInjector {
       // redirect targets and driver messages are attacker-influenced text, and
       // a thrown message reaches the model through the MCP tool result and the
       // REST error body without passing any result-shaped redaction.
-      const err = redactErrorMessage(rawErr, Buffer.from(secretValue).toString("utf8"));
+      const err = redactErrorMessage(rawErr, [Buffer.from(secretValue).toString("utf8")]);
       if (err instanceof VaultError) {
         this.auditLogger?.log(
           withAttribution(

@@ -25,6 +25,7 @@ import {
   retainDecryptedValues,
   storeInjectionPolicyBlob,
 } from "./__fixtures__/engine-seams.js";
+import { ENTRY } from "./injection/__fixtures__/render-entries.js";
 import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import {
   buildUserauthRequest,
@@ -71,6 +72,19 @@ const BOOTSTRAP_BESIDE_SOCKET = injectionPolicyInputSchema.parse({
   ssh_agent_socket: true,
   ssh_bootstrap: BLOCK,
 });
+const GITHUB_ENTRY = { ...ENTRY, host: "github.test" };
+const RENDER_BESIDE_SOCKET = injectionPolicyInputSchema.parse({
+  host_allowlist: ["github.test"],
+  ssh_agent_socket: true,
+  render: { entries: [GITHUB_ENTRY], approvals: [] },
+});
+const RENDER_ONLY = "Use refused: the secret holds a render entry and serves the sftp render alone";
+const RENDER_ONLY_ROW = {
+  context: "ssh_agent",
+  key_type: "ssh-ed25519",
+  error: ErrorCode.RENDER_ONLY_KEY,
+  interface: "ssh_agent",
+};
 
 let tempDir: string;
 let engine: VaultEngine;
@@ -243,6 +257,19 @@ describe("listAgentSocketIdentities — the keys a consumer's socket lists", () 
   it("a secret whose stored policy holds the block beside ssh_agent_socket is neither derived nor listed", async () => {
     for (const name of ["deploy-ed", "api-token"]) {
       storeInjectionPolicyBlob(engine, ids[name] as string, BOOTSTRAP_BESIDE_SOCKET);
+    }
+    const retained = retainDecryptedValues(engine);
+
+    const listed = await engine.listAgentSocketIdentities(caller(), null);
+    expect(retained).toHaveLength(1);
+    expect(listed).toEqual([{ publicKeyBlob: EC_KEY, comment: "secret://deploy-ec" }]);
+    expect(useRows()).toHaveLength(0);
+    expect(listingRows().map((row) => row.detail?.["count"])).toEqual([1]);
+  });
+
+  it("a secret whose stored policy holds an entry beside ssh_agent_socket is neither derived nor listed", async () => {
+    for (const name of ["deploy-ed", "api-token"]) {
+      storeInjectionPolicyBlob(engine, ids[name] as string, RENDER_BESIDE_SOCKET);
     }
     const retained = retainDecryptedValues(engine);
 
@@ -938,6 +965,87 @@ describe("signForAgentSocket — the secret refusals, in use_secret's order", ()
   it("a revoked derived key whose stored policy holds the block is SECRET_REVOKED: the status ahead of the block", async () => {
     await engine.listAgentSocketIdentities(caller(), null);
     storeInjectionPolicyBlob(engine, ids["deploy-ed"] as string, BOOTSTRAP_BESIDE_SOCKET);
+    await engine.revokeSecret("secret://deploy-ed");
+    const retained = retainDecryptedValues(engine);
+
+    await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([
+      {
+        handle: "secret://deploy-ed",
+        context: "ssh_agent",
+        key_type: "ssh-ed25519",
+        error: ErrorCode.SECRET_REVOKED,
+        interface: "ssh_agent",
+      },
+    ]);
+  });
+
+  it("a derived key whose policy gains an entry is RENDER_ONLY_KEY, not the opt-in's ACCESS_DENIED", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    await engine.setInjectionPolicy("secret://deploy-ed", {
+      host_allowlist: ["github.test"],
+      render: { entries: [GITHUB_ENTRY], approvals: [] },
+    });
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+    expect(err.message).toBe(RENDER_ONLY);
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([RENDER_ONLY_ROW]);
+  });
+
+  it("a served key whose stored policy holds an entry beside ssh_agent_socket: true is refused ahead of the opt-in and the binding", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(engine, ids["deploy-ed"] as string, RENDER_BESIDE_SOCKET);
+    const retained = retainDecryptedValues(engine);
+
+    for (const binding of [boundTo(HOST_A), null]) {
+      const err = await expectVaultError(
+        () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, binding)),
+        ErrorCode.RENDER_ONLY_KEY,
+      );
+      expect(err.message).toBe(RENDER_ONLY);
+    }
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([
+      RENDER_ONLY_ROW,
+      RENDER_ONLY_ROW,
+    ]);
+  });
+
+  it("a derived key whose stored policy holds a block beside an entry is RENDER_ONLY_KEY: the entry's refusal ahead of the block's", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(
+      engine,
+      ids["deploy-ed"] as string,
+      injectionPolicyInputSchema.parse({
+        host_allowlist: ["github.test"],
+        ssh_agent_socket: true,
+        ssh_bootstrap: BLOCK,
+        render: { entries: [GITHUB_ENTRY], approvals: [] },
+      }),
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.signForAgentSocket(caller(), signRequest(ED_KEY, boundTo(HOST_A))),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+    expect(err.message).toBe(RENDER_ONLY);
+    expect(retained).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.detail)).toEqual([RENDER_ONLY_ROW]);
+  });
+
+  it("a revoked derived key whose stored policy holds an entry is SECRET_REVOKED: the status ahead of the entry", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    storeInjectionPolicyBlob(engine, ids["deploy-ed"] as string, RENDER_BESIDE_SOCKET);
     await engine.revokeSecret("secret://deploy-ed");
     const retained = retainDecryptedValues(engine);
 

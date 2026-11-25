@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo, Socket } from "node:net";
@@ -2529,6 +2530,32 @@ describe("useSecret — thrown-error choke point (E69 + N16)", () => {
       expect(useRows(false)).toHaveLength(failedRows);
     },
   );
+
+  it("a one-character value is still stripped at the choke point", async () => {
+    // a, c, d, e and t: the upper-case pass of the value's hex-like forms
+    // would cut into "[REDACTED]" itself.
+    const letters = "bfghijklmnopqrsuvwxyz";
+    const letter = letters.charAt(randomInt(letters.length));
+    await initWithSecret("k", letter);
+    installSeams(engine, {
+      git: () => {
+        throw new VaultError(ErrorCode.GIT_OPERATION_FAILED, `-> ${letter}`);
+      },
+    });
+
+    const err = await expectVaultError(
+      () =>
+        engine.useSecret("secret://k", {
+          type: "git",
+          operation: "clone",
+          repository: "https://8.8.8.8/o/r.git",
+        }),
+      ErrorCode.GIT_OPERATION_FAILED,
+    );
+
+    expectAbsent(err.message, letter, "the error message");
+    expect(err.message).toBe("-> [REDACTED]");
+  });
 
   it("a raw Error out of the git seam becomes a value-free INTERNAL_ERROR with one failed secret.use row", async () => {
     await initWithSecret("k", VALUE);

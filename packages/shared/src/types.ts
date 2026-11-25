@@ -398,9 +398,11 @@ export interface CallerContext {
   project?: string;
   /**
    * Token secret-name patterns (thesis §4.7), set by callerFromToken only
-   * when the claim is non-empty — `["*"]` included. Consulted by governance
-   * alone, which refuses a caller carrying it as it refuses a project claim
-   * (S3, 2026-10-20); per-secret name scope stays the interfaces' check.
+   * when the claim is non-empty — `["*"]` included. Consulted by governance,
+   * which refuses a caller carrying it as it refuses a project claim (S3,
+   * 2026-10-20), and by the engine's sftp render for each slot handle of a
+   * template (`tokenScopeRefusal`); the name scope of the handle a call names
+   * stays the interfaces' check.
    */
   secrets?: string[];
   /** Interface the request arrived through; audit attribution only. */
@@ -530,6 +532,15 @@ export interface SftpResult {
 }
 
 /**
+ * Result of an sftp render (design 5 § 6.3): a status and nothing else — no byte
+ * count, path, host or byte the host wrote comes back.
+ */
+export interface SftpRenderResult {
+  type: "sftp_render";
+  status: "written";
+}
+
+/**
  * Result of an SMTP use_secret invocation (design §4.7): the number of
  * recipients the server accepted plus the vault-generated Message-ID. The
  * message itself never comes back — the vault authored it.
@@ -593,6 +604,7 @@ export type UseSecretResponse =
   | ImapResult
   | WebsocketResult
   | SftpResult
+  | SftpRenderResult
   | DockerResult;
 
 /**

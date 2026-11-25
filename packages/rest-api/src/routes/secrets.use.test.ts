@@ -548,6 +548,63 @@ describe("POST /api/v1/secrets/:handle/use — the ssh bootstrap (4b B9)", () =>
   });
 });
 
+describe("POST /api/v1/secrets/:handle/use — the sftp render", () => {
+  const RENDER = { type: "sftp", operation: "render", entry: "env" };
+
+  it("a render action reaches the engine verbatim and its status comes back as data", async () => {
+    const status = { type: "sftp_render", status: "written" };
+    engine.useSecret.mockResolvedValueOnce(status);
+    const res = await postUse(RENDER);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toStrictEqual({ data: { type: "sftp_render", status: "written" } });
+    expect(engine.useSecret).toHaveBeenCalledTimes(1);
+    const [handle, action, caller] = engine.useSecret.mock.calls[0] as unknown[];
+    expect(handle).toBe("secret://test-key");
+    expect(action).toStrictEqual(RENDER);
+    expect(caller).toEqual(EXPECTED_CALLER);
+  });
+
+  it("a render beside host is 400 naming the key, never reaching the engine", async () => {
+    const res = await postUse({ ...RENDER, host: "h1.example" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toStrictEqual({
+      error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: 'action: Unrecognized key: "host"',
+    });
+    expect(engine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("a render without entry is 400 naming entry", async () => {
+    const res = await postUse({ type: "sftp", operation: "render" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toStrictEqual({
+      error: ErrorCode.SCHEMA_VALIDATION_ERROR,
+      message: "action.entry: Invalid input: expected string, received undefined",
+    });
+    expect(engine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("a slot's refusal and a failed write reach the client as their codes and texts", async () => {
+    engine.useSecret.mockRejectedValueOnce(VaultError.renderSlotRefused());
+    const refused = await postUse(RENDER);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toStrictEqual({
+      error: ErrorCode.RENDER_SLOT_REFUSED,
+      message: "SFTP render refused: a slot of the entry's template cannot be served to this call",
+    });
+
+    engine.useSecret.mockRejectedValueOnce(VaultError.renderFailed());
+    const failed = await postUse(RENDER);
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toStrictEqual({
+      error: ErrorCode.RENDER_FAILED,
+      message:
+        "SFTP render failed: the file is not confirmed written; the key's audit row holds the reason",
+    });
+    expect(engine.useSecret).toHaveBeenCalledTimes(2);
+  });
+});
+
 // I15 (test-review-2026-10-09): a per-invocation response_mode looser than the
 // secret's policy is refused by the engine before any request executes; the
 // route renders the refusal as 403 with the error body, and the engine's one

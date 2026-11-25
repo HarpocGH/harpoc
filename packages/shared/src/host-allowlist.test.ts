@@ -5,6 +5,7 @@ import {
   buildAllowedHostSet,
   checkRequestHost,
   isLoopbackBindHost,
+  isLoopbackSshHost,
   isPlainUpstreamHost,
   LOOPBACK_BIND_HOSTS,
   LOOPBACK_URL_HOSTS,
@@ -36,6 +37,31 @@ describe("isLoopbackBindHost", () => {
     expect(
       [...LOOPBACK_URL_HOSTS].map((h) => (h.startsWith("[") ? h.slice(1, -1) : h)).sort(),
     ).toEqual([...LOOPBACK_BIND_HOSTS].sort());
+  });
+});
+
+describe("isLoopbackSshHost: the vault host's own loopback forms", () => {
+  it.each([
+    "localhost",
+    "LocalHost",
+    "localhost.",
+    "db.localhost",
+    "127.0.0.1",
+    "127.1.2.3",
+    "0.0.0.0",
+  ])("%j is the vault host's own", (host) => {
+    expect(isLoopbackSshHost(host)).toBe(true);
+  });
+
+  it.each([
+    "127.example",
+    "h1.example",
+    "10.0.0.5",
+    "localhost-1",
+    "mylocalhost",
+    "localhost.example",
+  ])("%j is not", (host) => {
+    expect(isLoopbackSshHost(host)).toBe(false);
   });
 });
 

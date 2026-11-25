@@ -406,7 +406,7 @@ function redactionMaterial(secretValue: string, oauth: SmtpOAuth | undefined): s
 function redactThrown(err: unknown, material: string[]): unknown {
   let out = err;
   for (const secret of material) {
-    if (secret.length > 0) out = redactErrorMessage(out, secret);
+    if (secret.length > 0) out = redactErrorMessage(out, [secret]);
   }
   return out;
 }

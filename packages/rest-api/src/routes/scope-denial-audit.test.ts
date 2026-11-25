@@ -48,6 +48,7 @@ const FULL_POLICY = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 const CREATE_BODY = { name: "k", type: "api_key" };
 const USE_BODY = {

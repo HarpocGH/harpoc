@@ -34,6 +34,7 @@ describe("injectionPolicyInputSchema", () => {
       ssh_agent_socket: false,
       local_dirs: [],
       ssh_bootstrap: null,
+      render: { entries: [], approvals: [] },
     });
   });
 
@@ -193,6 +194,7 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     ssh_agent_socket: false,
     local_dirs: [],
     ssh_bootstrap: null,
+    render: { entries: [], approvals: [] },
   };
 
   it("accepts a complete policy unchanged", () => {
@@ -239,6 +241,16 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     }
   });
 
+  it("refuses a missing render, naming it — the read-side default lives in core, never here", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { render: _dropped, ...partial } = complete;
+    const result = injectionPolicySchema.safeParse(partial);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.path.join("."))).toEqual(["render"]);
+    }
+  });
+
   it("refuses an unknown key (strict)", () => {
     expect(injectionPolicySchema.safeParse({ ...complete, extra: 1 }).success).toBe(false);
   });
@@ -250,10 +262,10 @@ describe("injectionPolicySchema (the stored-blob shape, R2/C43)", () => {
     );
   });
 
-  it("applies no defaults — an empty object is fifteen misses", () => {
+  it("applies no defaults — an empty object is sixteen misses", () => {
     const result = injectionPolicySchema.safeParse({});
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toHaveLength(15);
+    if (!result.success) expect(result.error.issues).toHaveLength(16);
   });
 
   it.each(["/srv/out", "/", "C:\\data", "c:/data/out"])("accepts the local directory %j", (dir) => {
@@ -332,6 +344,7 @@ describe("setInjectionPolicyRequestSchema", () => {
     ssh_agent_socket: false,
     local_dirs: ["/srv/out"],
     ssh_bootstrap: null,
+    render: { entries: [], approvals: [] },
   };
 
   it("is the stored policy shape plus the acknowledgement flag (key-set pin)", () => {
@@ -379,6 +392,16 @@ describe("setInjectionPolicyRequestSchema", () => {
     expect(wire.success).toBe(false);
     if (!wire.success) {
       expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["ssh_bootstrap"]);
+    }
+  });
+
+  it("requires render on the wire — a body without it is refused naming render alone", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { render: _omitted, ...fifteenFields } = complete;
+    const wire = setInjectionPolicyRequestSchema.safeParse(fifteenFields);
+    expect(wire.success).toBe(false);
+    if (!wire.success) {
+      expect(wire.error.issues.map((i) => i.path.join("."))).toEqual(["render"]);
     }
   });
 

@@ -254,6 +254,31 @@ describe("ScopeGuard", () => {
       expect(() => build({ scope: ["list"] }, seen).checkAccess("create")).toThrow();
       expect(seen).toHaveBeenCalledWith("unnamed", "permission");
     });
+
+    it("checkAccess keeps its three texts", () => {
+      const seen = vi.fn();
+      const deniedWith = (message: string) =>
+        expect.objectContaining({ code: ErrorCode.ACCESS_DENIED, message });
+      expect(() =>
+        build({ scope: ["list"] }, seen).checkAccess("rotate", undefined, undefined, "use_secret"),
+      ).toThrow(deniedWith("Access denied: Token lacks permission: rotate"));
+      const scoped = build({ project: "acme" }, seen);
+      expect(() => scoped.checkAccess("use", "other", "db", "use_secret")).toThrow(
+        deniedWith("Access denied: Token is scoped to project: acme"),
+      );
+      expect(() => scoped.checkAccess("use", undefined, "db", "use_secret")).toThrow(
+        deniedWith("Access denied: Token is scoped to project: acme"),
+      );
+      expect(() =>
+        build({ secrets: ["db-*"] }, seen).checkAccess("use", undefined, "mail", "use_secret"),
+      ).toThrow(deniedWith("Access denied: Token does not grant access to this secret"));
+      expect(seen.mock.calls).toEqual([
+        ["use_secret", "permission"],
+        ["use_secret", "project"],
+        ["use_secret", "project"],
+        ["use_secret", "secret"],
+      ]);
+    });
   });
 });
 

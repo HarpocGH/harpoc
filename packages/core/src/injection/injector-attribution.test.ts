@@ -49,6 +49,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 
 function captureLogger(): { log: ReturnType<typeof vi.fn>; logger: AuditLogger } {

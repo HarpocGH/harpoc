@@ -81,6 +81,7 @@ describeGit("Git ls-remote through an empty relay — real git over smart HTTP (
       ssh_agent_socket: false,
       local_dirs: [],
       ssh_bootstrap: null,
+      render: { entries: [], approvals: [] },
     };
   }
 

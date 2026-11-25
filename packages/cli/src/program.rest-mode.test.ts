@@ -209,6 +209,7 @@ const STORED_POLICY = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 // The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
 const HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
@@ -223,6 +224,29 @@ const BOOTSTRAP_BLOCK = {
   host_keys: [HOST_KEY],
   install_keys: [KEY_A],
   sudoers: false,
+};
+const TEMPLATE_PATH = fileURLToPath(new URL("./__fixtures__/render/env.tmpl", import.meta.url));
+/** The render entry `env.tmpl` describes with the flags of the `secret render set` row. */
+const RENDER_ENTRY = {
+  name: "env",
+  host: "h1.example",
+  port: 22,
+  user: "deploy",
+  path: "/srv/app/.env",
+  host_keys: [HOST_KEY],
+  template: "TOKEN={{secret://bot-token}}\n",
+};
+const RENDER_DIGEST = "7c6a834469ef5a6c2a4b422775e89bf38a601de3f618e3615c684734ca914b66";
+const RENDER_KEY_ID = "0193b1c2-0000-7000-8000-000000000001";
+const RENDER_APPROVAL = { key: RENDER_KEY_ID, entry: "env", digest: RENDER_DIGEST };
+/** A delivering key's policy and a slot's, beside STORED_POLICY. */
+const RENDER_KEY_POLICY = {
+  ...STORED_POLICY,
+  render: { entries: [RENDER_ENTRY], approvals: [] },
+};
+const RENDER_SLOT_POLICY = {
+  ...STORED_POLICY,
+  render: { entries: [], approvals: [RENDER_APPROVAL] },
 };
 const MCP_CONFIG = { server_name: "srv", transport: "http", url: "https://mcp.example.com/mcp" };
 /** The config `--name srv --transport http --url …` parses to: the schema adds the default revision. */
@@ -449,6 +473,8 @@ interface RestRow {
   calls: Record<string, unknown[][]>;
   constructed?: Record<string, unknown>;
   restOutput?: Output;
+  /** The injection policy both paths read, where the row needs another than STORED_POLICY. */
+  stored?: Record<string, unknown>;
 }
 
 // Every command the REST mode serves: the RestClient member(s) with the whole argument list,
@@ -491,6 +517,21 @@ const REST_ROWS: RestRow[] = [
       "https://api.example.com/v1",
     ],
     calls: { useSecret: [["secret://k", HTTP_ACTION]] },
+    constructed: { ...CONSTRUCTED, timeoutMs: 1_860_000 },
+  },
+  {
+    argv: [
+      "secret",
+      "use",
+      "secret://k",
+      "--action",
+      "sftp",
+      "--operation",
+      "render",
+      "--entry",
+      "env",
+    ],
+    calls: { useSecret: [["secret://k", { type: "sftp", operation: "render", entry: "env" }]] },
     constructed: { ...CONSTRUCTED, timeoutMs: 1_860_000 },
   },
   {
@@ -583,6 +624,94 @@ const REST_ROWS: RestRow[] = [
   {
     argv: ["secret", "connection", "secret://k", "--delete"],
     calls: { deleteConnectionConfig: [["secret://k"]] },
+  },
+  {
+    argv: [
+      "secret",
+      "render",
+      "set",
+      "secret://k",
+      "--entry",
+      "env",
+      "--host",
+      "h1.example",
+      "--user",
+      "deploy",
+      "--path",
+      "/srv/app/.env",
+      "--host-key",
+      HOST_KEY,
+      "--template-file",
+      TEMPLATE_PATH,
+    ],
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      setInjectionPolicy: [["secret://k", RENDER_KEY_POLICY, { acknowledge_interpreters: false }]],
+    },
+    restOutput: { stdout: RENDER_DIGEST, stderr: "OK: Render entry set (secret://k)", written: "" },
+  },
+  {
+    argv: ["secret", "render", "remove", "secret://k", "--entry", "env"],
+    stored: RENDER_KEY_POLICY,
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      setInjectionPolicy: [["secret://k", STORED_POLICY, { acknowledge_interpreters: false }]],
+    },
+  },
+  {
+    argv: [
+      "secret",
+      "render",
+      "approve",
+      "secret://k",
+      "--key-id",
+      RENDER_KEY_ID,
+      "--entry",
+      "env",
+      "--digest",
+      RENDER_DIGEST,
+      "--confirm",
+    ],
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      setInjectionPolicy: [["secret://k", RENDER_SLOT_POLICY, { acknowledge_interpreters: false }]],
+    },
+  },
+  {
+    argv: ["secret", "render", "revoke", "secret://k", "--key-id", RENDER_KEY_ID, "--entry", "env"],
+    stored: RENDER_SLOT_POLICY,
+    calls: {
+      getInjectionPolicy: [["secret://k"]],
+      setInjectionPolicy: [["secret://k", STORED_POLICY, { acknowledge_interpreters: false }]],
+    },
+  },
+  {
+    argv: ["secret", "render", "list", "secret://k"],
+    stored: RENDER_KEY_POLICY,
+    calls: { getInjectionPolicy: [["secret://k"]] },
+    restOutput: {
+      stdout: JSON.stringify(
+        {
+          entries: [
+            {
+              name: "env",
+              host: "h1.example",
+              port: 22,
+              user: "deploy",
+              path: "/srv/app/.env",
+              host_key_fingerprints: ["SHA256:dngXInM6F9ixKWjZmnsLT+7TH7k+7qKeHsHP6BtaKS8"],
+              slots: ["secret://bot-token"],
+              digest: RENDER_DIGEST,
+            },
+          ],
+          approvals: [],
+        },
+        null,
+        2,
+      ),
+      stderr: "",
+      written: "",
+    },
   },
   {
     argv: ["audit", "--event", "secret.read", "--limit", "5"],
@@ -719,6 +848,7 @@ const FIXTURE_PATH_TITLES = new Map([
   [KEY_PATH, "<key.pem>"],
   [CERT_PATH, "<cert.pem>"],
   [NO_RUNTIME_DIR, "<runtime-dir>"],
+  [TEMPLATE_PATH, "<env.tmpl>"],
 ]);
 const titled = (rows: RestRow[]): [string, RestRow][] =>
   rows.map((row) => [row.argv.map((arg) => FIXTURE_PATH_TITLES.get(arg) ?? arg).join(" "), row]);
@@ -726,8 +856,12 @@ const titled = (rows: RestRow[]): [string, RestRow][] =>
 describe("the REST mode of every REST-capable command (--url / --token-file)", () => {
   describe.each(titled(REST_ROWS))(
     "harpoc --url … %s",
-    (_title, { argv, calls, constructed, restOutput }) => {
+    (_title, { argv, calls, constructed, restOutput, stored }) => {
       it("reaches the RestClient member with the whole argument list, prints what the in-process path prints, loads no vault", async () => {
+        if (stored !== undefined) {
+          mockEngine.getInjectionPolicy.mockResolvedValue(stored);
+          mockClient.getInjectionPolicy.mockResolvedValue(stored);
+        }
         const local = await capture(withValueFile(argv));
         vi.mocked(loadUnlockedEngine).mockClear();
         MockRestClient.mockClear();
@@ -1719,6 +1853,41 @@ describe("REST_MODE_UNSUPPORTED: the commands without a REST mode", () => {
       json: false,
     },
     {
+      args: [
+        "secret",
+        "render",
+        "approve",
+        "secret://k",
+        "--key",
+        "secret://key",
+        "--entry",
+        "env",
+        "--json",
+      ],
+      message: "secret render approve --key has no REST mode; run it on the vault host",
+      json: true,
+    },
+    {
+      args: [
+        "secret",
+        "render",
+        "revoke",
+        "secret://k",
+        "--key",
+        "secret://key",
+        "--entry",
+        "env",
+        "--json",
+      ],
+      message: "secret render revoke --key has no REST mode; run it on the vault host",
+      json: true,
+    },
+    {
+      args: ["secret", "render", "list", "secret://k", "--key", "secret://key", "--json"],
+      message: "secret render list --key has no REST mode; run it on the vault host",
+      json: true,
+    },
+    {
       args: ["unlock-key", "enroll", "--out", "harpoc-unlock.key"],
       message: "unlock-key enroll has no REST mode; run it on the vault host",
       json: false,
@@ -1859,6 +2028,7 @@ describe("the REST mode's place in the command tree", () => {
     "proxy",
     "proxy ca",
     "secret",
+    "secret render",
     "server",
     "ssh-agent",
     "unlock-key",
@@ -1895,6 +2065,11 @@ describe("the REST mode's place in the command tree", () => {
     "secret get",
     "secret list",
     "secret mcp-server",
+    "secret render approve",
+    "secret render list",
+    "secret render remove",
+    "secret render revoke",
+    "secret render set",
     "secret rotate",
     "secret set",
     "secret use",

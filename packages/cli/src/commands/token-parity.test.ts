@@ -89,6 +89,21 @@ import { spyCli, tokenFixture, type CliSpies } from "../__fixtures__/cli-harness
 const FIXTURES = new URL("../__fixtures__/certs/", import.meta.url);
 const KEY_PATH = fileURLToPath(new URL("rsa-key.pem", FIXTURES));
 const CERT_PATH = fileURLToPath(new URL("rsa-cert.pem", FIXTURES));
+const TEMPLATE_PATH = fileURLToPath(new URL("../__fixtures__/render/env.tmpl", import.meta.url));
+
+// The public key line of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
+const HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
+/** The render entry `env.tmpl` describes with the flags of the `secret render set` row. */
+const E1 = {
+  name: "env",
+  host: "h1.example",
+  port: 22,
+  user: "deploy",
+  path: "/srv/app/.env",
+  host_keys: [HOST_KEY],
+  template: "TOKEN={{secret://bot-token}}\n",
+};
+const D1 = "7c6a834469ef5a6c2a4b422775e89bf38a601de3f618e3615c684734ca914b66";
 
 const INFO = {
   handle: "secret://k",
@@ -246,6 +261,62 @@ const ROWS: Row[] = [
     call: "deleteConnectionConfig",
   },
   {
+    argv: ["secret", "render", "list", "secret://k"],
+    permission: "read",
+    call: "getInjectionPolicy",
+    resolve: "default",
+  },
+  {
+    argv: [
+      "secret",
+      "render",
+      "set",
+      "secret://k",
+      "--entry",
+      "env",
+      "--host",
+      "h1.example",
+      "--user",
+      "deploy",
+      "--path",
+      "/srv/app/.env",
+      "--host-key",
+      HOST_KEY,
+      "--template-file",
+      TEMPLATE_PATH,
+    ],
+    permission: "admin",
+    call: "setInjectionPolicy",
+    resolve: AuditEventType.POLICY_GRANT,
+  },
+  {
+    argv: ["secret", "render", "remove", "secret://k", "--entry", "env"],
+    permission: "admin",
+    call: "setInjectionPolicy",
+  },
+  {
+    argv: [
+      "secret",
+      "render",
+      "approve",
+      "secret://k",
+      "--key",
+      "secret://k",
+      "--entry",
+      "env",
+      "--confirm",
+    ],
+    permission: "admin",
+    call: "setInjectionPolicy",
+    resolve: AuditEventType.POLICY_GRANT,
+  },
+  {
+    argv: ["secret", "render", "revoke", "secret://k", "--key", "secret://k", "--entry", "env"],
+    permission: "admin",
+    call: "setInjectionPolicy",
+    resolve: AuditEventType.POLICY_GRANT,
+  },
+  {
     argv: ["policy", "list", "secret://k"],
     permission: "read",
     call: "listPolicies",
@@ -393,6 +464,7 @@ const ROWS: Row[] = [
 const FIXTURE_PATH_TITLES = new Map([
   [KEY_PATH, "<key.pem>"],
   [CERT_PATH, "<cert.pem>"],
+  [TEMPLATE_PATH, "<env.tmpl>"],
 ]);
 const titled = (rows: Row[]): [string, Row][] =>
   rows.map((row) => [row.argv.map((arg) => FIXTURE_PATH_TITLES.get(arg) ?? arg).join(" "), row]);
@@ -419,6 +491,7 @@ describe("token permission map (Task 9 pin)", () => {
       response_header_allowlist: [],
       network_isolation: false,
       fs_isolation: false,
+      render: { entries: [E1], approvals: [{ key: "sid-1", entry: "env", digest: D1 }] },
     });
     mockEngine.setInjectionPolicy.mockResolvedValue(undefined);
     mockEngine.getMcpServerConfig.mockResolvedValue({

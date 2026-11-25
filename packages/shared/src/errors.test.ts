@@ -145,6 +145,14 @@ const STATUS_CASES = [
   [ErrorCode.IMAP_OPERATION_FAILED, 502],
   [ErrorCode.WEBSOCKET_CONNECT_FAILED, 502],
   [ErrorCode.SFTP_OPERATION_FAILED, 502],
+  [ErrorCode.RENDER_ENTRY_NOT_FOUND, 404],
+  [ErrorCode.RENDER_IN_FLIGHT, 409],
+  [ErrorCode.RENDER_SLOT_REFUSED, 403],
+  [ErrorCode.RENDER_SLOT_UNSUPPORTED, 400],
+  [ErrorCode.RENDER_NOT_APPROVED, 403],
+  [ErrorCode.RENDER_VALUE_UNSUPPORTED, 400],
+  [ErrorCode.RENDER_ONLY_KEY, 403],
+  [ErrorCode.RENDER_FAILED, 502],
   [ErrorCode.LOCAL_PATH_NOT_ALLOWED, 403],
   [ErrorCode.DOCKER_OPERATION_FAILED, 502],
   // Agent governance (v1.4)
@@ -504,6 +512,83 @@ describe("factory methods", () => {
     );
     expect(older.details).toBeUndefined();
   });
+
+  it('sshClientBelowFloor(…, "render") names the render', () => {
+    const unread = VaultError.sshClientBelowFloor(null, "8.4", "render");
+    expect(unread.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(unread.statusCode).toBe(501);
+    expect(unread.message).toBe(
+      "Unsupported ssh client: its version could not be read; an sftp render needs OpenSSH 8.4 or later",
+    );
+    expect(unread.details).toBeUndefined();
+    const older = VaultError.sshClientBelowFloor("8.0", "8.4", "render");
+    expect(older.code).toBe(ErrorCode.SSH_CLIENT_UNSUPPORTED);
+    expect(older.statusCode).toBe(501);
+    expect(older.message).toBe(
+      "Unsupported ssh client: OpenSSH 8.0 is older than 8.4, which an sftp render needs",
+    );
+    expect(older.details).toBeUndefined();
+  });
+
+  it.each([
+    {
+      factory: VaultError.renderEntryNotFound,
+      code: ErrorCode.RENDER_ENTRY_NOT_FOUND,
+      status: 404,
+      text: "SFTP render refused: the secret's injection policy holds no render entry of that name",
+    },
+    {
+      factory: VaultError.renderInFlight,
+      code: ErrorCode.RENDER_IN_FLIGHT,
+      status: 409,
+      text: "SFTP render in flight: another render to the same host, port and path is running",
+    },
+    {
+      factory: VaultError.renderSlotRefused,
+      code: ErrorCode.RENDER_SLOT_REFUSED,
+      status: 403,
+      text: "SFTP render refused: a slot of the entry's template cannot be served to this call",
+    },
+    {
+      factory: VaultError.renderSlotUnsupported,
+      code: ErrorCode.RENDER_SLOT_UNSUPPORTED,
+      status: 400,
+      text: "SFTP render refused: a slot's secret is one a render does not serve",
+    },
+    {
+      factory: VaultError.renderNotApproved,
+      code: ErrorCode.RENDER_NOT_APPROVED,
+      status: 403,
+      text: "SFTP render refused: a slot's secret has not approved the entry as it stands",
+    },
+    {
+      factory: VaultError.renderValueUnsupported,
+      code: ErrorCode.RENDER_VALUE_UNSUPPORTED,
+      status: 400,
+      text: "SFTP render refused: a value does not fit the template: every value is UTF-8 text without a NUL, 1 to 65536 bytes, and beside other text only of A-Z, a-z, 0-9 and . _ ~ + / = : @ % -",
+    },
+    {
+      factory: VaultError.renderOnlyKey,
+      code: ErrorCode.RENDER_ONLY_KEY,
+      status: 403,
+      text: "Use refused: the secret holds a render entry and serves the sftp render alone",
+    },
+    {
+      factory: VaultError.renderFailed,
+      code: ErrorCode.RENDER_FAILED,
+      status: 502,
+      text: "SFTP render failed: the file is not confirmed written; the key's audit row holds the reason",
+    },
+  ] as const)(
+    "render factories map to their status with one fixed text and no details: $code",
+    ({ factory, code, status, text }) => {
+      const err = factory();
+      expect(err.code).toBe(code);
+      expect(err.statusCode).toBe(status);
+      expect(err.message).toBe(text);
+      expect(err.details).toBeUndefined();
+    },
+  );
 
   it("misdirectedRequest() names the parsed hostname, or the missing header", () => {
     const host = VaultError.misdirectedRequest("Host", "evil.example");

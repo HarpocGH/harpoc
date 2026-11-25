@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { UseSecretAction } from "@harpoc/shared";
+import type { SftpRenderAction, UseSecretAction } from "@harpoc/shared";
 import { MAX_DOCKER_TIMEOUT_MS } from "@harpoc/shared";
 import { actionTimeoutRefusal } from "./action-timeout.js";
 import { BOOT } from "./__fixtures__/ssh-public-keys.js";
@@ -50,6 +50,17 @@ describe("actionTimeoutRefusal", () => {
   it("a bootstrap action passes the table: it carries no timeout_ms", () => {
     expect(actionTimeoutRefusal(BOOT)).toBeUndefined();
     expect(actionTimeoutRefusal({ ...BOOT, port: 2222, sudoers: true })).toBeUndefined();
+  });
+
+  it("a render passes the table as the sftp context, and is refused above 300000", () => {
+    const render: SftpRenderAction = { type: "sftp", operation: "render", entry: "env" };
+    expect(actionTimeoutRefusal(render)).toBeUndefined();
+    for (const value of [1, 300_000]) {
+      expect(actionTimeoutRefusal({ ...render, timeout_ms: value })).toBeUndefined();
+    }
+    expect(actionTimeoutRefusal({ ...render, timeout_ms: 300_001 })).toBe(
+      "timeout_ms must be a positive integer up to 300000",
+    );
   });
 
   it("the database context is not judged here", () => {

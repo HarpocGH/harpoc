@@ -15,6 +15,8 @@ export * from "./oauth-scopes.js";
 export * from "./pem.js";
 export * from "./rate-limiter.js";
 export * from "./recipient-pattern.js";
+export * from "./render-entry.js";
+export * from "./render-template.js";
 export * from "./schema-issues.js";
 export * from "./schemas.js";
 export * from "./server-lifecycle.js";

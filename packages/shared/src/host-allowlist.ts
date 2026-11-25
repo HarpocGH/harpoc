@@ -38,6 +38,27 @@ export function isPlainUpstreamHost(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
+const IPV4_LOOPBACK = /^127(?:\.\d{1,3}){3}$/;
+
+/**
+ * The vault host's own loopback as an sftp render entry's host may spell it
+ * (design 5 § 6.1): `localhost` in any case and with trailing dots, a
+ * `*.localhost` name (RFC 6761), `127.0.0.0/8` and `0.0.0.0`, which Linux
+ * connects to the local host. For a host that passed the ssh host charset,
+ * which is ASCII.
+ */
+export function isLoopbackSshHost(host: string): boolean {
+  let end = host.length;
+  while (end > 0 && host[end - 1] === ".") end--;
+  const name = host.slice(0, end).toLowerCase();
+  return (
+    LOOPBACK_BIND_HOSTS.has(name) ||
+    name.endsWith(".localhost") ||
+    IPV4_LOOPBACK.test(name) ||
+    name === "0.0.0.0"
+  );
+}
+
 /**
  * One `--allowed-host` entry as the set stores it: trimmed, lowercased, IPv6
  * brackets stripped. Null for anything but a host name or IP literal — a

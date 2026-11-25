@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { VaultError } from "@harpoc/shared";
+import type { SshClientUse } from "@harpoc/shared";
 import { baseSshEnv } from "./ssh-common.js";
 
 export interface SshVersion {
@@ -61,17 +62,19 @@ export function readSshVersion(
 }
 
 /**
- * Refuse, `SSH_CLIENT_UNSUPPORTED`, an ssh client below `SSH_PASSWORD_LOGIN_MIN_VERSION` or
- * whose version cannot be read: a client that is no OpenSSH has no `SSH_ASKPASS_REQUIRE`.
+ * Refuse, `SSH_CLIENT_UNSUPPORTED` with the texts of `use`, an ssh client below
+ * `SSH_PASSWORD_LOGIN_MIN_VERSION` or whose version cannot be read: a client that is no OpenSSH
+ * has neither `SSH_ASKPASS_REQUIRE` nor the options the render passes.
  */
 export async function refuseUnsupportedSshClient(
   sshPath: string,
   envAllowlist: readonly string[],
+  use: SshClientUse = "bootstrap",
 ): Promise<void> {
   const version = await readSshVersion(sshPath, baseSshEnv(envAllowlist));
   const floor = SSH_PASSWORD_LOGIN_MIN_VERSION.join(".");
-  if (version === null) throw VaultError.sshClientBelowFloor(null, floor);
+  if (version === null) throw VaultError.sshClientBelowFloor(null, floor, use);
   if (!sshVersionAtLeast(version, SSH_PASSWORD_LOGIN_MIN_VERSION)) {
-    throw VaultError.sshClientBelowFloor(formatSshVersion(version), floor);
+    throw VaultError.sshClientBelowFloor(formatSshVersion(version), floor, use);
   }
 }

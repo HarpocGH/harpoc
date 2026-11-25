@@ -964,6 +964,8 @@ describe("secret use — buildAction maps each documented flag (I24)", () => {
     user: "ubuntu",
     public_key: BOOTSTRAP_KEY,
   };
+  const RENDER_ARGS = ["--action", "sftp", "--operation", "render", "--entry", "env"];
+  const RENDER = { type: "sftp", operation: "render", entry: "env" };
   let spies: CliSpies;
 
   beforeEach(() => {
@@ -1154,6 +1156,56 @@ describe("secret use — buildAction maps each documented flag (I24)", () => {
     );
     expect(loadUnlockedEngine).not.toHaveBeenCalled();
   });
+
+  it("--operation render with --entry builds the render action", async () => {
+    await run(["secret://k", ...RENDER_ARGS]);
+    expect(actionOf()).toEqual(RENDER);
+  });
+
+  it("--timeout-ms reaches a render", async () => {
+    await run(["secret://k", ...RENDER_ARGS, "--timeout-ms", "300000"]);
+    expect(actionOf()).toEqual({ ...RENDER, timeout_ms: 300_000 });
+  });
+
+  it("--host beside --operation render is refused naming host, nothing run", async () => {
+    await expect(run(["secret://k", ...RENDER_ARGS, "--host", "h1.example"])).rejects.toThrow(
+      "process.exit",
+    );
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      'Error: [SCHEMA_VALIDATION_ERROR] <root>: Unrecognized key: "host"',
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
+
+  it("--entry beside --operation upload is refused naming entry", async () => {
+    await expect(
+      run([
+        "secret://k",
+        "--action",
+        "sftp",
+        "--operation",
+        "upload",
+        "--host",
+        "h1.example",
+        "--user",
+        "deploy",
+        "--remote",
+        "/srv/app/report.txt",
+        "--local",
+        "/var/tmp/report.txt",
+        "--entry",
+        "env",
+      ]),
+    ).rejects.toThrow("process.exit");
+    expect(spies.exitSpy).toHaveBeenCalledWith(1);
+    expect(spies.stderr()).toBe(
+      'Error: [SCHEMA_VALIDATION_ERROR] <root>: Unrecognized key: "entry"',
+    );
+    expect(loadUnlockedEngine).not.toHaveBeenCalled();
+    expect(mockEngine.useSecret).not.toHaveBeenCalled();
+  });
 });
 
 // B9 (M6): the git operations fetch and ls-remote and the repeatable --refspec,
@@ -1195,10 +1247,20 @@ describe("secret use — git fetch and ls-remote (B9)", () => {
     const description = (flag: string): string | undefined =>
       use?.options.find((o) => o.long === flag)?.description;
     expect(description("--operation")).toBe(
-      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list|render (sftp); pull|push (docker_registry)",
     );
     expect(description("--refspec")).toBe(
       "Refspec selecting what to fetch from the repository (repeatable, git fetch)",
+    );
+  });
+
+  it("--entry's help names the render entry of the secret's injection policy (sftp render)", () => {
+    const program = new Command();
+    const secret = program.command("secret");
+    registerSecretUseCommand(secret);
+    const use = secret.commands.find((c) => c.name() === "use");
+    expect(use?.options.find((o) => o.long === "--entry")?.description).toBe(
+      "Render entry of the secret's injection policy (sftp render)",
     );
   });
 
@@ -1743,6 +1805,19 @@ describe("secret use — output shape and boundary sanitization", () => {
     expect(out).toContain('{\\"ok\\":true,\\"items\\":3}');
     expect(out).not.toContain("[REDACTED]");
   });
+
+  it("a render's status prints as its type and status", async () => {
+    mockEngine.useSecret.mockImplementation(() =>
+      Promise.resolve({ type: "sftp_render", status: "written" }),
+    );
+    const args = ["secret://k", "--action", "sftp", "--operation", "render", "--entry", "env"];
+    expect(await output(args)).toBe("type    sftp_render\nstatus  written");
+    spies.logSpy.mockClear();
+    expect(JSON.parse(await output([...args, "--json"]))).toEqual({
+      type: "sftp_render",
+      status: "written",
+    });
+  });
 });
 
 describe("summarizeResult renders every context", () => {
@@ -1866,5 +1941,12 @@ describe("summarizeResult renders every context", () => {
     expect(
       summarizeResult({ type: "ssh_bootstrap", key: "present", sudoers: "not_asked" }),
     ).toEqual({ type: "ssh_bootstrap", key: "present", sudoers: "not_asked" });
+  });
+
+  it("sftp_render reports the status", () => {
+    expect(summarizeResult({ type: "sftp_render", status: "written" })).toEqual({
+      type: "sftp_render",
+      status: "written",
+    });
   });
 });

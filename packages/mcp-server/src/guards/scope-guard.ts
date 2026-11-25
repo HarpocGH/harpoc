@@ -12,6 +12,7 @@ import {
   matchesSecretNameScope,
   TOKENLESS_STDIO_PRINCIPAL,
   tokenlessStdioCaller,
+  tokenScopeRefusal,
   VaultError,
 } from "@harpoc/shared";
 
@@ -79,18 +80,16 @@ export class ScopeGuard {
       this.refuse(operation, "permission", `Token lacks permission: ${permission}`);
     }
 
-    // 2. Project scope check
-    if (this.token.project && project !== undefined && project !== this.token.project) {
-      this.refuse(operation, "project", `Token is scoped to project: ${this.token.project}`);
+    const refusal = tokenScopeRefusal(this.token, project, secretName);
+    if (refusal === "project") {
+      this.refuse(
+        operation,
+        refusal,
+        `Token is scoped to project: ${this.token.project as string}`,
+      );
     }
-    // Deny individual access to global (project-less) secrets for project-scoped tokens
-    if (this.token.project && secretName !== undefined && project === undefined) {
-      this.refuse(operation, "project", `Token is scoped to project: ${this.token.project}`);
-    }
-
-    // 3. Secret name scope check (name patterns, thesis §4.7)
-    if (secretName !== undefined && !matchesSecretNameScope(secretName, this.token.secrets)) {
-      this.refuse(operation, "secret", "Token does not grant access to this secret");
+    if (refusal === "secret") {
+      this.refuse(operation, refusal, "Token does not grant access to this secret");
     }
   }
 

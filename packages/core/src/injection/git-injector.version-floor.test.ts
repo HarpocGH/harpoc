@@ -189,6 +189,7 @@ function policy(overrides: Partial<InjectionPolicy> = {}): InjectionPolicy {
     ssh_agent_socket: false,
     local_dirs: [],
     ssh_bootstrap: null,
+    render: { entries: [], approvals: [] },
     ...overrides,
   };
 }

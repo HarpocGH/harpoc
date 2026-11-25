@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionConfig, InjectionPolicy, SshBootstrapPolicy } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  InjectionPolicy,
+  RenderPolicy,
+  SshBootstrapPolicy,
+} from "@harpoc/shared";
 import { expectAbsent } from "@harpoc/test-utils";
 
 const { mockEngine } = vi.hoisted(() => ({
@@ -51,6 +56,7 @@ const STORED_POLICY: InjectionPolicy = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 
 const current: InjectionPolicy = {
@@ -69,6 +75,7 @@ const current: InjectionPolicy = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 
 // The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
@@ -84,6 +91,20 @@ const BLOCK: SshBootstrapPolicy = {
   host_keys: [HOST_KEY],
   install_keys: [KEY_A],
   sudoers: false,
+};
+const RENDER: RenderPolicy = {
+  entries: [
+    {
+      name: "env",
+      host: "h1.example",
+      port: 22,
+      user: "deploy",
+      path: "/srv/app/.env",
+      host_keys: [HOST_KEY],
+      template: "TOKEN={{secret://bot-token}}\n",
+    },
+  ],
+  approvals: [],
 };
 const HOST_KEY_TEXT =
   "Invalid host key: one of ssh-ed25519, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521, ssh-rsa, one space and its base64 key, nothing else";
@@ -174,6 +195,7 @@ describe("mergePolicy", () => {
       ssh_agent_socket: false,
       local_dirs: [],
       ssh_bootstrap: null,
+      render: { entries: [], approvals: [] },
     });
   });
 
@@ -182,6 +204,16 @@ describe("mergePolicy", () => {
     expect(merged.response_mode).toBe("filtered");
     expect(merged.url_allowlist).toEqual([]);
     expect(merged.response_header_allowlist).toEqual([]);
+  });
+
+  it("keeps a stored render field", () => {
+    const merged = mergePolicy({ ...current, render: RENDER }, { command: ["git"] });
+    expect(merged.render).toEqual(RENDER);
+  });
+
+  it("--clear empties it", () => {
+    const merged = mergePolicy({ ...current, render: RENDER }, { clear: true });
+    expect(merged.render).toEqual({ entries: [], approvals: [] });
   });
 
   it("keeps a stored smtp_recipient_allowlist when --recipient is absent", () => {

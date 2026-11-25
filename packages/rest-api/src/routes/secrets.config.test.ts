@@ -20,6 +20,27 @@ const BOOTSTRAP_BLOCK = {
   ],
   sudoers: true,
 };
+/** A delivering key's render field, and a slot's approval of its entry. */
+const RENDER_ENTRY = {
+  name: "env",
+  host: "h1.example",
+  port: 22,
+  user: "deploy",
+  path: "/srv/app/.env",
+  host_keys: BOOTSTRAP_BLOCK.host_keys,
+  template: "TOKEN={{secret://bot-token}}\n",
+};
+const KEY_RENDER = { entries: [RENDER_ENTRY], approvals: [] };
+const SLOT_RENDER = {
+  entries: [],
+  approvals: [
+    {
+      key: "0193b1c2-0000-7000-8000-000000000001",
+      entry: "env",
+      digest: "7c6a834469ef5a6c2a4b422775e89bf38a601de3f618e3615c684734ca914b66",
+    },
+  ],
+};
 
 type ErrorBody = { error: string; message: string };
 type DataBody = { data: unknown };
@@ -371,6 +392,35 @@ describe("secret routes", () => {
       const body = (await get.json()) as { data: { ssh_bootstrap: unknown } };
       expect(body.data.ssh_bootstrap).toEqual(BOOTSTRAP_BLOCK);
     });
+
+    it.each([
+      ["a key's entries", KEY_RENDER],
+      ["a slot's approvals", SLOT_RENDER],
+    ])(
+      "PUT stores render entries and approvals and GET returns them unchanged: %s",
+      async (_case, render) => {
+        const put = await app.request("/api/v1/secrets/test-key/injection-policy", {
+          method: "PUT",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify({ ...FULL_POLICY, render }),
+        });
+        expect(put.status).toBe(200);
+        const call = engine.setInjectionPolicy.mock.calls[0] as unknown[];
+        expect(call.slice(0, 3)).toEqual([
+          "secret://test-key",
+          { ...FULL_POLICY, render },
+          { acknowledge_interpreters: false },
+        ]);
+        engine.getInjectionPolicy.mockResolvedValueOnce(call[1]);
+        const get = await app.request("/api/v1/secrets/test-key/injection-policy", {
+          method: "GET",
+          headers: AUTH,
+        });
+        expect(get.status).toBe(200);
+        const body = (await get.json()) as { data: { render: unknown } };
+        expect(body.data.render).toEqual(render);
+      },
+    );
 
     it("PUT rejects a malformed recipient pattern with SCHEMA_VALIDATION_ERROR", async () => {
       const res = await app.request("/api/v1/secrets/test-key/injection-policy", {

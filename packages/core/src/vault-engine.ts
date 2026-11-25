@@ -33,6 +33,10 @@ import type {
   OAuthTokenStatus,
   Permission,
   RegisterAgentInput,
+  RenderApproval,
+  RenderEntry,
+  RenderPolicy,
+  RenderTemplate,
   ScopeRefusalReason,
   Secret,
   ServerStopTrigger,
@@ -40,6 +44,7 @@ import type {
   SessionFile,
   SetAgentPermissionsResult,
   SetInjectionPolicyOptions,
+  SftpRenderResult,
   SmtpAction,
   SshAction,
   SshAgentUnboundReason,
@@ -73,12 +78,17 @@ import {
   AuditEventType,
   connectionConfigSchema,
   DEFAULT_SESSION_TTL_MS,
+  DEFAULT_SSH_TIMEOUT_MS,
+  distinctRenderSlots,
   ErrorCode,
   formatHandle,
   injectionPolicyInputSchema,
   injectionPolicySchema,
   isAdminUserCaller,
+  isNormalRemotePath,
   isPlainUpstreamHost,
+  isSingleSlotTemplate,
+  isValidName,
   isValidSecretNamePattern,
   isVaultVersionSupported,
   isWellFormedVaultVersion,
@@ -89,16 +99,24 @@ import {
   LOCKOUT_MAX_ATTEMPTS,
   matchesSecretNameScope,
   MAX_PROXY_REFUSAL_OPERATION_CHARS,
+  MAX_RENDER_VALUE_BYTES,
   MAX_SESSION_TTL_MS,
   MAX_TOKEN_TTL_MS,
   mcpServerConfigSchema,
   meetsVaultVersionFloor,
   MIN_PASSWORD_LENGTH,
+  MIN_REDACTABLE_FRAGMENT,
   OAuthGrantType,
   OAuthProviderPreset,
   oauthScopesSeparator,
+  parseHandle,
+  parseRenderTemplate,
   PrincipalType,
+  RATE_LIMIT_GLOBAL,
+  RATE_LIMIT_PER_SECRET,
   RateLimiter,
+  RENDER_MIXED_VALUE_REGEX,
+  RENDER_SLOT_LIMIT_PER_MINUTE,
   renderSchemaIssues,
   SecretStatus,
   SecretType,
@@ -109,6 +127,7 @@ import {
   SSH_HOST_KEY_TYPES,
   SSH_INSTALL_KEY_TYPES,
   TOKEN_LABEL_MAX_LENGTH,
+  tokenScopeRefusal,
   VaultError,
   VaultState,
   VAULT_VERSION,
@@ -148,6 +167,7 @@ import { actionShapeRefusal, imapOperationRefusal } from "./injection/action-sha
 import { actionTimeoutRefusal } from "./injection/action-timeout.js";
 import {
   allowlistNamesAuthority,
+  asciiLowerCase,
   controlledPathDirs,
   matchesHostAllowlist,
   matchesPlainUpstream,
@@ -170,9 +190,14 @@ import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
 import { redactErrorMessage } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
+import type { RenderEntryDetail } from "./injection/render-entry-digest.js";
+import { renderEntryDetail, renderEntryDigest } from "./injection/render-entry-digest.js";
 import { isResponseModeAllowed } from "./injection/response-mode.js";
 import type { SftpExecution } from "./injection/sftp-injector.js";
 import { buildSftpAuditDetails, executeSftpAction } from "./injection/sftp-injector.js";
+import type { RenderControl, RenderRun, RenderSpawnFields } from "./injection/sftp-render.js";
+import { resolveRenderClient, runRender } from "./injection/sftp-render.js";
+import type { RenderFailureReason, RenderWritten } from "./injection/sftp/sftp-writer.js";
 import type {
   SmtpExecution,
   SmtpOAuth,
@@ -465,6 +490,12 @@ export interface SshBootstrapSeam {
   run: typeof runBootstrap;
 }
 
+/** The sftp render's injector, as the engine reaches it: the client's version read, the one spawn. */
+export interface SftpRenderSeam {
+  refuseOldClient: (sshPath: string, envAllowlist: readonly string[]) => Promise<void>;
+  run: typeof runRender;
+}
+
 /** How an engine's keys were installed — the unlock-key slot is administered after a password unlock only. */
 type UnlockMethod = "password" | "credential" | "session";
 
@@ -500,6 +531,7 @@ interface UnlockedState {
   sftpExecutor: SftpExecutor;
   dockerExecutor: DockerExecutor;
   sshBootstrap: SshBootstrapSeam;
+  sftpRender: SftpRenderSeam;
 }
 
 const DAY_MS = 86_400_000;
@@ -687,6 +719,14 @@ function bootstrapBlockDetail(block: SshBootstrapPolicy | null): Record<string, 
   };
 }
 
+/** The render field as a policy.grant row records it: a host key as its fingerprint, a template as its slots and the entry's digest. */
+function renderPolicyDetail(render: RenderPolicy): {
+  entries: RenderEntryDetail[];
+  approvals: RenderApproval[];
+} {
+  return { entries: render.entries.map(renderEntryDetail), approvals: render.approvals };
+}
+
 const SSH_BOOTSTRAP_PASSWORD_MAX_BYTES = 1023;
 
 const SSH_PASSWORD_SHAPE_REFUSED =
@@ -767,6 +807,98 @@ function bootstrapOutcomeDetail(
     ...(markGone ? { mark: "gone" } : {}),
     ...spawnAuditDetail(outcome.spawn),
   };
+}
+
+/** An sftp render's request, each field read once from the action. */
+interface RenderRequest {
+  entry: unknown;
+  timeoutMs: unknown;
+}
+
+/** What a render's judgement hands its run: the entry as loaded, its parsed template and distinct slots, its digest, the resolved client and the row form `R`. */
+interface JudgedEntry {
+  entry: RenderEntry;
+  template: RenderTemplate;
+  slots: string[];
+  digest: string;
+  sshPath: string;
+  row: Record<string, unknown>;
+}
+
+/** A judged slot: its handle, the id the judgement found, and the two flags its policy hands the child. */
+interface JudgedSlot {
+  handle: string;
+  id: string;
+  fsIsolation: boolean;
+  strictTreeExit: boolean;
+}
+
+/** What a render's rows record: `K`'s fields and, where one slot failed or a seal ended the call, the code on the slots' rows. */
+interface RenderRecord {
+  written: RenderWritten;
+  flags: { network_isolation: boolean; fs_isolation: boolean };
+  spawn?: Record<string, unknown>;
+  error?: ErrorCode;
+  reason?: RenderFailureReason;
+  slotError?: (slotId: string) => ErrorCode | undefined;
+}
+
+const RENDER_SPAWN_AUDIT_KEYS = [
+  "sanitized",
+  "descendant_sweep",
+  "tree_kill",
+  "strict_tree_exit",
+  "isolation_mechanism",
+  "fs_isolation_mechanism",
+] as const satisfies readonly (keyof RenderSpawnFields)[];
+
+/** The six result-derived fields of a render's spawn, taken by name. */
+function renderSpawnDetail(spawn: RenderSpawnFields): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  for (const key of RENDER_SPAWN_AUDIT_KEYS) {
+    if (spawn[key] !== undefined) picked[key] = spawn[key];
+  }
+  return picked;
+}
+
+/**
+ * A slot value's text, where the value fits the template (design 5 § 6.6): 1 to
+ * `MAX_RENDER_VALUE_BYTES` bytes of UTF-8 without a NUL, and beside other text
+ * only of the mixed class; `undefined` for a value that does not.
+ */
+function renderValueText(value: Uint8Array, single: boolean): string | undefined {
+  if (value.length === 0 || value.length > MAX_RENDER_VALUE_BYTES || value.includes(0x00)) {
+    return undefined;
+  }
+  const view = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  const text = view.toString("utf8");
+  const again = Buffer.from(text, "utf8");
+  try {
+    if (!again.equals(view)) return undefined;
+  } finally {
+    wipeBuffer(again);
+  }
+  return single || RENDER_MIXED_VALUE_REGEX.test(text) ? text : undefined;
+}
+
+/** The rendered file in one buffer: the template's pieces and each occurrence's value bytes, in the template's order. */
+function renderContent(
+  template: RenderTemplate,
+  slots: readonly string[],
+  values: readonly Uint8Array[],
+): Buffer {
+  const occurrences = template.slots.map((handle) => values[slots.indexOf(handle)] as Uint8Array);
+  let length = 0;
+  for (const piece of template.pieces) length += Buffer.byteLength(piece, "utf8");
+  for (const value of occurrences) length += value.length;
+  const content = Buffer.alloc(length);
+  let offset = content.write(template.pieces[0] as string, 0, "utf8");
+  occurrences.forEach((value, i) => {
+    content.set(value, offset);
+    offset += value.length;
+    offset += content.write(template.pieces[i + 1] as string, offset, "utf8");
+  });
+  return content;
 }
 
 /** The certificate counterpart of {@link computeOAuthRefreshStatus}. */
@@ -863,6 +995,11 @@ export class VaultEngine {
     refuseOldClient: refuseUnsupportedSshClient,
     run: runBootstrap,
   };
+  private sftpRender: SftpRenderSeam = {
+    refuseOldClient: (sshPath, envAllowlist) =>
+      refuseUnsupportedSshClient(sshPath, envAllowlist, "render"),
+    run: runRender,
+  };
   private daemonPaths: DaemonPaths | undefined;
   private sessionManager: SessionManager;
   private sessionMonitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -895,6 +1032,20 @@ export class VaultEngine {
    * interface in front of the engine limits it as REST, MCP and the proxy do.
    */
   private readonly agentSocketLimiter = new RateLimiter();
+  /**
+   * The sftp render's slot buckets, `<principal type>:<principal id>:<slot id>`,
+   * `RENDER_SLOT_LIMIT_PER_MINUTE` a minute: a slot is no handle an interface
+   * in front of the engine limits.
+   */
+  private readonly renderSlotLimiter = new RateLimiter(
+    RATE_LIMIT_GLOBAL,
+    RATE_LIMIT_PER_SECRET,
+    RENDER_SLOT_LIMIT_PER_MINUTE,
+  );
+  /** The renders this engine runs, one per `<host, ASCII lower-cased>:<port>:<path>`: each call drops its own once its run has settled; a lock leaves them. */
+  private readonly renderHolds = new Set<string>();
+  /** The registered renders, each its own seal — drained by `wipeKeys` before a key goes. */
+  private readonly openRenders = new Set<() => void>();
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -1664,8 +1815,13 @@ export class VaultEngine {
     const s = this.assertUnlocked();
     const shapeRefusal = actionShapeRefusal(action);
     if (shapeRefusal !== undefined) throw VaultError.invalidInput(shapeRefusal);
+    const { type } = action;
     const bootstrap: SshBootstrapAction | undefined =
-      action.type === "ssh" && action.operation === "bootstrap" ? action : undefined;
+      type === "ssh" && action.operation === "bootstrap" ? action : undefined;
+    const render: RenderRequest | undefined =
+      bootstrap === undefined && type === "sftp" && action.operation === "render"
+        ? { entry: action.entry, timeoutMs: action.timeout_ms }
+        : undefined;
 
     let secret: Secret | undefined;
     let attribution: AuditAttribution | undefined;
@@ -1751,6 +1907,21 @@ export class VaultEngine {
         throw toUseError(err);
       }
 
+      if (render === undefined) {
+        try {
+          this.refuseRenderOnly(
+            s,
+            secret.id,
+            policy,
+            { handle, context: action.type },
+            attribution,
+          );
+        } catch (err) {
+          await s.mcpRegistry.terminate(secret.id, "render_enabled", attribution);
+          throw err;
+        }
+      }
+
       if (bootstrap === undefined) {
         try {
           this.refuseBootstrapOnly(
@@ -1813,7 +1984,22 @@ export class VaultEngine {
       // the config store.
       imapConnection = this.assertImapUsageAllowed(s, action, secret, attribution);
 
-      if (plan === undefined) this.assertTimeoutAllowed(s, handle, action, secret.id, attribution);
+      if (plan === undefined) {
+        const judged: UseSecretAction =
+          render === undefined
+            ? action
+            : {
+                type: "sftp",
+                operation: "render",
+                entry: render.entry as string,
+                timeout_ms: render.timeoutMs as number | undefined,
+              };
+        this.assertTimeoutAllowed(s, handle, judged, secret.id, attribution);
+      }
+
+      if (render !== undefined) {
+        return await this.runSftpRender(s, handle, render, secret, policy, caller, attribution);
+      }
 
       let resolvedId: string | undefined;
       try {
@@ -2170,6 +2356,9 @@ export class VaultEngine {
         }
 
         case "sftp": {
+          if (action.operation === "render") {
+            throw new Error("an sftp render returns before the decrypt and never reaches this arm");
+          }
           const config = this.loadConnectionConfig(s, secret.id);
           // Every SftpAuditDetails field the builder writes is request- or
           // policy-derived (design §7.2: host, operation, remote/local paths; the
@@ -2295,12 +2484,12 @@ export class VaultEngine {
               ? auditErr
               : VaultError.internalError("the audit write failed unexpectedly");
           if (plan !== undefined) throw unrecorded;
-          throw redactErrorMessage(unrecorded, Buffer.from(value).toString("utf8"));
+          throw redactErrorMessage(unrecorded, [Buffer.from(value).toString("utf8")]);
         }
       }
       const thrown = toVaultError(err);
       if (plan !== undefined) throw thrown;
-      throw redactErrorMessage(thrown, Buffer.from(value).toString("utf8"));
+      throw redactErrorMessage(thrown, [Buffer.from(value).toString("utf8")]);
     } finally {
       wipeBuffer(value);
     }
@@ -2310,8 +2499,8 @@ export class VaultEngine {
    * Resolve one egress-proxy placeholder for one brokered request (design
    * M4). `use_secret`'s ladder for a token caller — resolve the handle, the
    * caller's `use` grant, the secret's status, each refusal the failed
-   * `secret.use` row `use_secret` writes, `context: "proxy"` — then the
-   * bootstrap block, a bootstrap mark, the
+   * `secret.use` row `use_secret` writes, `context: "proxy"` — then a render
+   * entry, the bootstrap block, a bootstrap mark, the
    * secret's `proxy` opt-in, the judgement of the target's plain reading, and
    * the URL allowlist over the origin and path of its TLS reading where the
    * plain one does not hold, all before the credential is decrypted or an
@@ -2395,6 +2584,7 @@ export class VaultEngine {
       throw err;
     }
 
+    this.refuseRenderOnly(s, secret.id, policy, request, attribution);
     this.refuseBootstrapOnly(s, secret.id, policy, request, attribution);
     await this.refuseOnBootstrapMark(s, secret, handle, request, caller, attribution);
     if (!policy.proxy) {
@@ -2519,8 +2709,8 @@ export class VaultEngine {
    * The identities a consumer's ssh-agent socket lists (deployment model B,
    * M5): the public half of every SSH key on which the consumer holds `use`
    * (or `admin`), whose policy opts into the socket (`ssh_agent_socket`) and
-   * holds no bootstrap block, which carries no bootstrap mark and which is
-   * active, each under its handle — and
+   * holds no render entry and no bootstrap block, which carries no bootstrap
+   * mark and which is active, each under its handle — and
    * on a bound connection only
    * those whose pinned `ssh.known_hosts` holds the bound host key (R-P3, RT-1:
    * the pin alone — `host_allowlist` is judged at the signature, so ssh offers
@@ -2582,8 +2772,8 @@ export class VaultEngine {
    * Sign one request on a consumer's ssh-agent socket (deployment model B, M5,
    * R-P2). `use_secret`'s ladder for the consumer: the registry gate (the
    * socket has no token to revoke, so a deactivation takes effect here), the
-   * key blob to the secret holding it, the `use` grant, the status, the
-   * bootstrap block, a bootstrap mark, the
+   * key blob to the secret holding it, the `use` grant, the status, a render
+   * entry, the bootstrap block, a bootstrap mark, the
    * `ssh_agent_socket` opt-in — then the binding, on the engine's own parse of
    * the bytes it signs (RC-B3-9: the responder parses nothing): not refused for
    * forwarding, bound (`session-bind@openssh.com`), the data a userauth request
@@ -2667,6 +2857,7 @@ export class VaultEngine {
       refuse(VaultError.sshAgentUnbound(reason), { reason });
 
     const policy = this.loadInjectionPolicy(s, secret.id);
+    if (policy.render.entries.length > 0) throw refuse(VaultError.renderOnlyKey());
     if (policy.ssh_bootstrap !== null) {
       throw refuse(VaultError.sshBootstrapNotAllowed("bootstrap_only"));
     }
@@ -2734,6 +2925,7 @@ export class VaultEngine {
       const secret = s.store.getSecret(secretId);
       if (!secret || !isServableNow(secret) || isVaultManagedCertificate(s.store, secret)) continue;
       const policy = this.loadInjectionPolicy(s, secretId);
+      if (policy.render.entries.length > 0) continue;
       if (policy.ssh_bootstrap !== null) continue;
       if (s.store.readBootstrapMark(secretId) !== undefined) continue;
       if (!policy.ssh_agent_socket) continue;
@@ -3045,6 +3237,20 @@ export class VaultEngine {
     throw err;
   }
 
+  /** Writes `{ ...row, error: "RENDER_ONLY_KEY" }` (failed) and throws, where the policy holds a render entry. */
+  private refuseRenderOnly(
+    s: UnlockedState,
+    secretId: string,
+    policy: InjectionPolicy,
+    row: Record<string, unknown>,
+    attribution: AuditAttribution | undefined,
+  ): void {
+    if (policy.render.entries.length === 0) return;
+    const err = VaultError.renderOnlyKey();
+    this.auditUse(s, secretId, { ...row, error: err.code }, false, attribution);
+    throw err;
+  }
+
   /** B2: writes `{ ...row, error: "SSH_BOOTSTRAP_NOT_ALLOWED" }` (failed) and throws, where the policy holds the block. */
   private refuseBootstrapOnly(
     s: UnlockedState,
@@ -3308,6 +3514,500 @@ export class VaultEngine {
     }
   }
 
+  /**
+   * Step 2 of an sftp render, before the hold and every decrypt, in this order: the entry by
+   * name; the stored entry read (a template, a host key line or a path that does not parse is
+   * corruption, without a row); its host under `host_allowlist`; `ssh` resolved; the client's
+   * version. Each refusal is one failed row on the key, `R0` before the entry is found, `R` after;
+   * a raw throw is left to the net's row.
+   */
+  private async judgeRenderAction(
+    s: UnlockedState,
+    request: RenderRequest,
+    secret: Secret,
+    policy: InjectionPolicy,
+    attribution: AuditAttribution | undefined,
+  ): Promise<JudgedEntry> {
+    if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+    const refuse = (row: Record<string, unknown>, err: VaultError): VaultError => {
+      this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
+      return err;
+    };
+    const name =
+      typeof request.entry === "string" && isValidName(request.entry) ? request.entry : undefined;
+    const entry =
+      name === undefined ? undefined : policy.render.entries.find((e) => e.name === name);
+    if (entry === undefined) {
+      throw refuse(
+        { context: "sftp", operation: "render", ...(name === undefined ? {} : { entry: name }) },
+        VaultError.renderEntryNotFound(),
+      );
+    }
+    const template = parseRenderTemplate(entry.template);
+    if (template === null) throw VaultError.vaultCorrupted("a render template does not parse");
+    if (entry.host_keys.some((line) => parseSshPublicKey(line, SSH_HOST_KEY_TYPES) === null)) {
+      throw VaultError.vaultCorrupted("a render host key line does not parse");
+    }
+    if (!isNormalRemotePath(entry.path)) {
+      throw VaultError.vaultCorrupted("a render path is not in normal form");
+    }
+    const row: Record<string, unknown> = {
+      context: "sftp",
+      host: entry.host,
+      port: entry.port,
+      user: entry.user,
+      operation: "render",
+      entry: entry.name,
+      remote_path: entry.path,
+    };
+    if (!matchesHostAllowlist(entry.host, policy.host_allowlist)) {
+      throw refuse(row, VaultError.hostNotAllowed());
+    }
+    let sshPath: string;
+    try {
+      sshPath = await resolveRenderClient(policy);
+      await s.sftpRender.refuseOldClient(sshPath, policy.env_allowlist);
+    } catch (err) {
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      if (err instanceof VaultError) throw refuse(row, err);
+      throw err;
+    }
+    if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+    return {
+      entry,
+      template,
+      slots: distinctRenderSlots(template),
+      digest: renderEntryDigest(entry),
+      sshPath,
+      row,
+    };
+  }
+
+  /**
+   * Step 4 for one slot handle, in design 5 § 6.5's order: the token's scope on the handle's
+   * text, the resolution, the `use` grant, the slot's secret and policy, the approval of the
+   * entry as this call loaded it, and last the slot limiter. A refusal of the first five is one
+   * failed row `J` with its real code — on the slot's secret from the resolution on — with the
+   * use path's end of a live child beside it, and reaches the caller as `RENDER_SLOT_REFUSED`;
+   * a lock and the limiter's refusal leave as they are, with no row.
+   */
+  private async judgeRenderSlot(
+    s: UnlockedState,
+    slotHandle: string,
+    key: { id: string; handle: string; entry: string; digest: string },
+    caller: CallerContext | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<JudgedSlot> {
+    const row = {
+      handle: slotHandle,
+      context: "sftp",
+      operation: "render",
+      entry: key.entry,
+      key: key.handle,
+    };
+    let slotId: string | undefined;
+    let recorded = false;
+    const refuse = async (err: unknown, ends?: string): Promise<never> => {
+      this.auditDenied(s, AuditEventType.SECRET_USE, err, row, slotId, caller);
+      recorded = true;
+      if (ends !== undefined) await s.mcpRegistry.terminate(slotId as string, ends, attribution);
+      throw err;
+    };
+    try {
+      if (caller !== undefined) {
+        const parsed = parseHandle(slotHandle);
+        if (tokenScopeRefusal(caller, parsed.project, parsed.name) !== undefined) {
+          throw VaultError.accessDenied("Token does not grant access to this secret");
+        }
+      }
+      const slot = await s.secretManager.resolveHandle(slotHandle);
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      slotId = slot.id;
+
+      try {
+        this.checkResolvedCallerPolicy(
+          s,
+          slot.id,
+          caller,
+          "use",
+          AuditEventType.SECRET_USE,
+          row,
+          slotHandle,
+        );
+      } catch (err) {
+        if (!(err instanceof VaultError)) throw err;
+        recorded = true;
+        await s.mcpRegistry.terminate(slot.id, "use_denied", attribution);
+        throw err;
+      }
+
+      if (isVaultManagedCertificate(s.store, slot)) {
+        await refuse(VaultError.certValueUnsupported(slotHandle), "secret_unusable");
+      }
+      if (slot.type === SecretType.OAUTH_TOKEN) await refuse(VaultError.renderSlotUnsupported());
+      try {
+        s.secretManager.assertUsable(slot, slotHandle);
+      } catch (err) {
+        await refuse(err, "secret_unusable");
+      }
+
+      const slotPolicy = this.loadInjectionPolicy(s, slot.id);
+      try {
+        this.refuseBootstrapOnly(s, slot.id, slotPolicy, row, attribution);
+      } catch (err) {
+        if (!(err instanceof VaultError)) throw err;
+        recorded = true;
+        await s.mcpRegistry.terminate(slot.id, "ssh_bootstrap_enabled", attribution);
+        throw err;
+      }
+      try {
+        await this.refuseOnBootstrapMark(s, slot, slotHandle, row, caller, attribution);
+      } catch (err) {
+        if (err instanceof VaultError) recorded = true;
+        throw err;
+      }
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      if (slotPolicy.render.entries.length > 0) {
+        await refuse(VaultError.renderSlotUnsupported(), "render_enabled");
+      }
+      if (slot.id === key.id) await refuse(VaultError.renderSlotUnsupported());
+      if (slotPolicy.network_isolation) await refuse(VaultError.renderSlotUnsupported());
+
+      const approved = slotPolicy.render.approvals.some(
+        (granted) =>
+          granted.key === key.id && granted.entry === key.entry && granted.digest === key.digest,
+      );
+      if (!approved) await refuse(VaultError.renderNotApproved());
+
+      if (caller !== undefined) {
+        this.renderSlotLimiter.checkSecret(
+          `${caller.principal_type}:${caller.principal_id}:${slot.id}`,
+          true,
+        );
+      }
+      return {
+        handle: slotHandle,
+        id: slot.id,
+        fsIsolation: slotPolicy.fs_isolation,
+        strictTreeExit: slotPolicy.strict_tree_exit,
+      };
+    } catch (err) {
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+      if (
+        err instanceof VaultError &&
+        (err.code === ErrorCode.VAULT_LOCKED || err.code === ErrorCode.RATE_LIMIT_EXCEEDED)
+      ) {
+        throw err;
+      }
+      if (!recorded) this.auditDenied(s, AuditEventType.SECRET_USE, err, row, slotId, caller);
+      throw VaultError.renderSlotRefused();
+    }
+  }
+
+  /**
+   * An sftp render after the handle's own ladder (design 5 § 6.4 steps 2 to 7): the entry's
+   * judgement; the hold on its host, port and path; every slot judged before anything is
+   * decrypted; the registration; the key's decrypt and each slot's, bound to the judged ids;
+   * each value's shape and the content in one buffer; the one spawn; then `K` and every `S` in
+   * one transaction. From the registration on exactly one of the call, the call's own seal and
+   * `wipeKeys`' seal writes those rows; after a seal every way out answers `VAULT_LOCKED`. The
+   * arm's own errors and the run's `not_spawned` one leave as they stand: their texts hold no
+   * value and no byte of the host, and a marker in one would show where a value is part of it.
+   * Only a `VaultError` thrown where the arm expects none is stripped of the key and the values.
+   * It is called before the generic decrypt and never reaches the dispatch's choke point: its
+   * rows, its wipes and its redaction are its own.
+   */
+  private async runSftpRender(
+    s: UnlockedState,
+    handle: string,
+    request: RenderRequest,
+    secret: Secret,
+    policy: InjectionPolicy,
+    caller: CallerContext | undefined,
+    attribution: AuditAttribution | undefined,
+  ): Promise<SftpRenderResult> {
+    const judged = await this.judgeRenderAction(s, request, secret, policy, attribution);
+    const { entry } = judged;
+    if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+    const hold = `${asciiLowerCase(entry.host)}:${String(entry.port)}:${entry.path}`;
+    if (this.renderHolds.has(hold)) {
+      const err = VaultError.renderInFlight();
+      this.auditUse(s, secret.id, { ...judged.row, error: err.code }, false, attribution);
+      throw err;
+    }
+    this.renderHolds.add(hold);
+
+    const decrypted: Uint8Array[] = [];
+    const redact: string[] = [];
+    let content: Buffer | undefined;
+    let seal: (() => void) | undefined;
+    try {
+      const key = { id: secret.id, handle, entry: entry.name, digest: judged.digest };
+      const slots: JudgedSlot[] = [];
+      for (const slotHandle of judged.slots) {
+        slots.push(await this.judgeRenderSlot(s, slotHandle, key, caller, attribution));
+      }
+      if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
+
+      const handed: InjectionPolicy = {
+        ...policy,
+        fs_isolation: policy.fs_isolation || slots.some((slot) => slot.fsIsolation),
+        strict_tree_exit: policy.strict_tree_exit || slots.some((slot) => slot.strictTreeExit),
+      };
+      const flags = {
+        network_isolation: handed.network_isolation,
+        fs_isolation: handed.fs_isolation,
+      };
+      const slotRow = {
+        context: "sftp",
+        operation: "render",
+        entry: entry.name,
+        key: handle,
+        host: entry.host,
+        port: entry.port,
+        user: entry.user,
+        remote_path: entry.path,
+      };
+      const writeRows = (record: RenderRecord): void => {
+        const success = record.error === undefined;
+        s.store.transaction(() => {
+          this.auditUse(
+            s,
+            secret.id,
+            {
+              ...judged.row,
+              slots: judged.slots,
+              written: record.written,
+              ...record.flags,
+              ...record.spawn,
+              ...(record.error === undefined ? {} : { error: record.error }),
+              ...(record.reason === undefined ? {} : { reason: record.reason }),
+            },
+            success,
+            attribution,
+          );
+          for (const slot of slots) {
+            const error = record.slotError?.(slot.id);
+            this.auditUse(
+              s,
+              slot.id,
+              { ...slotRow, ...record.flags, ...(error === undefined ? {} : { error }) },
+              success,
+              attribution,
+            );
+          }
+        });
+      };
+
+      const abort = new AbortController();
+      const control: RenderControl = { signal: abort.signal, written: "no" };
+      let open = true;
+      let sealed = false;
+      let answer: VaultError | undefined;
+      const close = (): boolean => {
+        if (!open) return false;
+        open = false;
+        if (seal !== undefined) this.openRenders.delete(seal);
+        return true;
+      };
+      const sealRender = (): void => {
+        if (!close()) return;
+        sealed = true;
+        abort.abort();
+        try {
+          writeRows({
+            written: control.written,
+            flags,
+            error: ErrorCode.VAULT_LOCKED,
+            slotError: () => ErrorCode.VAULT_LOCKED,
+          });
+        } catch {
+          // The wipe goes on: a failed write must not keep the keys in memory.
+        }
+      };
+      const record = (outcome: RenderRecord): boolean => {
+        if (!close()) return false;
+        try {
+          writeRows(outcome);
+        } catch (auditErr) {
+          answer =
+            auditErr instanceof VaultError
+              ? auditErr
+              : VaultError.internalError("the audit write failed unexpectedly");
+          throw answer;
+        }
+        return true;
+      };
+      const fail = (outcome: RenderRecord, err: VaultError): VaultError => {
+        record(outcome);
+        answer = err;
+        return err;
+      };
+      const afterWait = (): void => {
+        if (!this.holdsCallKeys(s)) {
+          sealRender();
+          throw VaultError.vaultLocked();
+        }
+      };
+      const decryptBound = async (target: string, id: string): Promise<Uint8Array> => {
+        let resolved: string | undefined;
+        let value: Uint8Array;
+        try {
+          value = await s.secretManager.getSecretValue(target, (found) => {
+            resolved = found;
+          });
+        } catch (err) {
+          afterWait();
+          throw resolved !== undefined && resolved !== id ? VaultError.secretRevoked() : err;
+        }
+        decrypted.push(value);
+        afterWait();
+        if (resolved !== id) throw VaultError.secretRevoked();
+        return value;
+      };
+      seal = sealRender;
+      this.openRenders.add(seal);
+
+      try {
+        let keyValue: Uint8Array;
+        try {
+          keyValue = await decryptBound(handle, secret.id);
+        } catch (err) {
+          if (sealed) throw VaultError.vaultLocked();
+          const refused = toUseError(err);
+          fail({ written: control.written, flags, error: refused.code }, refused);
+          await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+          throw refused;
+        }
+        const values: Uint8Array[] = [];
+        for (const slot of slots) {
+          try {
+            values.push(await decryptBound(slot.handle, slot.id));
+          } catch (err) {
+            if (sealed) throw VaultError.vaultLocked();
+            const code = errorCodeOf(err);
+            const refused = fail(
+              {
+                written: control.written,
+                flags,
+                error: ErrorCode.RENDER_SLOT_REFUSED,
+                slotError: (id) => (id === slot.id ? code : undefined),
+              },
+              VaultError.renderSlotRefused(),
+            );
+            await s.mcpRegistry.terminate(slot.id, "secret_unusable", attribution);
+            throw refused;
+          }
+        }
+
+        const single = isSingleSlotTemplate(judged.template);
+        const texts: string[] = [];
+        for (const [i, slot] of slots.entries()) {
+          const text = renderValueText(values[i] as Uint8Array, single);
+          if (text === undefined) {
+            throw fail(
+              {
+                written: control.written,
+                flags,
+                error: ErrorCode.RENDER_VALUE_UNSUPPORTED,
+                slotError: (id) =>
+                  id === slot.id ? ErrorCode.RENDER_VALUE_UNSUPPORTED : undefined,
+              },
+              VaultError.renderValueUnsupported(),
+            );
+          }
+          texts.push(text);
+        }
+        content = renderContent(judged.template, judged.slots, values);
+        const keyPem = Buffer.from(
+          keyValue.buffer,
+          keyValue.byteOffset,
+          keyValue.byteLength,
+        ).toString("utf8");
+        redact.push(keyPem, ...texts.filter((text) => text.length >= MIN_REDACTABLE_FRAGMENT));
+
+        let run: RenderRun;
+        try {
+          run = await s.sftpRender.run(
+            {
+              sshPath: judged.sshPath,
+              entry,
+              keyPem,
+              content,
+              redact: [...redact],
+              timeoutMs:
+                typeof request.timeoutMs === "number" ? request.timeoutMs : DEFAULT_SSH_TIMEOUT_MS,
+              policy: handed,
+            },
+            control,
+          );
+        } catch (err) {
+          afterWait();
+          if (err instanceof VaultError) {
+            throw fail(
+              { written: control.written, flags, error: err.code },
+              redactErrorMessage(err, redact) as VaultError,
+            );
+          }
+          throw fail(
+            { written: control.written, flags, error: ErrorCode.INTERNAL_ERROR },
+            VaultError.internalError("the injection context failed unexpectedly"),
+          );
+        }
+        afterWait();
+        if (run.kind === "not_spawned") {
+          throw fail(
+            {
+              written: control.written,
+              flags:
+                run.spawn === undefined
+                  ? flags
+                  : {
+                      network_isolation: run.spawn.network_isolation,
+                      fs_isolation: run.spawn.fs_isolation,
+                    },
+              error: run.error.code,
+            },
+            run.error,
+          );
+        }
+        const outcome: RenderRecord = {
+          written: run.outcome.written,
+          flags: {
+            network_isolation: run.spawn.network_isolation,
+            fs_isolation: run.spawn.fs_isolation,
+          },
+          spawn: renderSpawnDetail(run.spawn),
+        };
+        if (run.outcome.written !== "yes" || run.outcome.reason !== undefined) {
+          throw fail(
+            {
+              ...outcome,
+              error: ErrorCode.RENDER_FAILED,
+              ...(run.outcome.reason === undefined ? {} : { reason: run.outcome.reason }),
+            },
+            VaultError.renderFailed(),
+          );
+        }
+        if (!record(outcome)) throw VaultError.vaultLocked();
+        return { type: "sftp_render", status: "written" };
+      } catch (err) {
+        if (sealed) throw VaultError.vaultLocked();
+        if (err === answer) throw err;
+        record({ written: control.written, flags, error: errorCodeOf(err) });
+        throw err instanceof VaultError
+          ? (redactErrorMessage(err, redact) as VaultError)
+          : VaultError.internalError("the injection context failed unexpectedly");
+      }
+    } finally {
+      if (seal !== undefined) this.openRenders.delete(seal);
+      for (const value of decrypted) wipeBuffer(value);
+      content?.fill(0);
+      redact.length = 0;
+      this.renderHolds.delete(hold);
+    }
+  }
+
   /** Whether the engine still holds the keys a call began under: unlocked, and its live audit logger the call's. */
   private holdsCallKeys(s: UnlockedState): boolean {
     return this.state === VaultState.UNLOCKED && this.auditLogger === s.auditLogger;
@@ -3339,9 +4039,9 @@ export class VaultEngine {
    * allowlists when no policy is set — and every allowlist denies by default
    * (R1, 2026-09-01), so an unconfigured secret is usable in no target context
    * until an administrator writes its policy. A stored blob is parsed strictly
-   * (R2/C43): the writer always emits all fifteen fields, so a miss (other
+   * (R2/C43): the writer always emits all sixteen fields, so a miss (other
    * than the post-baseline `strict_tree_exit`, `proxy`, `ssh_agent_socket`,
-   * `local_dirs` and `ssh_bootstrap`, defaulted below) or an extra key (other
+   * `local_dirs`, `ssh_bootstrap` and `render`, defaulted below) or an extra key (other
    * than `local_dirs`'s first name `sftp_local_dirs` standing alone, moved
    * below) is corruption.
    */
@@ -3364,6 +4064,7 @@ export class VaultEngine {
         ssh_agent_socket: false,
         local_dirs: [],
         ssh_bootstrap: null,
+        render: { entries: [], approvals: [] },
       };
     }
     const bytes = decrypt(
@@ -3380,13 +4081,14 @@ export class VaultEngine {
       throw VaultError.vaultCorrupted(`injection policy for secret ${secretId} is not JSON`);
     }
     // The post-baseline fields (D1, 2026-09-10; B2 and B3, 2026-11-06; S1,
-    // 2026-11-18; 4b B1, 2026-11-21): blobs written by the prepared v1.5.0 tree
-    // carry the baseline ten, blobs written before the egress proxy eleven,
-    // blobs written before the agent socket twelve, blobs written before the
-    // local directories thirteen, blobs written before the bootstrap block
-    // fourteen, so these five fields — and only these — default on read; no
-    // rewrite (policy writes are POLICY_GRANT events). The writer writes all
-    // fifteen; any other miss stays corruption (R2/C43).
+    // 2026-11-18; 4b B1, 2026-11-21; 5 § 6.1, 2026-11-24): blobs written by the
+    // prepared v1.5.0 tree carry the baseline ten, blobs written before the
+    // egress proxy eleven, blobs written before the agent socket twelve, blobs
+    // written before the local directories thirteen, blobs written before the
+    // bootstrap block fourteen, blobs written before the render field fifteen,
+    // so these six fields — and only these — default on read; no rewrite
+    // (policy writes are POLICY_GRANT events). The writer writes all sixteen;
+    // any other miss stays corruption (R2/C43).
     if (
       typeof raw === "object" &&
       raw !== null &&
@@ -3439,6 +4141,14 @@ export class VaultEngine {
       !Object.hasOwn(raw, "ssh_bootstrap")
     ) {
       (raw as Record<string, unknown>)["ssh_bootstrap"] = null;
+    }
+    if (
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      !Object.hasOwn(raw, "render")
+    ) {
+      (raw as Record<string, unknown>)["render"] = { entries: [], approvals: [] };
     }
     const parsed = injectionPolicySchema.safeParse(raw);
     if (!parsed.success) {
@@ -3499,16 +4209,16 @@ export class VaultEngine {
       },
     );
 
+    const refuse = (message: string, reason: string): never =>
+      this.refuseAudited(
+        s,
+        AuditEventType.POLICY_GRANT,
+        VaultError.invalidInput(message),
+        { policy: "injection", handle, reason },
+        caller,
+        { secretId: secret.id },
+      );
     if (input.ssh_bootstrap !== null) {
-      const refuse = (message: string, reason: string): never =>
-        this.refuseAudited(
-          s,
-          AuditEventType.POLICY_GRANT,
-          VaultError.invalidInput(message),
-          { policy: "injection", handle, reason },
-          caller,
-          { secretId: secret.id },
-        );
       if (secret.type !== SecretType.API_KEY) {
         refuse("ssh_bootstrap needs a secret of type api_key", "ssh_bootstrap_secret_type");
       }
@@ -3522,8 +4232,42 @@ export class VaultEngine {
         );
       }
     }
+    if (input.render.entries.length > 0) {
+      if (input.render.approvals.length > 0) {
+        refuse(
+          "render entries cannot stand beside render approvals",
+          "render_entries_with_approvals",
+        );
+      }
+      if (input.proxy) {
+        refuse("render entries cannot stand beside proxy", "render_with_proxy");
+      }
+      if (input.ssh_agent_socket) {
+        refuse(
+          "render entries cannot stand beside ssh_agent_socket",
+          "render_with_ssh_agent_socket",
+        );
+      }
+      if (input.network_isolation) {
+        refuse(
+          "render entries cannot stand beside network_isolation",
+          "render_with_network_isolation",
+        );
+      }
+      if (input.ssh_bootstrap !== null) {
+        refuse("render entries cannot stand beside ssh_bootstrap", "render_with_ssh_bootstrap");
+      }
+      if (
+        input.render.entries.some(
+          (entry) => !matchesHostAllowlist(entry.host, input.host_allowlist),
+        )
+      ) {
+        refuse("a render entry's host is not in host_allowlist", "render_host_not_allowed");
+      }
+    }
 
-    const stored = new Set(this.loadInjectionPolicy(s, secret.id).command_allowlist);
+    const before = this.loadInjectionPolicy(s, secret.id);
+    const stored = new Set(before.command_allowlist);
     const pathDirs = controlledPathDirs();
     const added = [...new Set(input.command_allowlist.filter((entry) => !stored.has(entry)))];
     // Two tiers, one flag (R6(ii)): the raw name first, then the entry
@@ -3597,6 +4341,7 @@ export class VaultEngine {
           ssh_agent_socket: input.ssh_agent_socket,
           local_dir_count: input.local_dirs.length,
           ssh_bootstrap: bootstrapBlockDetail(input.ssh_bootstrap),
+          render: renderPolicyDetail(input.render),
           ...callerInterfaceDetail(caller),
         },
         sessionId: this.sessionId ?? undefined,
@@ -3627,11 +4372,15 @@ export class VaultEngine {
     // next use respawns the child wrapped as demanded (D51), and the posture
     // recorded on the registry entry is McpInjector's backstop for a policy
     // tightened from a separate process, whose engine cannot reach this
-    // registry; the bootstrap block's is the use path's refusal. One
-    // terminate covers every demand; the bootstrap block, network, fs,
-    // strict is the precedence.
+    // registry; the bootstrap block's is the use path's refusal. A first
+    // render entry is the fifth demand: the key serves the render alone, and
+    // its backstop is likewise the use path's refusal of any other action
+    // (`refuseRenderOnly`). One terminate covers every demand; the bootstrap
+    // block, a first render entry, network, fs, strict is the precedence.
+    const firstRenderEntry = before.render.entries.length === 0 && input.render.entries.length > 0;
     if (
       input.ssh_bootstrap !== null ||
+      firstRenderEntry ||
       input.network_isolation ||
       input.fs_isolation ||
       input.strict_tree_exit
@@ -3640,11 +4389,13 @@ export class VaultEngine {
         secret.id,
         input.ssh_bootstrap !== null
           ? "ssh_bootstrap_enabled"
-          : input.network_isolation
-            ? "network_isolation_enabled"
-            : input.fs_isolation
-              ? "fs_isolation_enabled"
-              : "strict_tree_exit_enabled",
+          : firstRenderEntry
+            ? "render_enabled"
+            : input.network_isolation
+              ? "network_isolation_enabled"
+              : input.fs_isolation
+                ? "fs_isolation_enabled"
+                : "strict_tree_exit_enabled",
         attributionFromCaller(caller, this.sessionId),
       );
     }
@@ -7480,6 +8231,7 @@ export class VaultEngine {
       sftpExecutor: this.sftpExecutor,
       dockerExecutor: this.dockerExecutor,
       sshBootstrap: this.sshBootstrap,
+      sftpRender: this.sftpRender,
     };
   }
 
@@ -7535,6 +8287,7 @@ export class VaultEngine {
         // The wipe goes on: a failed write must not keep the keys in memory.
       }
     }
+    for (const seal of [...this.openRenders]) seal();
     if (this.kek) {
       wipeBuffer(this.kek);
       this.kek = null;

@@ -296,8 +296,11 @@ export function redactSecretEncodings(text: string, secret: string): string {
 }
 
 /**
- * Redact the credential from a thrown error's message and details, preserving
- * its type and code.
+ * Strips every value of `secrets` from a VaultError's message and details, the
+ * longer value first; an error that holds none is returned as it is. Empty
+ * strings and repeats are dropped, and no length floor is applied here: a
+ * caller that needs one (`MIN_REDACTABLE_FRAGMENT`) applies it where it builds
+ * its list.
  *
  * A thrown error is a model-visible channel that no result-shaped redaction
  * layer touches: the MCP SDK turns a thrown handler error into the tool result
@@ -311,13 +314,17 @@ export function redactSecretEncodings(text: string, secret: string): string {
  * are walked too. An error carrying the credential in neither is returned
  * unchanged, identity included.
  */
-export function redactErrorMessage(err: unknown, secret: string): unknown {
+export function redactErrorMessage(err: unknown, secrets: readonly string[]): unknown {
   if (!(err instanceof VaultError)) return err;
-  const message = redactSecretEncodings(err.message, secret);
+  const values = [...new Set(secrets.filter((s) => s.length > 0))].sort(
+    (a, b) => b.length - a.length,
+  );
+  if (values.length === 0) return err;
+  const redact = (text: string): string =>
+    values.reduce((out, value) => redactSecretEncodings(out, value), text);
+  const message = redact(err.message);
   const walked =
-    err.details === undefined
-      ? undefined
-      : mapStringLeavesTracked(err.details, (s) => redactSecretEncodings(s, secret), 0);
+    err.details === undefined ? undefined : mapStringLeavesTracked(err.details, redact, 0);
   if (message === err.message && walked?.changed !== true) return err;
   const details =
     walked?.changed === true ? (walked.value as Record<string, unknown>) : err.details;

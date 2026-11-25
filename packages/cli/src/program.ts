@@ -15,6 +15,7 @@ import { registerSecretUseCommand } from "./commands/secret/use.js";
 import { registerSecretAllowCommand } from "./commands/secret/allow.js";
 import { registerSecretMcpServerCommand } from "./commands/secret/mcp-server.js";
 import { registerSecretConnectionCommand } from "./commands/secret/connection.js";
+import { registerSecretRenderCommand } from "./commands/secret/render.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerAuthTokenCommand } from "./commands/auth/token.js";
 import { registerAuthListCommand } from "./commands/auth/list.js";
@@ -87,6 +88,7 @@ export function buildProgram(): Command {
   registerSecretAllowCommand(secret);
   registerSecretMcpServerCommand(secret);
   registerSecretConnectionCommand(secret);
+  registerSecretRenderCommand(secret);
 
   // auth subcommands
   const auth = program.command("auth").description("Manage API tokens");

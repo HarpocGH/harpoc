@@ -333,7 +333,7 @@ export async function executeWebsocketAction(
   try {
     return await dialAndCollect(finalUrl, headers, dispatcher, action, responseMode, valueStr);
   } catch (rawErr) {
-    const err = redactErrorMessage(rawErr, valueStr);
+    const err = redactErrorMessage(rawErr, [valueStr]);
     if (err instanceof VaultError) throw err;
     throw VaultError.websocketConnectFailed(origin);
   } finally {

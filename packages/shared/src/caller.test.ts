@@ -7,6 +7,7 @@ import {
   isAdminUserCaller,
   TOKENLESS_STDIO_PRINCIPAL,
   tokenlessStdioCaller,
+  tokenScopeRefusal,
 } from "./caller.js";
 import { ErrorCode } from "./errors.js";
 import type { VaultApiToken } from "./types.js";
@@ -161,6 +162,70 @@ describe("checkTokenScope", () => {
   });
 });
 
+describe("tokenScopeRefusal", () => {
+  it("a token without project or name claims admits every handle", () => {
+    expect(tokenScopeRefusal({}, undefined, "a")).toBeUndefined();
+    expect(tokenScopeRefusal({}, "p", "a")).toBeUndefined();
+    expect(tokenScopeRefusal({}, undefined, undefined)).toBeUndefined();
+  });
+
+  it("a project claim refuses another project and a project-less secret as project", () => {
+    const scope = { project: "acme" };
+    expect(tokenScopeRefusal(scope, "other", "db")).toBe("project");
+    expect(tokenScopeRefusal(scope, undefined, "db")).toBe("project");
+    expect(tokenScopeRefusal(scope, "other", undefined)).toBe("project");
+    expect(tokenScopeRefusal(scope, "acme", "db")).toBeUndefined();
+    expect(tokenScopeRefusal(scope, undefined, undefined)).toBeUndefined();
+  });
+
+  it("name patterns refuse a name outside them as secret", () => {
+    const scope = { secrets: ["db-*"] };
+    expect(tokenScopeRefusal(scope, undefined, "db-main")).toBeUndefined();
+    expect(tokenScopeRefusal(scope, undefined, "api-key")).toBe("secret");
+    expect(tokenScopeRefusal(scope, undefined, "xdb-main")).toBe("secret");
+    expect(tokenScopeRefusal(scope, undefined, undefined)).toBeUndefined();
+    expect(tokenScopeRefusal({ secrets: [] }, undefined, "anything")).toBeUndefined();
+    expect(tokenScopeRefusal({ secrets: ["*"] }, undefined, "anything")).toBeUndefined();
+  });
+
+  it("the project branch answers before the name branch", () => {
+    expect(tokenScopeRefusal({ project: "acme", secrets: ["db-*"] }, "other", "api-key")).toBe(
+      "project",
+    );
+  });
+
+  it("a caller derived from a token answers as the token", () => {
+    const tokens = [
+      baseToken(),
+      baseToken({ project: "acme" }),
+      baseToken({ project: "" }),
+      baseToken({ secrets: [] }),
+      baseToken({ secrets: ["db-*"] }),
+      baseToken({ project: "acme", secrets: ["*"] }),
+    ];
+    const targets: [string | undefined, string | undefined][] = [
+      ["acme", "db-1"],
+      ["other", "db-1"],
+      [undefined, "db-1"],
+      [undefined, "x"],
+      [undefined, undefined],
+    ];
+    for (const token of tokens) {
+      for (const [project, name] of targets) {
+        const label = JSON.stringify({
+          project: token.project,
+          secrets: token.secrets,
+          project_arg: project,
+          name,
+        });
+        expect(tokenScopeRefusal(callerFromToken(token), project, name), label).toBe(
+          tokenScopeRefusal(token, project, name),
+        );
+      }
+    }
+  });
+});
+
 describe("admin_scope (R7)", () => {
   it("callerFromToken sets admin_scope when the scope claim includes admin", () => {
     const caller = callerFromToken(baseToken({ scope: ["admin"], principal_type: "user" }));
@@ -272,6 +337,24 @@ describe("checkTokenScope — onRefusal (D2g)", () => {
     const seen = vi.fn();
     checkTokenScope(base, "read", undefined, "db", seen);
     expect(seen).not.toHaveBeenCalled();
+  });
+
+  it("keeps its three texts", () => {
+    const deniedWith = (message: string) =>
+      expect.objectContaining({ code: ErrorCode.ACCESS_DENIED, message });
+    expect(() => checkTokenScope(base, "rotate")).toThrow(
+      deniedWith("Access denied: Token lacks permission: rotate"),
+    );
+    const scoped = { ...base, project: "acme" };
+    expect(() => checkTokenScope(scoped, "read", "other", "db")).toThrow(
+      deniedWith("Access denied: Token is scoped to project: acme"),
+    );
+    expect(() => checkTokenScope(scoped, "read", undefined, "db")).toThrow(
+      deniedWith("Access denied: Token is scoped to project: acme"),
+    );
+    expect(() =>
+      checkTokenScope({ ...base, secrets: ["db-*"] }, "read", undefined, "mail"),
+    ).toThrow(deniedWith("Access denied: Token does not grant access to this secret"));
   });
 });
 

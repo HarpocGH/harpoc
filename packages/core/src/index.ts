@@ -253,6 +253,8 @@ export {
 export type { DaemonPaths } from "./injection/local-path.js";
 export { redactSecretEncodings, mapStringLeaves } from "./injection/output-sanitizer.js";
 export { sanitizeUseSecretResult } from "./injection/sanitize-result.js";
+export { renderEntryDetail, renderEntryDigest } from "./injection/render-entry-digest.js";
+export type { RenderEntryDetail } from "./injection/render-entry-digest.js";
 export { McpInjector } from "./injection/mcp-injector.js";
 export { McpConnectionRegistry } from "./injection/mcp-registry.js";
 export type { McpConnectionEntry, McpEntryState } from "./injection/mcp-registry.js";

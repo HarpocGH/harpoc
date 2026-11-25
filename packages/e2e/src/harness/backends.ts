@@ -37,6 +37,11 @@ export const MYSQL = {
  * configures only 127.0.0.1 on lo0: `fleet:up` runs a preflight
  * (scripts/fleet-preflight.mjs) that fails loudly with the
  * `sudo ifconfig lo0 alias` recovery before compose can die on the bind.
+ * The `sftp` `render` rows reach `sshd-pinned` on none of these: a render
+ * entry's host may not be loopback, so they dial the container's own address
+ * on the compose network at 2222 (`harness/render.ts`), which only a host that
+ * routes to that network reaches: a Linux Docker host, or a container on the
+ * network or in Docker Desktop's VM — never the Windows or macOS host itself.
  */
 export const SSHD_PINNED = {
   host: "127.0.0.2",

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallerContext, Permission, PrincipalType, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, injectionPolicyInputSchema, SecretType } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
+import { ENTRY, keyPolicy } from "./injection/__fixtures__/render-entries.js";
 import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 import { VaultEngine } from "./vault-engine.js";
@@ -224,6 +225,23 @@ describe("a denied use ends the secret's live downstream child (E73)", () => {
     expect(registryOf(engine).get(id)).toBeUndefined();
     const [row] = terminatesFor(id);
     expect(row?.detail).toMatchObject({ reason: "ssh_bootstrap_enabled", server: "docs" });
+    expect(row?.principal_id).toBe("alice");
+  });
+
+  it("a use refused for a render entry ends the secret's live child", async () => {
+    const id = await makeSecret("mcp-render");
+    grant(id, "alice", ["use"]);
+    await seedLiveStdioEntry(engine, id);
+    storeInjectionPolicyBlob(engine, id, injectionPolicyInputSchema.parse(keyPolicy([ENTRY])));
+
+    await expectVaultError(
+      () => engine.useSecret("secret://mcp-render", USE, agent("alice")),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+
+    expect(registryOf(engine).get(id)).toBeUndefined();
+    const [row] = terminatesFor(id);
+    expect(row?.detail).toMatchObject({ reason: "render_enabled", server: "docs" });
     expect(row?.principal_id).toBe("alice");
   });
 

@@ -19,6 +19,7 @@ import {
   retainDecryptedValues,
   storeInjectionPolicyBlob,
 } from "./__fixtures__/engine-seams.js";
+import { ENTRY } from "./injection/__fixtures__/render-entries.js";
 import { BLOCK } from "./injection/__fixtures__/ssh-public-keys.js";
 import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
@@ -41,6 +42,16 @@ const BOOTSTRAP_ONLY_ROW = {
   error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
   interface: "proxy",
 };
+const RENDER_ONLY = "Use refused: the secret holds a render entry and serves the sftp render alone";
+const RENDER_ONLY_ROW = {
+  context: "proxy",
+  method: "GET",
+  origin: "https://api.github.com",
+  path: "/user",
+  error: ErrorCode.RENDER_ONLY_KEY,
+  interface: "proxy",
+};
+const RENDER = { entries: [ENTRY], approvals: [] };
 const MARK_AT = 1_700_000_000_000;
 const UNCONFIRMED =
   "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host";
@@ -328,6 +339,102 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
     await engine.setInjectionPolicy(HANDLE, {
       url_allowlist: ["https://api.github.com/*"],
       ssh_bootstrap: BLOCK,
+    });
+    await engine.revokeSecret(HANDLE);
+    const retained = retainDecryptedValues(engine);
+
+    await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.SECRET_REVOKED,
+    );
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toEqual({
+      handle: HANDLE,
+      context: "proxy",
+      method: "GET",
+      origin: "https://api.github.com",
+      path: "/user",
+      error: ErrorCode.SECRET_REVOKED,
+      interface: "proxy",
+    });
+  });
+
+  it("refuses a secret with a render entry RENDER_ONLY_KEY ahead of the opt-in, before any decrypt", async () => {
+    await engine.setInjectionPolicy(HANDLE, {
+      url_allowlist: ["https://api.github.com/*"],
+      host_allowlist: ["h1.example"],
+      render: RENDER,
+    });
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+    expectAbsent(err.message, PLAINTEXT);
+    expect(err.message).toBe(RENDER_ONLY);
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+    expect(rows[0]?.detail).toEqual(RENDER_ONLY_ROW);
+  });
+
+  it("a stored policy that holds an entry beside proxy: true is refused the same way", async () => {
+    storeInjectionPolicyBlob(
+      engine,
+      secretId,
+      injectionPolicyInputSchema.parse({
+        url_allowlist: ["https://api.github.com/*"],
+        host_allowlist: ["h1.example"],
+        proxy: true,
+        render: RENDER,
+      }),
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+    expectAbsent(err.message, PLAINTEXT);
+    expect(err.message).toBe(RENDER_ONLY);
+    expect(retained).toHaveLength(0);
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ success: false, principal_id: "alice" });
+    expect(rows[0]?.detail).toEqual(RENDER_ONLY_ROW);
+  });
+
+  it("a stored policy that holds a block beside an entry answers RENDER_ONLY_KEY: the entry's refusal ahead of the block's", async () => {
+    storeInjectionPolicyBlob(
+      engine,
+      secretId,
+      injectionPolicyInputSchema.parse({
+        url_allowlist: ["https://api.github.com/*"],
+        host_allowlist: ["h1.example"],
+        ssh_bootstrap: BLOCK,
+        render: RENDER,
+      }),
+    );
+    const retained = retainDecryptedValues(engine);
+
+    const err = await expectVaultError(
+      () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET),
+      ErrorCode.RENDER_ONLY_KEY,
+    );
+    expect(err.message).toBe(RENDER_ONLY);
+    expect(retained).toHaveLength(0);
+    expect(useRows(secretId).map((row) => row.detail)).toEqual([RENDER_ONLY_ROW]);
+  });
+
+  it("a revoked secret that holds an entry answers SECRET_REVOKED: the status ahead of it", async () => {
+    await engine.setInjectionPolicy(HANDLE, {
+      url_allowlist: ["https://api.github.com/*"],
+      host_allowlist: ["h1.example"],
+      render: RENDER,
     });
     await engine.revokeSecret(HANDLE);
     const retained = retainDecryptedValues(engine);

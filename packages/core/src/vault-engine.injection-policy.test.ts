@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { mkdirSync, rmSync, symlinkSync } from "node:fs";
@@ -7,11 +8,17 @@ import Database from "better-sqlite3";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import { AAD_INJECTION_POLICY } from "@harpoc/shared";
-import type { InjectionPolicyInput } from "@harpoc/shared";
+import type { InjectionPolicyInput, RenderEntry } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
-import { registerAgents, registryOf, seedLiveStdioEntry } from "./__fixtures__/engine-seams.js";
+import {
+  nonReadAuditCount,
+  registerAgents,
+  registryOf,
+  seedLiveStdioEntry,
+} from "./__fixtures__/engine-seams.js";
 import { decrypt, encrypt } from "./crypto/aes-gcm.js";
+import { approval, ENTRY, ENTRY_ONE, keyPolicy } from "./injection/__fixtures__/render-entries.js";
 import {
   BLOCK,
   FP_A,
@@ -21,6 +28,7 @@ import {
   KEY_A,
   KEY_B,
 } from "./injection/__fixtures__/ssh-public-keys.js";
+import { renderEntryDigest } from "./injection/render-entry-digest.js";
 import { SqliteStore } from "./storage/sqlite-store.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -130,6 +138,7 @@ describe("injection policy", () => {
       ssh_agent_socket: false,
       local_dirs: [],
       ssh_bootstrap: null,
+      render: { entries: [], approvals: [] },
     });
   });
 
@@ -296,6 +305,60 @@ describe("injection policy", () => {
     ).toBeNull();
   });
 
+  it("round-trips render, reads it empty when omitted, and records it in the POLICY_GRANT detail as fingerprints, slots and digests", async () => {
+    await engine.setInjectionPolicy("secret://pol", keyPolicy([ENTRY]));
+    expect((await engine.getInjectionPolicy("secret://pol")).render).toEqual({
+      entries: [ENTRY],
+      approvals: [],
+    });
+    const detail = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail;
+    expect(detail?.render).toEqual({
+      entries: [
+        {
+          name: "env",
+          host: "h1.example",
+          port: 22,
+          user: "deploy",
+          path: "/srv/app/.env",
+          host_key_fingerprints: [FP_HOST],
+          slots: ["secret://bot-token", "secret://api-key", "secret://db-pass"],
+          digest: renderEntryDigest(ENTRY),
+        },
+      ],
+      approvals: [],
+    });
+    expect(JSON.stringify(detail).includes("TOKEN=")).toBe(false);
+    expect(JSON.stringify(detail).includes(HOST_KEY.split(" ")[1] as string)).toBe(false);
+
+    await engine.setInjectionPolicy("secret://pol", {});
+    expect((await engine.getInjectionPolicy("secret://pol")).render).toEqual({
+      entries: [],
+      approvals: [],
+    });
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.render,
+    ).toEqual({ entries: [], approvals: [] });
+  });
+
+  it("records approvals themselves, not a count", async () => {
+    const keyId = await engine.resolveSecretId("secret://pol");
+    await engine.createSecret({
+      name: "bot-token",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(randomBytes(18).toString("hex"))),
+    });
+    const approvals = [approval(keyId, ENTRY), approval(keyId, ENTRY_ONE)];
+
+    await engine.setInjectionPolicy("secret://bot-token", { render: { entries: [], approvals } });
+
+    expect((await engine.getInjectionPolicy("secret://bot-token")).render.approvals).toEqual(
+      approvals,
+    );
+    expect(
+      engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT })[0]?.detail?.render,
+    ).toEqual({ entries: [], approvals });
+  });
+
   it.each(["oauth_token", "certificate"] as const)(
     "refuses the block on a secret that is not an api_key, with a failed policy.grant row: %s",
     async (type) => {
@@ -419,6 +482,259 @@ describe("injection policy", () => {
     ]);
   });
 
+  it("refuses entries beside approvals, with a failed policy.grant row", async () => {
+    await engine.setInjectionPolicy("secret://pol", { host_allowlist: ["h1.example"] });
+    const first = await engine.getInjectionPolicy("secret://pol");
+    const secretId = await engine.resolveSecretId("secret://pol");
+
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          ...keyPolicy([ENTRY]),
+          render: { entries: [ENTRY], approvals: [approval(secretId, ENTRY)] },
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("render entries cannot stand beside render approvals");
+    const grants = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+    expect(grants.map((row) => row.success)).toEqual([false, true]);
+    expect(grants[0]?.secret_id).toBe(secretId);
+    expect(grants[0]?.detail).toEqual({
+      policy: "injection",
+      handle: "secret://pol",
+      error: ErrorCode.INVALID_INPUT,
+      reason: "render_entries_with_approvals",
+    });
+    expect(await engine.getInjectionPolicy("secret://pol")).toEqual(first);
+  });
+
+  it.each([
+    ["render_with_proxy", { proxy: true }, "render entries cannot stand beside proxy"],
+    [
+      "render_with_ssh_agent_socket",
+      { ssh_agent_socket: true },
+      "render entries cannot stand beside ssh_agent_socket",
+    ],
+    [
+      "render_with_network_isolation",
+      { network_isolation: true },
+      "render entries cannot stand beside network_isolation",
+    ],
+    [
+      "render_with_ssh_bootstrap",
+      { ssh_bootstrap: BLOCK },
+      "render entries cannot stand beside ssh_bootstrap",
+    ],
+  ] as const)(
+    "refuses entries beside proxy, ssh_agent_socket, network_isolation and a bootstrap block: %s",
+    async (reason, beside, message) => {
+      await engine.setInjectionPolicy("secret://pol", { host_allowlist: ["h1.example"] });
+      const first = await engine.getInjectionPolicy("secret://pol");
+      const secretId = await engine.resolveSecretId("secret://pol");
+
+      const err = await expectVaultError(
+        () => engine.setInjectionPolicy("secret://pol", { ...keyPolicy([ENTRY]), ...beside }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(message);
+      const grants = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+      expect(grants.map((row) => row.success)).toEqual([false, true]);
+      expect(grants[0]?.secret_id).toBe(secretId);
+      expect(grants[0]?.detail).toEqual({
+        policy: "injection",
+        handle: "secret://pol",
+        error: ErrorCode.INVALID_INPUT,
+        reason,
+      });
+      expect(await engine.getInjectionPolicy("secret://pol")).toEqual(first);
+    },
+  );
+
+  it.each<[string, string[], RenderEntry[]]>([
+    ["an empty list", [], [ENTRY]],
+    ["another host", ["h2.example"], [ENTRY]],
+    ["a subdomain wildcard over the bare name", ["*.example"], [{ ...ENTRY, host: "example" }]],
+    ["a host:port pattern", ["h1.example:22"], [ENTRY]],
+    ["the second of two entries", ["h1.example"], [ENTRY, { ...ENTRY_ONE, host: "h2.example" }]],
+  ])(
+    "refuses an entry whose host host_allowlist does not admit: %s",
+    async (_case, hostAllowlist, entries) => {
+      const secretId = await engine.resolveSecretId("secret://pol");
+      const { store } = engine as unknown as { store: SqliteStore };
+
+      const err = await expectVaultError(
+        () =>
+          engine.setInjectionPolicy("secret://pol", {
+            ...keyPolicy(entries),
+            host_allowlist: hostAllowlist,
+          }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe("a render entry's host is not in host_allowlist");
+      const grants = engine.queryAudit({ eventType: AuditEventType.POLICY_GRANT });
+      expect(grants.map((row) => row.success)).toEqual([false]);
+      expect(grants[0]?.secret_id).toBe(secretId);
+      expect(grants[0]?.detail).toEqual({
+        policy: "injection",
+        handle: "secret://pol",
+        error: ErrorCode.INVALID_INPUT,
+        reason: "render_host_not_allowed",
+      });
+      expect(store.getInjectionPolicy(secretId)).toBeUndefined();
+    },
+  );
+
+  it.each([["H1.EXAMPLE"], ["*.example"]])(
+    "admits a host by a pattern, by a subdomain wildcard and in another case: %s",
+    async (pattern) => {
+      await engine.setInjectionPolicy("secret://pol", {
+        ...keyPolicy([ENTRY]),
+        host_allowlist: [pattern],
+      });
+      expect((await engine.getInjectionPolicy("secret://pol")).render.entries).toEqual([ENTRY]);
+    },
+  );
+
+  it("answers the render refusals in their order, behind the block's", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+
+    const firstFive = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          ...keyPolicy([ENTRY]),
+          host_allowlist: ["h2.example"],
+          proxy: true,
+          ssh_agent_socket: true,
+          network_isolation: true,
+          render: { entries: [ENTRY], approvals: [approval(secretId, ENTRY)] },
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(firstFive.message).toBe("render entries cannot stand beside render approvals");
+    const middle: [InjectionPolicyInput, string][] = [
+      [
+        { proxy: true, ssh_agent_socket: true, network_isolation: true },
+        "render entries cannot stand beside proxy",
+      ],
+      [
+        { ssh_agent_socket: true, network_isolation: true },
+        "render entries cannot stand beside ssh_agent_socket",
+      ],
+      [
+        { network_isolation: true, ssh_bootstrap: BLOCK },
+        "render entries cannot stand beside network_isolation",
+      ],
+    ];
+    for (const [beside, message] of middle) {
+      const refused = await expectVaultError(
+        () =>
+          engine.setInjectionPolicy("secret://pol", {
+            ...keyPolicy([ENTRY]),
+            host_allowlist: ["h2.example"],
+            ...beside,
+          }),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(refused.message).toBe(message);
+    }
+    const block = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          ...keyPolicy([ENTRY]),
+          host_allowlist: ["h2.example"],
+          ssh_bootstrap: BLOCK,
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(block.message).toBe("render entries cannot stand beside ssh_bootstrap");
+    const behind = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy("secret://pol", {
+          ...keyPolicy([ENTRY]),
+          ssh_bootstrap: BLOCK,
+          proxy: true,
+        }),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(behind.message).toBe("ssh_bootstrap cannot stand beside proxy");
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .map((row) => row.detail?.reason),
+    ).toEqual([
+      "ssh_bootstrap_with_proxy",
+      "render_with_ssh_bootstrap",
+      "render_with_network_isolation",
+      "render_with_ssh_agent_socket",
+      "render_with_proxy",
+      "render_entries_with_approvals",
+    ]);
+  });
+
+  it("the admin gate answers first, ahead of the render refusals", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    registerAgents(engine, "policy-reader");
+    engine.grantPolicy(
+      { secretId, principalType: "agent", principalId: "policy-reader", permissions: ["read"] },
+      "operator",
+    );
+
+    const err = await expectVaultError(
+      () =>
+        engine.setInjectionPolicy(
+          "secret://pol",
+          { ...keyPolicy([ENTRY]), proxy: true },
+          undefined,
+          {
+            principal_type: "agent",
+            principal_id: "policy-reader",
+            interface: "cli",
+          },
+        ),
+      ErrorCode.ACCESS_DENIED,
+    );
+    expect(err.message).toBe("Access denied: Principal lacks 'admin' permission on this secret");
+    expect(
+      engine
+        .queryAudit({ eventType: AuditEventType.POLICY_GRANT })
+        .filter((row) => row.detail?.policy === "injection")
+        .map((row) => row.detail),
+    ).toEqual([
+      {
+        policy: "injection",
+        handle: "secret://pol",
+        required_permission: "admin",
+        error: ErrorCode.ACCESS_DENIED,
+        interface: "cli",
+      },
+    ]);
+  });
+
+  it("a slot's secret is not looked up when an entry is stored, nor a key when an approval is", async () => {
+    await engine.createSecret({
+      name: "slot",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(randomBytes(18).toString("hex"))),
+    });
+    const before = nonReadAuditCount(engine);
+
+    await engine.setInjectionPolicy(
+      "secret://pol",
+      keyPolicy([{ ...ENTRY, template: "X={{secret://nobody}}\n" }]),
+    );
+    expect(nonReadAuditCount(engine)).toBe(before + 1);
+    const unknownKey = approval(randomUUID(), ENTRY);
+    await engine.setInjectionPolicy("secret://slot", {
+      render: { entries: [], approvals: [unknownKey] },
+    });
+    expect(nonReadAuditCount(engine)).toBe(before + 2);
+
+    expect((await engine.getInjectionPolicy("secret://pol")).render.entries).toHaveLength(1);
+    expect((await engine.getInjectionPolicy("secret://slot")).render.approvals).toEqual([
+      unknownKey,
+    ]);
+  });
+
   it("loads a twelve-field blob written before ssh_agent_socket existed as false — the third post-baseline read default (B3)", async () => {
     const secretId = await engine.resolveSecretId("secret://pol");
     const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
@@ -531,6 +847,48 @@ describe("injection policy", () => {
       updated_at: now,
     });
     const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.ssh_bootstrap).toBeNull();
+    expect(loaded.ssh_agent_socket).toBe(true);
+    expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
+    expect(store.getInjectionPolicy(secretId)?.updated_at).toBe(now);
+  });
+
+  it("loads a fifteen-field blob written before render existed with no entries and no approvals — the sixth post-baseline read default", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    const { kek, store } = engine as unknown as { kek: Uint8Array; store: SqliteStore };
+    const fifteenFields = JSON.stringify({
+      url_allowlist: [],
+      command_allowlist: [],
+      env_allowlist: [],
+      host_allowlist: ["sftp.example.com"],
+      response_mode: "filtered",
+      response_header_allowlist: [],
+      network_isolation: false,
+      fs_isolation: false,
+      smtp_recipient_allowlist: [],
+      imap_read_only: false,
+      strict_tree_exit: false,
+      proxy: false,
+      ssh_agent_socket: true,
+      local_dirs: [],
+      ssh_bootstrap: null,
+    });
+    const enc = encrypt(
+      kek,
+      new Uint8Array(Buffer.from(fifteenFields, "utf8")),
+      AAD_INJECTION_POLICY(secretId),
+    );
+    const now = Date.now();
+    store.upsertInjectionPolicy({
+      secret_id: secretId,
+      policy_encrypted: enc.ciphertext,
+      policy_iv: enc.iv,
+      policy_tag: enc.tag,
+      created_at: now,
+      updated_at: now,
+    });
+    const loaded = await engine.getInjectionPolicy("secret://pol");
+    expect(loaded.render).toEqual({ entries: [], approvals: [] });
     expect(loaded.ssh_bootstrap).toBeNull();
     expect(loaded.ssh_agent_socket).toBe(true);
     expect(loaded.host_allowlist).toEqual(["sftp.example.com"]);
@@ -901,6 +1259,53 @@ describe("injection policy", () => {
     const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
     expect(terminates).toHaveLength(1);
     expect(terminates[0]?.detail?.reason).toBe("ssh_bootstrap_enabled");
+  });
+
+  it("a first entry ends a live stdio child, once, under its own reason", async () => {
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await seedLiveStdioEntry(engine, secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", { ...keyPolicy([ENTRY]), fs_isolation: true });
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).toHaveBeenCalledWith(secretId, "render_enabled", {
+      session_id: expect.any(String),
+    });
+    const terminates = engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE });
+    expect(terminates).toHaveLength(1);
+    expect(terminates[0]?.detail?.reason).toBe("render_enabled");
+  });
+
+  it.each<[string, InjectionPolicyInput, (keyId: string) => InjectionPolicyInput]>([
+    ["a second entry", keyPolicy([ENTRY]), () => keyPolicy([ENTRY, ENTRY_ONE])],
+    [
+      "a changed entry",
+      keyPolicy([ENTRY]),
+      () => keyPolicy([{ ...ENTRY, path: "/srv/app/.env.next" }]),
+    ],
+    ["the last entry removed", keyPolicy([ENTRY]), () => keyPolicy([])],
+    [
+      "an approval added",
+      {},
+      (keyId) => ({ render: { entries: [], approvals: [approval(keyId, ENTRY)] } }),
+    ],
+  ])("no other write of the field ends the child: %s", async (_case, stored, write) => {
+    await engine.createSecret({
+      name: "deploy-key",
+      type: "api_key",
+      value: new Uint8Array(Buffer.from(randomBytes(18).toString("hex"))),
+    });
+    const keyId = await engine.resolveSecretId("secret://deploy-key");
+    const secretId = await engine.resolveSecretId("secret://pol");
+    await engine.setInjectionPolicy("secret://pol", stored);
+    await seedLiveStdioEntry(engine, secretId);
+    const terminate = vi.spyOn(registryOf(engine), "terminate");
+
+    await engine.setInjectionPolicy("secret://pol", write(keyId));
+
+    expect(terminate).not.toHaveBeenCalled();
+    expect(engine.queryAudit({ eventType: AuditEventType.MCP_TERMINATE })).toHaveLength(0);
   });
 
   it("attributes the terminate row to the caller that flipped the policy", async () => {

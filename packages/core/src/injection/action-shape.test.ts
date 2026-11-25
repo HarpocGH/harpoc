@@ -124,6 +124,73 @@ describe("actionShapeRefusal — the ssh bootstrap's shape", () => {
   });
 });
 
+describe("actionShapeRefusal — the sftp render's shape", () => {
+  const FORBIDDEN = "an sftp render takes no host, user, port, remote_path or local_path";
+  const ENTRY_NAME =
+    "an sftp render's entry must be a name of letters, digits, '_' and '-' of at most 255 characters";
+  const RENDER = { type: "sftp", operation: "render", entry: "env" };
+
+  it("passes the three file operations and any other operation, whatever else they carry", () => {
+    const transfer = { type: "sftp", host: "h1.example", user: "deploy", remote_path: "/srv/a" };
+    const actions = [
+      { ...transfer, operation: "upload", local_path: "/tmp/a", entry: "a b" },
+      { ...transfer, operation: "download", local_path: "/tmp/a", entry: 5 },
+      { ...transfer, operation: "list", entry: "env" },
+      { ...transfer, operation: "bootstrap", entry: "" },
+      { type: "sftp", entry: "a/b" },
+    ];
+    for (const action of actions) expect(actionShapeRefusal(action)).toBeUndefined();
+  });
+
+  it("passes a well-formed render, with and without timeout_ms, and with a forbidden key set to undefined", () => {
+    expect(actionShapeRefusal(RENDER)).toBeUndefined();
+    expect(actionShapeRefusal({ ...RENDER, timeout_ms: 5000 })).toBeUndefined();
+    expect(
+      actionShapeRefusal({
+        ...RENDER,
+        host: undefined,
+        user: undefined,
+        port: undefined,
+        remote_path: undefined,
+        local_path: undefined,
+      }),
+    ).toBeUndefined();
+    expect(actionShapeRefusal({ ...RENDER, entry: "e".repeat(255) })).toBeUndefined();
+  });
+
+  it.each<[string, unknown]>([
+    ["host", "h1.example"],
+    ["user", "deploy"],
+    ["port", 22],
+    ["remote_path", "/srv/app/.env"],
+    ["local_path", "/tmp/a"],
+    ["host", null],
+    ["port", 0],
+  ])("refuses a render that carries %s (%s)", (key, value) => {
+    expect(actionShapeRefusal({ ...RENDER, [key]: value })).toBe(FORBIDDEN);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["absent", { type: "sftp", operation: "render" }],
+    ["a number", { ...RENDER, entry: 5 }],
+    ["empty", { ...RENDER, entry: "" }],
+    ["with a blank", { ...RENDER, entry: "a b" }],
+    ["with a slash", { ...RENDER, entry: "a/b" }],
+    ["of 256 characters", { ...RENDER, entry: "e".repeat(256) }],
+  ])("refuses a render whose entry is no name — %s", (_label, action) => {
+    expect(actionShapeRefusal(action)).toBe(ENTRY_NAME);
+  });
+
+  it("judges the forbidden keys before the entry", () => {
+    expect(actionShapeRefusal({ type: "sftp", operation: "render", host: "h" })).toBe(FORBIDDEN);
+  });
+
+  it("leaves timeout_ms to the timeout guard", () => {
+    expect(actionShapeRefusal({ ...RENDER, timeout_ms: -1 })).toBeUndefined();
+    expect(actionShapeRefusal({ ...RENDER, timeout_ms: "5" })).toBeUndefined();
+  });
+});
+
 describe("imapOperationRefusal", () => {
   const REFUSAL = "imap operation must be an object with a supported kind";
 

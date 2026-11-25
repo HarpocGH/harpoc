@@ -76,6 +76,7 @@ const EMPTY_POLICY: InjectionPolicy = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 
 type MergedPolicy = Omit<InjectionPolicy, "ssh_bootstrap"> & {
@@ -146,6 +147,7 @@ export function mergePolicy(current: InjectionPolicy, options: AllowOptions): Me
     ssh_agent_socket: options.sshAgentSocket ?? base.ssh_agent_socket,
     local_dirs: options.localDir?.length ? options.localDir : base.local_dirs,
     ssh_bootstrap: mergeBootstrap(base.ssh_bootstrap, options),
+    render: base.render,
   };
 }
 

@@ -13,6 +13,7 @@ import type { VaultEngine } from "@harpoc/core";
 import type {
   ExpiringCertificateInfo,
   ExpiringOAuthTokenInfo,
+  SftpRenderAction,
   UseSecretAction,
   UseSecretResponse,
 } from "@harpoc/shared";
@@ -32,6 +33,8 @@ import { registerStartOauthFlow } from "./start-oauth-flow.js";
 
 const SSH_BOOTSTRAP_KEY =
   "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+
+const RENDER: SftpRenderAction = { type: "sftp", operation: "render", entry: "env" };
 
 function mockEngine(): VaultEngine {
   return {
@@ -498,6 +501,7 @@ describe("MCP Tools", () => {
     describe("advertised action schema (v1.3 context widening pin)", () => {
       interface UnionArm {
         properties?: Record<string, { const?: string; enum?: string[] }>;
+        required?: string[];
       }
 
       async function actionArms(): Promise<UnionArm[]> {
@@ -594,9 +598,25 @@ describe("MCP Tools", () => {
             "operation",
             "remote_path",
             "local_path",
+            "entry",
             "timeout_ms",
           ].sort(),
         );
+      });
+
+      it("advertises the sftp arm with type and operation alone required: each shape's own keys are the refinement's", async () => {
+        const arm = armFor(await actionArms(), "sftp");
+        expect([...(arm.required ?? [])].sort()).toEqual(["operation", "type"]);
+      });
+
+      it("advertises the sftp arm's four operations", async () => {
+        const arm = armFor(await actionArms(), "sftp");
+        expect([...(arm.properties?.operation?.enum ?? [])].sort()).toEqual([
+          "download",
+          "list",
+          "render",
+          "upload",
+        ]);
       });
 
       it("advertises the docker_registry arm's exact key set", async () => {
@@ -638,7 +658,7 @@ describe("MCP Tools", () => {
         const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
           { description?: string } | undefined;
         expect(action?.description).toContain(
-          "Target allowlists, local directories, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode, strict tree exit and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
+          "Target allowlists, local directories, render entries and their approvals, the response-mode policy, TLS/host-key pinning, recipient allowlists, read-only mode, strict tree exit and downstream config are set out-of-band via the trusted admin path (CLI/REST), never here.",
         );
       });
 
@@ -651,6 +671,18 @@ describe("MCP Tools", () => {
         );
         expect(tool?.description).toContain(
           "an SSH command or the first login to a host by its stored password",
+        );
+      });
+
+      it("describes the render: its shape, that the entry is the administrator's, and that the agent gets a status and no output", async () => {
+        const tool = (await listTools(server)).find((t) => t.name === "use_secret");
+        const action = (tool as InMemoryToolDescriptor).inputSchema.properties?.action as
+          { description?: string } | undefined;
+        expect(action?.description).toContain(
+          "SFTP: {type:'sftp', host, user, operation:'upload'|'download'|'list', remote_path, local_path?, port?}, or {type:'sftp', operation:'render', entry} — writes the file a render entry of the secret names, on the entry's host, from the administrator's template filled with the values of other secrets that approved the entry; the agent names the entry alone, and the result is a status and no output: {type:'sftp_render', status:'written'}.",
+        );
+        expect(tool?.description).toContain(
+          "an SFTP transfer or a file written from other secrets' values",
         );
       });
     });
@@ -713,6 +745,17 @@ describe("MCP Tools", () => {
       expect(result.isError).toBe(true);
       expect(getToolText(result)).toContain("Input validation error");
       expect(getToolText(result)).toMatch(/action: Unrecognized key: "command"/);
+      expect(engine.useSecret).not.toHaveBeenCalled();
+    });
+
+    it("refuses a render beside host at the schema boundary", async () => {
+      const result = await callTool(server, "use_secret", {
+        handle: "secret://my-key",
+        action: { ...RENDER, host: "h1.example" },
+      });
+      expect(result.isError).toBe(true);
+      expect(getToolText(result)).toContain("Input validation error");
+      expect(getToolText(result)).toMatch(/action: Unrecognized key: "host"/);
       expect(engine.useSecret).not.toHaveBeenCalled();
     });
 
@@ -927,6 +970,11 @@ describe("MCP Tools", () => {
           { type: "ssh_bootstrap", key: "installed", sudoers: "written" },
         );
         expect(data).toEqual({ type: "ssh_bootstrap", key: "installed", sudoers: "written" });
+      });
+
+      it("sftp render: the action reaches the engine verbatim; the status result comes back as text", async () => {
+        const data = await dispatch(RENDER, { type: "sftp_render", status: "written" });
+        expect(data).toEqual({ type: "sftp_render", status: "written" });
       });
     });
 

@@ -102,6 +102,7 @@ interface UseOptions {
   // SFTP action (also shares --host/--user/--operation above)
   remote?: string;
   local?: string;
+  entry?: string;
   // Docker registry action (also shares --operation above)
   image?: string;
   // Complete action document, bypassing every flag above
@@ -157,7 +158,7 @@ export function registerSecretUseCommand(secret: Command): void {
     // Git action (--operation is reused by ssh/imap/sftp/docker_registry below)
     .option(
       "--operation <op>",
-      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list (sftp); pull|push (docker_registry)",
+      "Operation: clone|pull|push|fetch|ls-remote (git); bootstrap (ssh); search|fetch|store|move|copy|expunge (imap); upload|download|list|render (sftp); pull|push (docker_registry)",
     )
     .option("--repository <url>", "Git repository URL (git action)")
     .option(
@@ -209,6 +210,7 @@ export function registerSecretUseCommand(secret: Command): void {
     // SFTP action (--host/--user/--operation above)
     .option("--remote <path>", "Remote file path (sftp action)")
     .option("--local <path>", "Local file path (sftp action)")
+    .option("--entry <name>", "Render entry of the secret's injection policy (sftp render)")
     // Docker registry action (--operation above)
     .option("--image <ref>", "Image reference (docker_registry action)")
     // Complete action document, bypassing every action-shaping flag above
@@ -476,6 +478,7 @@ export function buildAction(
       operation: options.operation,
       remote_path: options.remote,
       local_path: options.local,
+      entry: options.entry,
       timeout_ms,
     };
   }
@@ -657,6 +660,8 @@ export function summarizeResult(result: UseSecretResponse): Record<string, unkno
       });
     case "ssh_bootstrap":
       return compact({ type: result.type, key: result.key, sudoers: result.sudoers });
+    case "sftp_render":
+      return compact({ type: result.type, status: result.status });
     case "smtp":
       return compact({
         type: result.type,

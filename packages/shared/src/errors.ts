@@ -128,6 +128,14 @@ export enum ErrorCode {
   IMAP_OPERATION_FAILED = "IMAP_OPERATION_FAILED",
   WEBSOCKET_CONNECT_FAILED = "WEBSOCKET_CONNECT_FAILED",
   SFTP_OPERATION_FAILED = "SFTP_OPERATION_FAILED",
+  RENDER_ENTRY_NOT_FOUND = "RENDER_ENTRY_NOT_FOUND",
+  RENDER_IN_FLIGHT = "RENDER_IN_FLIGHT",
+  RENDER_SLOT_REFUSED = "RENDER_SLOT_REFUSED",
+  RENDER_SLOT_UNSUPPORTED = "RENDER_SLOT_UNSUPPORTED",
+  RENDER_NOT_APPROVED = "RENDER_NOT_APPROVED",
+  RENDER_VALUE_UNSUPPORTED = "RENDER_VALUE_UNSUPPORTED",
+  RENDER_ONLY_KEY = "RENDER_ONLY_KEY",
+  RENDER_FAILED = "RENDER_FAILED",
   LOCAL_PATH_NOT_ALLOWED = "LOCAL_PATH_NOT_ALLOWED",
   DOCKER_OPERATION_FAILED = "DOCKER_OPERATION_FAILED",
 
@@ -293,6 +301,14 @@ const STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.IMAP_OPERATION_FAILED]: 502,
   [ErrorCode.WEBSOCKET_CONNECT_FAILED]: 502,
   [ErrorCode.SFTP_OPERATION_FAILED]: 502,
+  [ErrorCode.RENDER_ENTRY_NOT_FOUND]: 404,
+  [ErrorCode.RENDER_IN_FLIGHT]: 409,
+  [ErrorCode.RENDER_SLOT_REFUSED]: 403,
+  [ErrorCode.RENDER_SLOT_UNSUPPORTED]: 400,
+  [ErrorCode.RENDER_NOT_APPROVED]: 403,
+  [ErrorCode.RENDER_VALUE_UNSUPPORTED]: 400,
+  [ErrorCode.RENDER_ONLY_KEY]: 403,
+  [ErrorCode.RENDER_FAILED]: 502,
   [ErrorCode.LOCAL_PATH_NOT_ALLOWED]: 403,
   [ErrorCode.DOCKER_OPERATION_FAILED]: 502,
 
@@ -379,6 +395,9 @@ const SSH_BOOTSTRAP_NOT_ALLOWED_TEXT: Record<SshBootstrapRefusalReason, string> 
   bootstrap_only:
     "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
 };
+
+/** What an ssh client is resolved for: the ssh bootstrap's password login or the sftp render. */
+export type SshClientUse = "bootstrap" | "render";
 
 /** What the remote script says became of the sudoers drop-in, as the vault reads its status line. */
 export type SshBootstrapDropInWord =
@@ -847,12 +866,17 @@ export class VaultError extends Error {
     );
   }
 
-  static sshClientBelowFloor(found: string | null, floor: string): VaultError {
+  static sshClientBelowFloor(
+    found: string | null,
+    floor: string,
+    use: SshClientUse = "bootstrap",
+  ): VaultError {
+    const needs = use === "render" ? "an sftp render" : "an ssh bootstrap";
     return new VaultError(
       ErrorCode.SSH_CLIENT_UNSUPPORTED,
       found === null
-        ? `Unsupported ssh client: its version could not be read; an ssh bootstrap needs OpenSSH ${floor} or later`
-        : `Unsupported ssh client: OpenSSH ${found} is older than ${floor}, which an ssh bootstrap needs`,
+        ? `Unsupported ssh client: its version could not be read; ${needs} needs OpenSSH ${floor} or later`
+        : `Unsupported ssh client: OpenSSH ${found} is older than ${floor}, which ${needs} needs`,
     );
   }
 
@@ -979,6 +1003,62 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       "sftp local path is not inside a directory the secret's policy lists",
+    );
+  }
+
+  static renderEntryNotFound(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_ENTRY_NOT_FOUND,
+      "SFTP render refused: the secret's injection policy holds no render entry of that name",
+    );
+  }
+
+  static renderInFlight(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_IN_FLIGHT,
+      "SFTP render in flight: another render to the same host, port and path is running",
+    );
+  }
+
+  static renderSlotRefused(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_SLOT_REFUSED,
+      "SFTP render refused: a slot of the entry's template cannot be served to this call",
+    );
+  }
+
+  static renderSlotUnsupported(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_SLOT_UNSUPPORTED,
+      "SFTP render refused: a slot's secret is one a render does not serve",
+    );
+  }
+
+  static renderNotApproved(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_NOT_APPROVED,
+      "SFTP render refused: a slot's secret has not approved the entry as it stands",
+    );
+  }
+
+  static renderValueUnsupported(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_VALUE_UNSUPPORTED,
+      "SFTP render refused: a value does not fit the template: every value is UTF-8 text without a NUL, 1 to 65536 bytes, and beside other text only of A-Z, a-z, 0-9 and . _ ~ + / = : @ % -",
+    );
+  }
+
+  static renderOnlyKey(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_ONLY_KEY,
+      "Use refused: the secret holds a render entry and serves the sftp render alone",
+    );
+  }
+
+  static renderFailed(): VaultError {
+    return new VaultError(
+      ErrorCode.RENDER_FAILED,
+      "SFTP render failed: the file is not confirmed written; the key's audit row holds the reason",
     );
   }
 

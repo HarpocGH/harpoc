@@ -29,6 +29,37 @@ const BOOTSTRAP_HOST_KEY =
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICn+7qKS67vacwftKjgcrwUlmC2TZ6j0dyFpyO5UDiVx";
 const BOOTSTRAP_KEY =
   "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCz9X9B5Ls3wqgwaWax6lXZilG0yR+qBdY+tYQpr1fpizTydsdzfyl0ESyVBtR6XYCQum8+x0NktMqPL7ISyqGU=";
+/** A render field with an entry and an approval: the editor sends it back as it was read. */
+const RENDER = {
+  entries: [
+    {
+      name: "env",
+      host: "h1.example",
+      port: 22,
+      user: "deploy",
+      path: "/srv/app/.env",
+      host_keys: [BOOTSTRAP_HOST_KEY],
+      template: "TOKEN={{secret://bot-token}}\n",
+    },
+  ],
+  approvals: [
+    {
+      key: "0193b1c2-0000-7000-8000-000000000001",
+      entry: "env",
+      digest: "7c6a834469ef5a6c2a4b422775e89bf38a601de3f618e3615c684734ca914b66",
+    },
+  ],
+};
+const NOT_EDITED_CODES = [
+  "env_allowlist",
+  "response_header_allowlist",
+  "smtp_recipient_allowlist",
+  "imap_read_only",
+  "ssh_bootstrap",
+  "render",
+];
+const NOT_EDITED_TEXT =
+  "env_allowlist, response_header_allowlist, smtp_recipient_allowlist, imap_read_only, ssh_bootstrap and render are not editable here and are sent back unchanged.";
 
 /** What the create route answers (201) — not a SecretInfo. */
 const created = { handle: "secret://n1", status: "created", message: "Secret created" };
@@ -502,6 +533,7 @@ describe("PolicyEditor", () => {
         ssh_agent_socket: false,
         local_dirs: [],
         ssh_bootstrap: null,
+        render: { entries: [], approvals: [] },
       },
     ]);
   });
@@ -556,6 +588,7 @@ describe("PolicyEditor", () => {
         ssh_agent_socket: false,
         local_dirs: [],
         ssh_bootstrap: null,
+        render: { entries: [], approvals: [] },
       },
     ]);
   });
@@ -656,19 +689,33 @@ describe("PolicyEditor", () => {
       />,
     );
     const note = screen.getByText(/are not editable here/);
-    expect(Array.from(note.querySelectorAll("code"), (code) => code.textContent)).toEqual([
-      "env_allowlist",
-      "response_header_allowlist",
-      "smtp_recipient_allowlist",
-      "imap_read_only",
-      "ssh_bootstrap",
-    ]);
-    expect((note.textContent as string).replace(/\s+/g, " ").trim()).toBe(
-      "env_allowlist, response_header_allowlist, smtp_recipient_allowlist, imap_read_only and ssh_bootstrap are not editable here and are sent back unchanged.",
+    expect(Array.from(note.querySelectorAll("code"), (code) => code.textContent)).toEqual(
+      NOT_EDITED_CODES,
     );
+    expect((note.textContent as string).replace(/\s+/g, " ").trim()).toBe(NOT_EDITED_TEXT);
     fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
     await waitFor(() => expect(put).toHaveBeenCalled());
     expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["ssh_bootstrap"]).toEqual(block);
+  });
+
+  it("sends stored render entries and approvals back unchanged and says they are not edited here", async () => {
+    const put = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PolicyEditor
+        api={{ putInjectionPolicy: put } as unknown as ApiClient}
+        handle="k1"
+        initial={{ render: RENDER }}
+        onDone={vi.fn()}
+      />,
+    );
+    const note = screen.getByText(/are not editable here/);
+    expect(Array.from(note.querySelectorAll("code"), (code) => code.textContent)).toEqual(
+      NOT_EDITED_CODES,
+    );
+    expect((note.textContent as string).replace(/\s+/g, " ").trim()).toBe(NOT_EDITED_TEXT);
+    fireEvent.submit(screen.getByRole("button", { name: "Save policy" }));
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect((put.mock.calls[0]?.[1] as Record<string, unknown>)["render"]).toEqual(RENDER);
   });
 
   it("sends every injectionPolicyInputSchema key on save (drift pin)", async () => {

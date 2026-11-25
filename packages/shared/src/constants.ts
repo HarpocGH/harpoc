@@ -265,6 +265,19 @@ export const DEFAULT_SMTP_STARTTLS_PORT = 587;
 export const DEFAULT_IMAP_PORT = 993;
 export const MAX_IMAP_FETCH_UIDS = 100;
 
+// -- SFTP render (2026-11-24) --------------------------------------------------
+
+export const MAX_RENDER_ENTRIES = 16;
+export const MAX_RENDER_TEMPLATE_BYTES = 16_384;
+export const MAX_RENDER_SLOT_OCCURRENCES = 16;
+export const MAX_RENDER_APPROVALS = 32;
+export const MAX_RENDER_HOST_KEYS = 8;
+export const MAX_RENDER_VALUE_BYTES = 65_536;
+export const MAX_RENDER_PATH_BYTES = 4096;
+export const MAX_RENDER_PATH_SEGMENT_BYTES = 200;
+export const RENDER_SLOT_LIMIT_PER_MINUTE = 120;
+export const RENDER_CONNECT_TIMEOUT_SEC = 15;
+
 // -- Output sanitization ------------------------------------------------------
 
 /**

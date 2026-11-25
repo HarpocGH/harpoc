@@ -2,6 +2,8 @@ import type {
   DockerRegistryAction,
   ImapAction,
   SftpAction,
+  SftpRenderAction,
+  SftpRenderResult,
   SmtpAction,
   SshAction,
   SshBootstrapAction,
@@ -62,6 +64,13 @@ export type _PinSshBootstrapActionAcceptedByUseSecret = Pin<
 >;
 export type _PinSshBootstrapResultReturnedByUseSecret = Pin<
   Extends<SshBootstrapResult, Awaited<ReturnType<VaultClient["useSecret"]>>>
+>;
+
+export type _PinSftpRenderActionAcceptedByUseSecret = Pin<
+  Extends<SftpRenderAction, UseSecretActionParam>
+>;
+export type _PinSftpRenderResultReturnedByUseSecret = Pin<
+  Extends<SftpRenderResult, Awaited<ReturnType<VaultClient["useSecret"]>>>
 >;
 
 // Belt-and-suspenders: pin VaultClient.useSecret's parameter directly against

@@ -200,6 +200,35 @@ export function sshPasswordLoginArgs(
   ];
 }
 
+/**
+ * The sftp render's options before `-p`, `-s` and its target: `sshHardeningArgs`, then no
+ * terminal, no escape character, no forwarding and no local command, `LogLevel=ERROR`.
+ */
+export function sshSftpSubsystemArgs(
+  knownHosts: Pick<KnownHostsFiles, "file" | "globalFile">,
+  identityFile: string,
+  connectTimeoutSec: number,
+): string[] {
+  return [
+    ...sshHardeningArgs(knownHosts, identityFile, connectTimeoutSec),
+    "-T",
+    "-o",
+    "LogLevel=ERROR",
+    "-o",
+    "RequestTTY=no",
+    "-o",
+    "EscapeChar=none",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "PermitLocalCommand=no",
+  ];
+}
+
 /** One known_hosts line per key: the bare host for port 22, `[host]:port` otherwise. */
 export function knownHostsLines(
   host: string,

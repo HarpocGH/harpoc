@@ -1,3 +1,4 @@
+import { randomBytes, randomInt } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES, VaultError } from "@harpoc/shared";
 import { mapStringLeaves, redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
@@ -529,7 +530,7 @@ describe("redactErrorMessage", () => {
       exit_code: 128,
     });
 
-    const out = redactErrorMessage(err, SECRET) as VaultError;
+    const out = redactErrorMessage(err, [SECRET]) as VaultError;
 
     expect(out.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
     expectAbsent(out.message, SECRET, "the message");
@@ -540,7 +541,7 @@ describe("redactErrorMessage", () => {
   it("redacts details even when the message is clean", () => {
     const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, "x", { location: SECRET });
 
-    const out = (redactErrorMessage(err, SECRET) as VaultError).details?.location;
+    const out = (redactErrorMessage(err, [SECRET]) as VaultError).details?.location;
     expectAbsent(out, SECRET);
     expect(out).toBe("[REDACTED]");
   });
@@ -548,12 +549,150 @@ describe("redactErrorMessage", () => {
   it("returns the same error object when nothing carries the credential", () => {
     const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, "clean", { location: "/tmp/repo" });
 
-    expect(redactErrorMessage(err, SECRET)).toBe(err);
+    expect(redactErrorMessage(err, [SECRET])).toBe(err);
   });
 
   it("returns a non-VaultError untouched", () => {
     const plain = new Error(SECRET);
 
-    expect(redactErrorMessage(plain, SECRET)).toBe(plain);
+    expect(redactErrorMessage(plain, [SECRET])).toBe(plain);
+  });
+
+  const drawValue = (): string =>
+    `${randomBytes(9).toString("hex")}"${randomBytes(9).toString("hex")}`;
+  const escapedCopy = (value: string): string => JSON.stringify(value).slice(1, -1);
+  const upperHex = (value: string): string =>
+    Buffer.from(value, "utf8").toString("hex").toUpperCase();
+  const base64 = (value: string): string => Buffer.from(value, "utf8").toString("base64");
+
+  interface ListOfOneCase {
+    message: string;
+    details: Record<string, unknown>;
+    needle: string;
+    haystack: (out: VaultError) => unknown;
+  }
+  const inMessage = (out: VaultError): unknown => out.message;
+
+  const listOfOneCases: [string, (value: string) => ListOfOneCase][] = [
+    [
+      "the raw value",
+      (v) => ({
+        message: `fatal: ${v}`,
+        details: { exit_code: 1 },
+        needle: v,
+        haystack: inMessage,
+      }),
+    ],
+    [
+      "its base64",
+      (v) => ({
+        message: `encoded: ${base64(v)}`,
+        details: { exit_code: 1 },
+        needle: base64(v),
+        haystack: inMessage,
+      }),
+    ],
+    [
+      "its upper-case hex",
+      (v) => ({
+        message: `hex: ${upperHex(v)}`,
+        details: { exit_code: 1 },
+        needle: upperHex(v),
+        haystack: inMessage,
+      }),
+    ],
+    [
+      "a JSON-escaped copy in a details leaf",
+      (v) => ({
+        message: "clean",
+        details: { where: `{"token":"${escapedCopy(v)}"}` },
+        needle: escapedCopy(v),
+        haystack: (out) => out.details?.where,
+      }),
+    ],
+    [
+      "a details key",
+      (v) => ({
+        message: "clean",
+        details: { [v]: "x" },
+        needle: v,
+        haystack: (out) => (out.details === undefined ? undefined : Object.keys(out.details)),
+      }),
+    ],
+  ];
+
+  it.each(listOfOneCases)("a list of one reads as the one value did — %s", (_label, build) => {
+    const value = drawValue();
+    const { message, details, needle, haystack } = build(value);
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, message, details);
+
+    const out = redactErrorMessage(err, [value]) as VaultError;
+
+    expectAbsent(haystack(out), needle);
+    expect(out.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
+    expect(out.message).toBe(redactSecretEncodings(message, value));
+    expect(out.details).toEqual(mapStringLeaves(details, (s) => redactSecretEncodings(s, value)));
+  });
+
+  it("strips every value of a list from the message and the details", () => {
+    const messageValue = randomBytes(12).toString("hex");
+    const detailsValue = randomBytes(9).toString("hex");
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, `fatal: ${messageValue}`, {
+      where: `/srv/${detailsValue}`,
+    });
+
+    const out = redactErrorMessage(err, [detailsValue, messageValue]) as VaultError;
+
+    expectAbsent(out.message, messageValue, "the message");
+    expectAbsent(out.details?.where, detailsValue, "the details' leaf");
+    expect(out.code).toBe(ErrorCode.GIT_OPERATION_FAILED);
+    expect(out.message).toBe("fatal: [REDACTED]");
+    expect(out.details?.where).toBe("/srv/[REDACTED]");
+  });
+
+  it.each([
+    ["the inner value first", (inner: string, outer: string) => [inner, outer]],
+    ["the outer value first", (inner: string, outer: string) => [outer, inner]],
+  ])(
+    "applies the longer value first: a value that holds another leaves no fragment — %s",
+    (_label, order) => {
+      const inner = randomBytes(9).toString("hex");
+      const outer = `x-${inner}-y`;
+      const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, `fatal: ${outer}`);
+
+      const out = redactErrorMessage(err, order(inner, outer)) as VaultError;
+
+      expectAbsent(out.message, inner, "the message");
+      expect(out.message).toBe("fatal: [REDACTED]");
+    },
+  );
+
+  it("an empty string and a repeated value change nothing", () => {
+    const value = drawValue();
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, `fatal: ${value}`, {
+      where: value,
+    });
+
+    const padded = redactErrorMessage(err, ["", value, value]) as VaultError;
+    const single = redactErrorMessage(err, [value]) as VaultError;
+
+    expectAbsent(padded.message, value, "the message");
+    expectAbsent(padded.details?.where, value, "the details' leaf");
+    expect(padded.message).toBe(single.message);
+    expect(padded.details).toEqual(single.details);
+    expect(redactErrorMessage(err, [])).toBe(err);
+    expect(redactErrorMessage(err, [""])).toBe(err);
+  });
+
+  it("a value under three characters is redacted as before: the floor is the caller's", () => {
+    // No letter of "[REDACTED]": the absence check would find the value in it.
+    const letters = "BFGHIJKLMNOPQSUVWXYZ";
+    const value = `${letters.charAt(randomInt(letters.length))}${letters.charAt(randomInt(letters.length))}`;
+    const err = new VaultError(ErrorCode.GIT_OPERATION_FAILED, `id=${value};`);
+
+    const out = redactErrorMessage(err, [value]) as VaultError;
+
+    expectAbsent(out.message, value, "the message");
+    expect(out.message).toBe("id=[REDACTED];");
   });
 });

@@ -209,6 +209,7 @@ describe("api client", () => {
       ssh_agent_socket: true,
       local_dirs: [],
       ssh_bootstrap: null,
+      render: { entries: [], approvals: [] },
       acknowledge_interpreters: true,
     };
     await api.putInjectionPolicy("secret://k1", policy);

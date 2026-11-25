@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseSecretAction } from "@harpoc/shared";
-import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, injectionPolicyInputSchema, VaultError } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
-import { nonReadAuditCount } from "./__fixtures__/engine-seams.js";
-import { BLOCK, KEY_A } from "./injection/__fixtures__/ssh-public-keys.js";
+import { nonReadAuditCount, storeInjectionPolicyBlob } from "./__fixtures__/engine-seams.js";
+import { ENTRY, keyPolicy } from "./injection/__fixtures__/render-entries.js";
+import { BLOCK, BOOT, KEY_A } from "./injection/__fixtures__/ssh-public-keys.js";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -326,6 +327,47 @@ describe("useSecret — the STARTTLS refusal of a malformed smtp action", () => 
 
 const BOOTSTRAP_ONLY =
   "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone";
+const RENDER_ONLY = "Use refused: the secret holds a render entry and serves the sftp render alone";
+const PROCESS = { type: "process", command: "harpoc-no-such-binary", env_var: "TOKEN" };
+
+const EVERY_OTHER_ACTION = [
+  {
+    type: "http",
+    method: "GET",
+    url: "https://api.example.com/",
+    injection: { type: "bearer" },
+  },
+  PROCESS,
+  { type: "mcp", server: "docs", tool: "search" },
+  {
+    type: "database",
+    engine: "postgresql",
+    host: "db.example.com",
+    database: "app",
+    query: "SELECT 1",
+  },
+  { type: "git", operation: "clone", repository: "https://git.example.com/o/r.git" },
+  { type: "ssh", host: "h1.example", user: "ubuntu", command: "uptime" },
+  {
+    type: "smtp",
+    host: "smtp.example.com",
+    from: "ops@example.com",
+    to: ["dev@example.com"],
+    subject: "s",
+    text: "t",
+  },
+  { type: "imap", host: "imap.example.com", mailbox: "INBOX", operation: { kind: "search" } },
+  { type: "websocket", url: "wss://ws.example.com/", injection: { type: "bearer" } },
+  { type: "sftp", host: "h1.example", user: "ubuntu", operation: "list", remote_path: "/srv" },
+  { type: "docker_registry", operation: "pull", image: "registry.example.com/app:1" },
+  {
+    type: "sftp",
+    host: "h1.example",
+    user: "ubuntu",
+    operation: "bootstrap",
+    remote_path: "/srv",
+  },
+];
 
 describe("useSecret — a secret with the bootstrap block serves the bootstrap alone", () => {
   let password: string;
@@ -336,44 +378,7 @@ describe("useSecret — a secret with the bootstrap block serves the bootstrap a
     await engine.setInjectionPolicy(HANDLE, { ssh_bootstrap: BLOCK });
   });
 
-  it.each([
-    {
-      type: "http",
-      method: "GET",
-      url: "https://api.example.com/",
-      injection: { type: "bearer" },
-    },
-    { type: "process", command: "harpoc-no-such-binary", env_var: "TOKEN" },
-    { type: "mcp", server: "docs", tool: "search" },
-    {
-      type: "database",
-      engine: "postgresql",
-      host: "db.example.com",
-      database: "app",
-      query: "SELECT 1",
-    },
-    { type: "git", operation: "clone", repository: "https://git.example.com/o/r.git" },
-    { type: "ssh", host: "h1.example", user: "ubuntu", command: "uptime" },
-    {
-      type: "smtp",
-      host: "smtp.example.com",
-      from: "ops@example.com",
-      to: ["dev@example.com"],
-      subject: "s",
-      text: "t",
-    },
-    { type: "imap", host: "imap.example.com", mailbox: "INBOX", operation: { kind: "search" } },
-    { type: "websocket", url: "wss://ws.example.com/", injection: { type: "bearer" } },
-    { type: "sftp", host: "h1.example", user: "ubuntu", operation: "list", remote_path: "/srv" },
-    { type: "docker_registry", operation: "pull", image: "registry.example.com/app:1" },
-    {
-      type: "sftp",
-      host: "h1.example",
-      user: "ubuntu",
-      operation: "bootstrap",
-      remote_path: "/srv",
-    },
-  ])(
+  it.each(EVERY_OTHER_ACTION)(
     "every other action is refused before the decrypt with one failed row — $type",
     async (action) => {
       const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
@@ -417,6 +422,113 @@ describe("useSecret — a secret with the bootstrap block serves the bootstrap a
       context: "process",
       error: ErrorCode.SECRET_REVOKED,
     });
+  });
+});
+
+describe("useSecret — a secret with a render entry serves the render alone", () => {
+  let value: string;
+
+  beforeEach(async () => {
+    value = randomBytes(18).toString("base64url");
+    await initWithSecret("k", value);
+    await engine.setInjectionPolicy(HANDLE, keyPolicy([ENTRY]));
+  });
+
+  it.each([
+    ...EVERY_OTHER_ACTION,
+    BOOT,
+    { ...PROCESS, operation: "render" },
+    {
+      type: "sftp",
+      host: "h1.example",
+      user: "ubuntu",
+      operation: "upload",
+      remote_path: "/srv/a.txt",
+      local_path: "/tmp/a.txt",
+    },
+    {
+      type: "sftp",
+      host: "h1.example",
+      user: "ubuntu",
+      operation: "download",
+      remote_path: "/srv/a.txt",
+      local_path: "/tmp/a.txt",
+    },
+  ])(
+    "every other action is refused before the decrypt with one failed row — $type",
+    async (action) => {
+      const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
+      try {
+        const err = await expectVaultError(
+          () => engine.useSecret(HANDLE, unparsed(action)),
+          ErrorCode.RENDER_ONLY_KEY,
+        );
+        expectAbsent(err.message, value);
+        expect(err.message).toBe(RENDER_ONLY);
+        expect(getSecretValue).not.toHaveBeenCalled();
+        const rows = useRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.success).toBe(false);
+        expect(rows[0]?.detail).toStrictEqual({
+          handle: HANDLE,
+          context: action.type,
+          error: ErrorCode.RENDER_ONLY_KEY,
+        });
+      } finally {
+        getSecretValue.mockRestore();
+      }
+    },
+  );
+
+  it("the status answers first", async () => {
+    await engine.revokeSecret(HANDLE);
+    await expectVaultError(
+      () => engine.useSecret(HANDLE, unparsed(PROCESS)),
+      ErrorCode.SECRET_REVOKED,
+    );
+    const rows = useRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail).toStrictEqual({
+      handle: HANDLE,
+      context: "process",
+      error: ErrorCode.SECRET_REVOKED,
+    });
+  });
+
+  it("a stored policy with a block and an entry serves nothing", async () => {
+    storeInjectionPolicyBlob(
+      engine,
+      await engine.resolveSecretId(HANDLE),
+      injectionPolicyInputSchema.parse({ ...keyPolicy([ENTRY]), ssh_bootstrap: BLOCK }),
+    );
+    const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
+    try {
+      const refused = await expectVaultError(
+        () => engine.useSecret(HANDLE, unparsed(PROCESS)),
+        ErrorCode.RENDER_ONLY_KEY,
+      );
+      expect(refused.message).toBe(RENDER_ONLY);
+      const blocked = await expectVaultError(
+        () =>
+          engine.useSecret(HANDLE, unparsed({ type: "sftp", operation: "render", entry: "env" })),
+        ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+      );
+      expect(blocked.message).toBe(BOOTSTRAP_ONLY);
+      expect(getSecretValue).not.toHaveBeenCalled();
+      expect(useRows()).toStrictEqual([
+        {
+          detail: { handle: HANDLE, context: "sftp", error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED },
+          success: false,
+        },
+        {
+          detail: { handle: HANDLE, context: "process", error: ErrorCode.RENDER_ONLY_KEY },
+          success: false,
+        },
+      ]);
+    } finally {
+      getSecretValue.mockRestore();
+    }
   });
 });
 

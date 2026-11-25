@@ -57,7 +57,8 @@ export function sanitizeUseSecretResult(result: UseSecretResponse, guard: Inject
       // `message_id` is the vault's own generated Message-ID.
       return;
     }
-    case "ssh_bootstrap": {
+    case "ssh_bootstrap":
+    case "sftp_render": {
       // A status of the vault's fixed vocabulary; nothing the host wrote comes back.
       return;
     }

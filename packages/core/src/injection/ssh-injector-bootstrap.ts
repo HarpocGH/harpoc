@@ -162,10 +162,11 @@ function refusal(line: string, expected: BootstrapExpected): Refusal | null {
   return named ? "password" : "other";
 }
 
-function hostKeyFailed(stderr: string, line: string, expected: BootstrapExpected): boolean {
+/** ssh's host-key failure on an error stream redacted by `redact`, its refusal line read in both redacted forms. */
+export function hostKeyFailureSeen(stderr: string, redact: (text: string) => string): boolean {
   return (
     isHostKeyFailure(stderr) ||
-    redactedForms("Host key verification failed.", expected.redact).includes(line)
+    redactedForms("Host key verification failed.", redact).includes(lastLine(stderr))
   );
 }
 
@@ -214,7 +215,7 @@ export function readBootstrapOutcome(
   const last = lastLine(seen.stderr);
   const refusalKind = refusal(last, expected);
   if (words === 0) {
-    if (hostKeyFailed(seen.stderr, last, expected)) {
+    if (hostKeyFailureSeen(seen.stderr, expected.redact)) {
       return refused(VaultError.sshHostKeyMismatch());
     }
     if (refusalKind === "password") return refused(VaultError.sshPasswordRefused());

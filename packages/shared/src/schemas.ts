@@ -10,6 +10,11 @@ import {
   MAX_IMAP_FETCH_UIDS,
   MAX_NAME_LENGTH,
   MAX_PROCESS_ARGS,
+  MAX_RENDER_APPROVALS,
+  MAX_RENDER_ENTRIES,
+  MAX_RENDER_HOST_KEYS,
+  MAX_RENDER_SLOT_OCCURRENCES,
+  MAX_RENDER_TEMPLATE_BYTES,
   MAX_SMTP_ATTACHMENTS,
   MAX_SMTP_RECIPIENTS,
   MAX_WS_COLLECT_MESSAGES,
@@ -17,8 +22,10 @@ import {
 } from "./constants.js";
 import { isDecimalInteger } from "./decimal-integer.js";
 import { isValidHandle } from "./handle.js";
-import { LOOPBACK_URL_HOSTS } from "./host-allowlist.js";
+import { isLoopbackSshHost, LOOPBACK_URL_HOSTS } from "./host-allowlist.js";
 import { isValidRecipientPattern } from "./recipient-pattern.js";
+import { isNormalRemotePath, utf8ByteLength } from "./render-entry.js";
+import { parseRenderTemplate } from "./render-template.js";
 import { SSH_HOST_KEY_TYPES, SSH_INSTALL_KEY_TYPES, sshKeyLineType } from "./ssh-key-line.js";
 import {
   ActionType,
@@ -802,26 +809,76 @@ const sftpPathSchema = z
  * ssh-agent as the SSH context (`sshHostSchema`/`sshUserSchema`, declared
  * above with `sshActionSchema`). Bare (no cross-field refinement) for the
  * same `discriminatedUnion`-member reason `bareDatabaseActionSchema`
- * documents above; the `local_path` requirement lives in `refineSftpAction`.
+ * documents above; the two shapes — a transfer (`upload`, `download`, `list`)
+ * on `host`, `user` and `remote_path`, and a `render` of the key's `entry` —
+ * and the `local_path` requirement are `refineSftpAction`'s.
  */
 const bareSftpActionSchema = z.strictObject({
   type: z.literal(ActionType.SFTP),
-  host: sshHostSchema,
-  user: sshUserSchema,
+  host: sshHostSchema.optional(),
+  user: sshUserSchema.optional(),
   port: z.number().int().min(1).max(65_535).optional(),
-  operation: z.enum(["upload", "download", "list"]),
-  remote_path: sftpPathSchema,
+  operation: z.enum(["upload", "download", "list", "render"]),
+  remote_path: sftpPathSchema.optional(),
   local_path: sftpPathSchema.optional(),
+  entry: namePattern.optional(),
   timeout_ms: z.number().int().positive().max(300_000).optional(),
 });
 
 type BareSftpAction = z.infer<typeof bareSftpActionSchema>;
 
+/** The three transfers: `upload`, `download` and `list` on a named host, user and remote path. */
+export type SftpAction = Omit<
+  BareSftpAction,
+  "host" | "user" | "remote_path" | "operation" | "entry"
+> & {
+  host: string;
+  user: string;
+  remote_path: string;
+  operation: "upload" | "download" | "list";
+  entry?: undefined;
+};
+
+/** The `sftp` action with `operation: "render"`: the key's render entry by name, its target the entry's. */
+export type SftpRenderAction = Omit<
+  BareSftpAction,
+  "host" | "user" | "port" | "remote_path" | "local_path" | "operation" | "entry"
+> & {
+  operation: "render";
+  entry: string;
+  host?: undefined;
+  user?: undefined;
+  port?: undefined;
+  remote_path?: undefined;
+  local_path?: undefined;
+};
+
+const SFTP_TRANSFER_ONLY_KEYS = ["host", "user", "port", "remote_path", "local_path"] as const;
+const SFTP_RENDER_ONLY_KEYS = ["entry"] as const;
+const SFTP_TRANSFER_REQUIRED_KEYS = ["host", "user", "remote_path"] as const;
+
 /**
- * `local_path` is required for `upload`/`download` (the vault-local file
- * side of the transfer) and refused for `list` (nothing local to name).
+ * The two shapes of the one `sftp` member, with the issues their two strict
+ * objects would raise: a key of the other shape is unrecognized, a shape's
+ * required key (`entry`; `host`, `user`, `remote_path`) is missing. Then, for
+ * a transfer, `local_path` is required for `upload`/`download` (the
+ * vault-local file side of the transfer) and refused for `list` (nothing
+ * local to name).
  */
 function refineSftpAction(data: BareSftpAction, ctx: z.RefinementCtx): void {
+  const render = data.operation === "render";
+  const stray = (render ? SFTP_TRANSFER_ONLY_KEYS : SFTP_RENDER_ONLY_KEYS).filter(
+    (key) => data[key] !== undefined,
+  );
+  if (stray.length > 0) {
+    ctx.addIssue({ code: "unrecognized_keys", keys: [...stray], path: [], input: data });
+  }
+  for (const key of render ? SFTP_RENDER_ONLY_KEYS : SFTP_TRANSFER_REQUIRED_KEYS) {
+    if (data[key] === undefined) {
+      ctx.addIssue({ code: "invalid_type", expected: "string", input: undefined, path: [key] });
+    }
+  }
+  if (render) return;
   if ((data.operation === "upload" || data.operation === "download") && !data.local_path) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -838,9 +895,18 @@ function refineSftpAction(data: BareSftpAction, ctx: z.RefinementCtx): void {
   }
 }
 
-export const sftpActionSchema = bareSftpActionSchema.superRefine(refineSftpAction);
+function isSftpActionShape(
+  data: BareSftpAction,
+): data is BareSftpAction & (SftpAction | SftpRenderAction) {
+  return data.operation === "render"
+    ? data.entry !== undefined && SFTP_TRANSFER_ONLY_KEYS.every((key) => data[key] === undefined)
+    : data.entry === undefined &&
+        SFTP_TRANSFER_REQUIRED_KEYS.every((key) => data[key] !== undefined);
+}
 
-export type SftpAction = z.infer<typeof sftpActionSchema>;
+export const sftpActionSchema = bareSftpActionSchema
+  .superRefine(refineSftpAction)
+  .refine(isSftpActionShape, NARROW_ONLY);
 
 /**
  * Docker image reference: `[registry-host[:port]/]repo[:tag][@digest]`. The
@@ -920,9 +986,17 @@ type LooseUseSecretAction = z.output<typeof useSecretActionUnion>;
 function isUseSecretActionShape(
   data: LooseUseSecretAction,
 ): data is
-  | Exclude<LooseUseSecretAction, { type: "ssh" }>
-  | (BareSshAction & (SshAction | SshBootstrapAction)) {
-  return data.type !== "ssh" || isSshActionShape(data);
+  | Exclude<LooseUseSecretAction, { type: "ssh" } | { type: "sftp" }>
+  | (BareSshAction & (SshAction | SshBootstrapAction))
+  | (BareSftpAction & (SftpAction | SftpRenderAction)) {
+  switch (data.type) {
+    case "ssh":
+      return isSshActionShape(data);
+    case "sftp":
+      return isSftpActionShape(data);
+    default:
+      return true;
+  }
 }
 
 export const useSecretActionSchema = useSecretActionUnion
@@ -1039,21 +1113,141 @@ export const sshBootstrapPolicyInputSchema = z.strictObject({
 export type SshBootstrapPolicy = z.output<typeof sshBootstrapPolicySchema>;
 export type SshBootstrapPolicyInput = z.input<typeof sshBootstrapPolicyInputSchema>;
 
+const renderHostSchema = sshBootstrapHostSchema.refine((host) => !isLoopbackSshHost(host), {
+  message:
+    "Invalid host: the vault host's own loopback (localhost, 127.0.0.0/8, 0.0.0.0) is no render target",
+});
+const renderPortSchema = z.number().int().min(1).max(65_535);
+const renderPathSchema = z.string().refine(isNormalRemotePath, {
+  message:
+    "Invalid path: an absolute remote path of at most 4096 bytes without a control or format character, a line or paragraph separator, an empty, '.' or '..' segment or a trailing '/', its last segment at most 200 bytes and not of the render's temporary name form",
+});
+const renderHostKeysSchema = z.array(sshHostKeyLineSchema).min(1).max(MAX_RENDER_HOST_KEYS);
+
+/** Why a render template is refused, the first that applies; `undefined` for one the schema admits. */
+function renderTemplateRefusal(template: string): string | undefined {
+  const bytes = utf8ByteLength(template);
+  if (bytes === null) return "not UTF-8 text";
+  if (bytes > MAX_RENDER_TEMPLATE_BYTES) {
+    return `longer than ${String(MAX_RENDER_TEMPLATE_BYTES)} bytes`;
+  }
+  if (template.includes("\u0000")) return "a NUL character";
+  if (parseRenderTemplate(template) === null) {
+    return `every {{ must open a slot {{secret://name}} or {{secret://project/name}}, at most ${String(MAX_RENDER_SLOT_OCCURRENCES)} slots`;
+  }
+  return undefined;
+}
+
+const renderTemplateSchema = z.string().superRefine((template, ctx) => {
+  const refusal = renderTemplateRefusal(template);
+  if (refusal !== undefined) {
+    ctx.addIssue({ code: "custom", message: `Invalid template: ${refusal}` });
+  }
+});
+
+/**
+ * A render entry as stored (design 5 § 6.1): the one host, port, user and
+ * remote path a key secret may write a file to, the host's public keys, and
+ * the template of the file's content.
+ */
+export const renderEntrySchema = z.strictObject({
+  name: namePattern,
+  host: renderHostSchema,
+  port: renderPortSchema,
+  user: sshUserSchema,
+  path: renderPathSchema,
+  host_keys: renderHostKeysSchema,
+  template: renderTemplateSchema,
+});
+
+/** The entry as an administrator supplies it: the port defaults to 22. */
+export const renderEntryInputSchema = z.strictObject({
+  name: namePattern,
+  host: renderHostSchema,
+  port: renderPortSchema.optional().default(22),
+  user: sshUserSchema,
+  path: renderPathSchema,
+  host_keys: renderHostKeysSchema,
+  template: renderTemplateSchema,
+});
+
+/** A slot secret's approval of a key's entry: the key's id, the entry's name and the entry's digest as approved. */
+export const renderApprovalSchema = z.strictObject({
+  key: z.string().min(1).max(64),
+  entry: namePattern,
+  digest: z.string().regex(/^[0-9a-f]{64}$/, "Invalid digest: 64 lowercase hex characters"),
+});
+
+/** One entry per name, one approval per key and entry. */
+function refineRenderPolicy(
+  policy: {
+    entries: ReadonlyArray<{ name: string }>;
+    approvals: ReadonlyArray<{ key: string; entry: string }>;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const names = new Set<string>();
+  policy.entries.forEach((entry, i) => {
+    if (names.has(entry.name)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Duplicate entry name",
+        path: ["entries", i, "name"],
+      });
+    }
+    names.add(entry.name);
+  });
+  const pairs = new Set<string>();
+  policy.approvals.forEach((approval, i) => {
+    const pair = JSON.stringify([approval.key, approval.entry]);
+    if (pairs.has(pair)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Duplicate approval: one per key and entry",
+        path: ["approvals", i],
+      });
+    }
+    pairs.add(pair);
+  });
+}
+
+export const renderPolicySchema = z
+  .strictObject({
+    entries: z.array(renderEntrySchema).max(MAX_RENDER_ENTRIES),
+    approvals: z.array(renderApprovalSchema).max(MAX_RENDER_APPROVALS),
+  })
+  .superRefine(refineRenderPolicy);
+
+export const renderPolicyInputSchema = z
+  .strictObject({
+    entries: z.array(renderEntryInputSchema).max(MAX_RENDER_ENTRIES),
+    approvals: z.array(renderApprovalSchema).max(MAX_RENDER_APPROVALS),
+  })
+  .superRefine(refineRenderPolicy);
+
+export type RenderEntry = z.output<typeof renderEntrySchema>;
+export type RenderEntryInput = z.input<typeof renderEntryInputSchema>;
+export type RenderApproval = z.output<typeof renderApprovalSchema>;
+export type RenderPolicy = z.output<typeof renderPolicySchema>;
+export type RenderPolicyInput = z.input<typeof renderPolicyInputSchema>;
+
 /**
  * Per-secret injection policy as stored and loaded: every field present, no
- * defaults, no unknown keys. The vault always writes all fifteen fields, so a
+ * defaults, no unknown keys. The vault always writes all sixteen fields, so a
  * decrypted blob that fails this schema is corruption (R2/C43), not a policy
- * from before a field existed — no such vault opens under v1.5. The five
+ * from before a field existed — no such vault opens under v1.5. The six
  * exceptions are read-side and live in core: the post-baseline fields
  * `strict_tree_exit` (2026-09-10), `proxy` (2026-11-06) and `ssh_agent_socket`
  * (2026-11-06) are defaulted to `false`, `local_dirs` (2026-11-18; read
- * from `sftp_local_dirs` where only that key is stored) to `[]` and
- * `ssh_bootstrap` (2026-11-21) to `null` by
+ * from `sftp_local_dirs` where only that key is stored) to `[]`,
+ * `ssh_bootstrap` (2026-11-21) to `null` and `render` (2026-11-24) to
+ * `{ entries: [], approvals: [] }` by
  * `loadInjectionPolicy` before this parse, because blobs written by the
  * prepared v1.5.0 tree carry the baseline ten, blobs written before
  * deployment model B's egress proxy carry eleven, blobs written before its
  * agent socket carry twelve, blobs written before the local directories
- * carry thirteen, and blobs written before the bootstrap block carry fourteen.
+ * carry thirteen, blobs written before the bootstrap block carry fourteen,
+ * and blobs written before the render field carry fifteen.
  */
 export const injectionPolicySchema = z.strictObject({
   url_allowlist: urlAllowlistSchema,
@@ -1071,6 +1265,7 @@ export const injectionPolicySchema = z.strictObject({
   ssh_agent_socket: z.boolean(),
   local_dirs: localDirsSchema,
   ssh_bootstrap: sshBootstrapPolicySchema.nullable(),
+  render: renderPolicySchema,
 });
 
 /** Per-secret injection policy input (URL + host + command + env allowlists + HTTP response mode); every field defaults, an unknown key is refused (D2c, 2026-09-23). */
@@ -1090,6 +1285,7 @@ export const injectionPolicyInputSchema = z.strictObject({
   ssh_agent_socket: z.boolean().optional().default(false),
   local_dirs: localDirsSchema.optional().default([]),
   ssh_bootstrap: sshBootstrapPolicyInputSchema.nullable().optional().default(null),
+  render: renderPolicyInputSchema.optional().default(() => ({ entries: [], approvals: [] })),
 });
 
 /**
@@ -1158,6 +1354,15 @@ export const injectionPolicyInputSchema = z.strictObject({
  * `ssh_agent_socket`, or on a secret that is not an `api_key`, it is refused
  * by the engine (`INVALID_INPUT`, a failed `policy.grant` row), not by this
  * schema.
+ * `render` (2026-11-24, default `{ entries: [], approvals: [] }`) is the
+ * secret's part in an sftp render (design 5 § 6.1): on a key secret,
+ * `entries` (at most 16, one per name) each name the host, port, user and
+ * remote path a file may be written to with the key, the host's public keys
+ * and the file's template; on a slot's secret, `approvals` (at most 32, one
+ * per key and entry) each name a key secret's id, the entry and the SHA-256
+ * of the entry as approved. The rules across fields and secrets — entries
+ * beside approvals or beside another field, an entry's host outside
+ * `host_allowlist` — are the engine's, not this schema's.
  * The shape the vault stores, loads and returns: every field
  * present, no defaults — defaults apply at `injectionPolicyInputSchema`, never
  * on the stored blob.

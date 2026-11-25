@@ -6,7 +6,7 @@ import { ErrorCode } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STDIN_ECHO_SCRIPT, STDIN_OPEN_PIPE_SCRIPT } from "./__fixtures__/spawn-children.js";
 import { sweepDescendants } from "./descendant-sweep.js";
-import { spawnCaptured } from "./spawn-captured.js";
+import { spawnCaptured, spawnDuplex } from "./spawn-captured.js";
 import {
   JOB_WRAPPER_KEEP_FLAG,
   JOB_WRAPPER_STRICT_FLAG,
@@ -427,6 +427,29 @@ describe.runIf(process.platform === "win32")("spawnCaptured — the real wrapper
     });
     expect(r).toMatchObject({ exit_code: 0, tree_kill: "job" });
     expect(r.stdout).toBe("open");
+  }, 60_000);
+
+  it("binary bytes reach the payload and come back through the wrapper (spawnDuplex)", async () => {
+    const values = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    const whole = Buffer.concat([
+      ...Array.from({ length: 256 }, () => values),
+      Buffer.from([0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80]),
+    ]);
+    const afterE282 = 256 * 256 + 2;
+    const writes = [
+      whole.subarray(0, afterE282),
+      whole.subarray(afterE282, afterE282 + 4),
+      whole.subarray(afterE282 + 4),
+    ];
+    const copy = Buffer.concat(writes);
+    const d = await spawnDuplex(NODE, ["-e", STDIN_ECHO_SCRIPT], { env: ENV, timeoutMs: 20_000 });
+    const got: Buffer[] = [];
+    d.onData((chunk) => got.push(chunk));
+    for (const chunk of writes) await d.write(chunk);
+    d.end();
+    const r = await d.settled;
+    expect(r).toMatchObject({ exit_code: 0, tree_kill: "job" });
+    expect(Buffer.concat(got).equals(copy)).toBe(true);
   }, 60_000);
 });
 

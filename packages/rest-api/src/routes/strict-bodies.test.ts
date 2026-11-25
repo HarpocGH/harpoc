@@ -38,6 +38,7 @@ const FULL_POLICY = {
   ssh_agent_socket: false,
   local_dirs: [],
   ssh_bootstrap: null,
+  render: { entries: [], approvals: [] },
 };
 
 // The public key lines of core's injection/__fixtures__/ssh-public-keys.ts (ssh-keygen 10.0p2).
@@ -318,6 +319,48 @@ describe("the injection-policy PUT requires ssh_bootstrap (4b B1)", () => {
     expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
     expect(json.message).toBe(
       "ssh_bootstrap.port: Invalid input: expected number, received undefined",
+    );
+    expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe("the injection-policy PUT requires render", () => {
+  it("a PUT without render is 400 SCHEMA_VALIDATION_ERROR naming it", async () => {
+    const { app, engine } = build();
+    const partial = Object.fromEntries(
+      Object.entries(FULL_POLICY).filter(([key]) => key !== "render"),
+    );
+    const res = await send(app, "PUT", "/api/v1/secrets/k/injection-policy", partial);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; message: string };
+    expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(json.message).toBe("render: Invalid input: expected object, received undefined");
+    expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
+  });
+
+  it("an entry without port is 400 SCHEMA_VALIDATION_ERROR naming the port", async () => {
+    const { app, engine } = build();
+    const res = await send(app, "PUT", "/api/v1/secrets/k/injection-policy", {
+      ...FULL_POLICY,
+      render: {
+        entries: [
+          {
+            name: "env",
+            host: "h1.example",
+            user: "deploy",
+            path: "/srv/app/.env",
+            host_keys: [BOOTSTRAP_HOST_KEY],
+            template: "TOKEN={{secret://bot-token}}\n",
+          },
+        ],
+        approvals: [],
+      },
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; message: string };
+    expect(json.error).toBe(ErrorCode.SCHEMA_VALIDATION_ERROR);
+    expect(json.message).toBe(
+      "render.entries.0.port: Invalid input: expected number, received undefined",
     );
     expect(engine.setInjectionPolicy).not.toHaveBeenCalled();
   });

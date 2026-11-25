@@ -204,8 +204,8 @@ export function redactCaptured(text: string, secrets: readonly string[] | undefi
  * Spawn a subprocess with no shell (`shell:false`), capture stdout/stderr into
  * capped buffers, enforce a timeout (SIGKILL on exceed) and redact injected
  * credential strings from the captured output. Shared by the process, Git,
- * SSH, SFTP and Docker contexts so the process-mediated capture discipline is
- * defined once.
+ * SSH, SFTP and Docker contexts and, through `spawnDuplex`, the sftp render, so
+ * the process-mediated capture discipline is defined once.
  *
  * The returned promise always settles: the timeout kills the child's whole
  * process group, settlement is driven by the child's own `'exit'` with a
@@ -248,11 +248,149 @@ export async function spawnCaptured(
   }
 }
 
+/** A child spoken to through its standard input and output while it runs (`spawnDuplex`). */
+export interface DuplexChild {
+  /**
+   * Hands the chunk to `stdin.write` and resolves in its callback, error or not; never
+   * rejects. The chunk is zeroed in that callback, never before; where the input can no
+   * longer take it (no child, input destroyed or ended, `settled` resolved) it is zeroed and
+   * the call resolves at once. Await each write before the next: the callback is the
+   * backpressure.
+   */
+  write(chunk: Buffer): Promise<void>;
+  /** Ends the child's input; a no-op without a child or after `settled`. */
+  end(): void;
+  /**
+   * The one consumer of the child's standard output: raw `Buffer`s, never decoded, never
+   * capped, none after `settled`; until it is attached the stream stays paused while the
+   * child runs, and a consumer attached after the child's exit receives nothing. A second
+   * call throws; a consumer that throws ends the child as `abort` does.
+   */
+  onData(consumer: (chunk: Buffer) => void): void;
+  /** Ends the child's tree as its timeout does, and reads as one; once only, never after `settled`. */
+  abort(): void;
+  /** `spawnCaptured`'s result with `stdout` empty; resolving zeroes every chunk still pending. */
+  settled: Promise<SpawnCapturedResult>;
+}
+
+export type SpawnDuplexOptions = Omit<SpawnCapturedOptions, "stdin">;
+
+/**
+ * `spawnCaptured`'s second entry point, for a child spoken to in both directions (the sftp
+ * render's `ssh -s`): the same spawn, isolation, job wrapper, tree kill, sweep and budget.
+ * Rejects where `spawnCaptured` rejects, before anything spawns; a spawn that fails resolves
+ * a `DuplexChild` whose `settled` carries `spawn_failed`. `stdin` gets one `error` listener
+ * (`EPIPE`, on win32 `EOF`, when the child closes its input) and is destroyed at the settle;
+ * standard error is captured, capped and redacted with `opts.redact` as in `spawnCaptured`,
+ * and `settled.truncated` is that stream's alone. `settled` keeps `spawnCaptured`'s bound.
+ */
+export async function spawnDuplex(
+  command: string,
+  args: string[],
+  opts: SpawnDuplexOptions,
+): Promise<DuplexChild> {
+  const prepared = await prepareSpawn(command, args, opts);
+  let child: ChildProcess | undefined;
+  let expire: (() => void) | undefined;
+  let done = false;
+  let consumed = false;
+  let consumerFailed = false;
+  const pending = new Set<{ chunk: Buffer; resolve: () => void }>();
+
+  const supervised = superviseChild(prepared, opts, {
+    wire: (spawned, expireChild) => {
+      child = spawned;
+      expire = expireChild;
+      spawned.stdin?.on("error", () => {});
+    },
+    stdout: () => ({ text: "", truncated: false }),
+  });
+  const settled = supervised.then((result) => {
+    done = true;
+    for (const entry of pending) {
+      entry.chunk.fill(0);
+      entry.resolve();
+    }
+    pending.clear();
+    child?.stdin?.destroy();
+    return result;
+  });
+
+  return {
+    write(chunk: Buffer): Promise<void> {
+      const stdin = child?.stdin;
+      if (done || !stdin || stdin.destroyed || stdin.writableEnded) {
+        chunk.fill(0);
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        const entry = { chunk, resolve };
+        pending.add(entry);
+        stdin.write(chunk, () => {
+          if (!pending.delete(entry)) return;
+          chunk.fill(0);
+          resolve();
+        });
+      });
+    },
+    end(): void {
+      const stdin = child?.stdin;
+      if (done || !stdin || stdin.destroyed || stdin.writableEnded) return;
+      stdin.end();
+    },
+    onData(consumer: (chunk: Buffer) => void): void {
+      if (consumed) throw new Error("spawnDuplex takes one consumer");
+      consumed = true;
+      child?.stdout?.on("data", (chunk: Buffer) => {
+        if (done || consumerFailed) return;
+        try {
+          consumer(chunk);
+        } catch {
+          consumerFailed = true;
+          expire?.();
+        }
+      });
+    },
+    abort(): void {
+      expire?.();
+    },
+    settled,
+  };
+}
+
 async function spawnUnwiped(
   command: string,
   args: string[],
   opts: SpawnCapturedOptions,
 ): Promise<SpawnCapturedResult> {
+  const prepared = await prepareSpawn(command, args, opts);
+  const stdout = new CappedOutput(opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES);
+  return superviseChild(prepared, opts, {
+    wire: (child) => {
+      if (opts.stdin !== undefined) {
+        child.stdin?.on("error", () => {});
+        child.stdin?.end(opts.stdin);
+      }
+      child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    },
+    stdout: () => ({ text: stdout.toString(), truncated: stdout.truncated }),
+  });
+}
+
+interface PreparedSpawn {
+  command: string;
+  args: string[];
+  isolationMechanism: NetworkIsolationMechanism | undefined;
+  fsIsolationMechanism: FsIsolationMechanism | undefined;
+  treeKill: TreeKillMechanism | undefined;
+  strict: boolean;
+}
+
+async function prepareSpawn(
+  command: string,
+  args: string[],
+  opts: SpawnCapturedOptions,
+): Promise<PreparedSpawn> {
   let isolationMechanism: NetworkIsolationMechanism | undefined;
   let fsIsolationMechanism: FsIsolationMechanism | undefined;
   if (opts.networkIsolation === true || opts.fsIsolation === true) {
@@ -282,8 +420,21 @@ async function spawnUnwiped(
     if (strict) throw VaultError.strictTreeExitUnavailable(job.reason);
     treeKill = "taskkill";
   }
+  return { command, args, isolationMechanism, fsIsolationMechanism, treeKill, strict };
+}
+
+interface ChildWiring {
+  wire(child: ChildProcess, expire: () => void): void;
+  stdout(): { text: string; truncated: boolean };
+}
+
+function superviseChild(
+  prepared: PreparedSpawn,
+  opts: SpawnCapturedOptions,
+  wiring: ChildWiring,
+): Promise<SpawnCapturedResult> {
+  const { command, args, isolationMechanism, fsIsolationMechanism, treeKill, strict } = prepared;
   const cap = opts.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES;
-  const stdout = new CappedOutput(cap);
   const stderr = new CappedOutput(cap);
 
   return new Promise<SpawnCapturedResult>((resolvePromise) => {
@@ -321,11 +472,6 @@ async function spawnUnwiped(
       return;
     }
 
-    if (opts.stdin !== undefined) {
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(opts.stdin);
-    }
-
     let timedOut = false;
     let exited = false;
     let settled = false;
@@ -356,7 +502,8 @@ async function spawnUnwiped(
 
     const finish = (code: number | null, signal: string | null, spawnFailed: boolean): void => {
       const emit = (descendantSweep?: DescendantSweepResult): void => {
-        const rawOut = stdout.toString();
+        const captured = wiring.stdout();
+        const rawOut = captured.text;
         const rawErr = stderr.toString();
         // The wrapper's own failure (its reserved code AND its marker) is a
         // spawn that never ran — what a Node-level ENOENT is today.
@@ -372,7 +519,7 @@ async function spawnUnwiped(
           stdout: out,
           stderr: errText,
           timed_out: timedOut,
-          truncated: stdout.truncated || stderr.truncated,
+          truncated: captured.truncated || stderr.truncated,
           signal: timedOut ? (signal ?? "SIGKILL") : signal,
           spawn_failed: spawnFailed || wrapperFailed,
           redacted: out !== rawOut || errText !== rawErr,
@@ -396,7 +543,8 @@ async function spawnUnwiped(
       else emit();
     };
 
-    const timer = setTimeout(() => {
+    const expire = (): void => {
+      if (timedOut || settled) return;
       timedOut = true;
       // A kill that does not take (an unkillable state, a failed taskkill)
       // must not strand the caller: settle with what was captured — but only
@@ -411,10 +559,11 @@ async function spawnUnwiped(
         }, KILL_SETTLE_MS);
         if (backstopTimer.unref) backstopTimer.unref();
       });
-    }, opts.timeoutMs);
+    };
+    const timer = setTimeout(expire, opts.timeoutMs);
     if (timer.unref) timer.unref();
+    wiring.wire(child, expire);
 
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 
     child.on("error", () => {

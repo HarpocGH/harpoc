@@ -265,6 +265,7 @@ describe("per-secret access policy enforcement end-to-end", () => {
           ssh_agent_socket: false,
           local_dirs: [],
           ssh_bootstrap: null,
+          render: { entries: [], approvals: [] },
         }),
       });
       expect(res.status).toBe(403);

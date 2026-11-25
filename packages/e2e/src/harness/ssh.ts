@@ -37,6 +37,11 @@ function pubKeyBody(name: string): string {
   return `${type} ${body}`;
 }
 
+/** A fleet sshd's host key as `<type> <base64>`: the body of its pin, and a render entry's `host_keys` line. */
+export function hostKeyLine(which: "pinned" | "rogue"): string {
+  return pubKeyBody(`hostkey_${which}_ed25519`);
+}
+
 /**
  * A known_hosts pin line, written verbatim by the vault (F-2). `host` may be a
  * bare address (`127.0.0.2`) or the bracketed non-22 form (`[127.0.0.1]:2222`).
@@ -45,7 +50,7 @@ function pubKeyBody(name: string): string {
  * address, so the rogue server's real key fails verification (D4).
  */
 export function knownHostPin(host: string, which: "pinned" | "rogue" = "pinned"): string {
-  return `${host} ${pubKeyBody(`hostkey_${which}_ed25519`)}`;
+  return `${host} ${hostKeyLine(which)}`;
 }
 
 /**
