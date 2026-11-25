@@ -305,6 +305,10 @@ function expectNoValue(texts: string[]): void {
   }
 }
 
+// The engine-building hook ran past core's 30 s on the loaded windows-latest Node 24 leg (ci.yml
+// run 45594869586).
+const HOOK_TIMEOUT_MS = 120_000;
+
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-render-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
@@ -320,13 +324,13 @@ beforeEach(async () => {
   await keyEntries([ENTRY]);
   registerAgents(engine, "alice", "bob");
   for (const id of Object.values(ids)) grant(id, "alice", ["use"]);
-});
+}, HOOK_TIMEOUT_MS);
 
 afterEach(async () => {
   vi.restoreAllMocks();
   await engine.destroy();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-});
+}, HOOK_TIMEOUT_MS);
 
 describe("the engine's render seam", () => {
   it("holds the injector's run and the render's version read", async () => {

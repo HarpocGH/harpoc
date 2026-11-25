@@ -162,6 +162,10 @@ async function expectSlotRefused(
   decrypt.mockRestore();
 }
 
+// vault-engine.sftp-render.test.ts's engine-building hook, the same as this one, ran past core's
+// 30 s on the loaded windows-latest Node 24 leg (ci.yml run 45594869586).
+const HOOK_TIMEOUT_MS = 120_000;
+
 beforeEach(async () => {
   tempDir = join(tmpdir(), `harpoc-slots-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
@@ -178,14 +182,14 @@ beforeEach(async () => {
   registerAgents(engine, "alice", "bob");
   for (const id of Object.values(ids)) grant(id, "alice", ["use"]);
   calls = installRenderSeam(engine);
-});
+}, HOOK_TIMEOUT_MS);
 
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   await engine.destroy();
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-});
+}, HOOK_TIMEOUT_MS);
 
 describeSsh("a slot's token scope (4.1)", () => {
   it.each([

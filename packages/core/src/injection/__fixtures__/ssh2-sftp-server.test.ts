@@ -637,8 +637,10 @@ describe("the ssh2 SFTP server fixture against ssh2's own client", () => {
     const server = await serve();
     const socket: Socket = connect({ host: "127.0.0.1", port: server.port, allowHalfOpen: true });
     socket.on("error", () => undefined);
+    // The server's greeting: it has taken the connection, so its close cannot beat its accept.
+    const greeted = new Promise<void>((resolve) => socket.once("data", () => resolve()));
     socket.resume();
-    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    await greeted;
     const ended = new Promise<void>((resolve) => socket.once("end", () => resolve()));
 
     try {

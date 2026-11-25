@@ -700,9 +700,9 @@ export async function startSftpSshServer(options: SftpServerOptions): Promise<Sf
       closing ??= (async () => {
         for (const hold of everyHold) hold.release();
         for (const connection of connections) connection.end();
-        // Once its own bytes are out, a socket is destroyed: a client that never closes its side
-        // cannot hold the server's close.
-        for (const socket of sockets) socket.destroySoon();
+        // Destroyed, not ended: a client that keeps its side open or never reads cannot hold the
+        // server's close.
+        for (const socket of sockets) socket.destroy();
         await new Promise<void>((resolve) => tcp.close(() => resolve()));
         for (const state of channels) closeHandles(state);
       })();

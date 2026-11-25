@@ -1,19 +1,16 @@
 import { generateKeyPairSync, randomBytes, randomInt } from "node:crypto";
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import type { InjectionPolicy, RenderEntry } from "@harpoc/shared";
-import { ErrorCode, RENDER_CONNECT_TIMEOUT_SEC, VaultError } from "@harpoc/shared";
+import {
+  ErrorCode,
+  maxUnixSocketPathBytes,
+  RENDER_CONNECT_TIMEOUT_SEC,
+  VaultError,
+} from "@harpoc/shared";
 import { expectAbsent } from "@harpoc/test-utils";
 import { agentSocketAccepts } from "./__fixtures__/agent-socket.js";
 import { serialized } from "./__fixtures__/serialized.js";
@@ -323,11 +320,15 @@ function restoreTempEnv(saved: { TMPDIR?: string; TMP?: string; TEMP?: string })
   else process.env.TEMP = saved.TEMP;
 }
 
+/** A macOS runner's temporary root as `realpathSync` spells it, the longer of its two spellings. */
+const DARWIN_TEMP_ROOT = `/private/var/folders/xx/${"x".repeat(30)}/T`;
+
 let tempRoot: string;
 let saved: { TMPDIR?: string; TMP?: string; TEMP?: string };
 
+// The short prefix keeps the agent's socket inside darwin's 104-byte sun_path under its long $TMPDIR.
 beforeEach(() => {
-  tempRoot = realpathSync(mkdtempSync(join(tmpdir(), "harpoc-render-t-")));
+  tempRoot = mkdtempSync(join(tmpdir(), "harpoc-"));
   saved = overrideTempEnv(tempRoot);
   vi.mocked(spawnDuplex).mockReset();
   vi.mocked(mkdtempSync).mockClear();
@@ -339,6 +340,22 @@ afterEach(() => {
   vi.mocked(mkdtempSync).mockReset();
   vi.mocked(rmSync).mockReset();
   rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+describe("the suite's temporary directory", () => {
+  it("keeps the agent's socket within darwin's bound under a macOS runner's temporary root", () => {
+    const socket = posix.join(
+      DARWIN_TEMP_ROOT,
+      basename(tempRoot),
+      "harpoc-agent-XXXXXX",
+      "agent.sock",
+    );
+    const bytes = Buffer.byteLength(socket);
+    expect(
+      bytes,
+      `on a macOS runner the agent's socket would be ${socket}, ${String(bytes)} bytes`,
+    ).toBeLessThanOrEqual(maxUnixSocketPathBytes("darwin"));
+  });
 });
 
 describe("runRender", () => {
