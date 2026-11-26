@@ -400,15 +400,11 @@ describe("useSecret — the bootstrap's refusals before the decrypt (B3)", () =>
     ]);
   });
 
-  it.each([
-    { field: "host", row: { host: 42 }, reason: "target", message: TEXT.target },
-    { field: "public_key", row: {}, reason: "key", message: TEXT.key },
-  ])(
-    "a field the door read as text and the judgement reads as another type fails check 2 or 3 — $field",
-    async ({ field, row, reason, message }) => {
+  it.skipIf(SSH_ON_PATH === null).each([{ field: "host" }, { field: "public_key" }])(
+    "a field the door read as text is judged as that text, never as the type a later read answers — $field",
+    async ({ field }) => {
       await storeSecret();
       const calls = installSeam(engine);
-      const getSecretValue = spyDecrypt();
       const manager = internals().secretManager;
       const resolve = manager.resolveHandle.bind(manager);
       let pastDoor = false;
@@ -416,25 +412,21 @@ describe("useSecret — the bootstrap's refusals before the decrypt (B3)", () =>
         pastDoor = true;
         return resolve(handle);
       });
+      let reads = 0;
       const action: Record<string, unknown> = { ...BOOT };
       const asSent = action[field];
       Object.defineProperty(action, field, {
         enumerable: true,
-        get: () => (pastDoor ? 42 : asSent),
+        get: () => {
+          reads += 1;
+          return pastDoor ? 42 : asSent;
+        },
       });
 
-      const err = await expectVaultError(
-        () => engine.useSecret(HANDLE, unparsed(action)),
-        ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
-      );
-      expect(err.message).toBe(message);
-      expect(getSecretValue).not.toHaveBeenCalled();
-      expect(calls).toHaveLength(0);
-      const expected: Record<string, unknown> = { ...B0, ...row };
-      if (field === "public_key") delete expected.key_fingerprint;
-      expect(useDetails()).toStrictEqual([
-        { ...expected, error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED, reason },
-      ]);
+      await expect(engine.useSecret(HANDLE, unparsed(action))).resolves.toStrictEqual(RESULT);
+
+      expect(reads).toBe(1);
+      expect(calls).toHaveLength(1);
     },
   );
 
@@ -1724,6 +1716,7 @@ describe.skipIf(SSH_ON_PATH === null)(
           key: "installed",
           drop_in: "not_asked",
           secret_ended: false,
+          mark: "gone",
           ...SPAWN,
         },
       ]);
@@ -1939,7 +1932,7 @@ describe("useSecret — the ssh action's two shapes", () => {
     await expect(engine.useSecret(HANDLE, action)).resolves.toBe(sshResult);
 
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.action).toBe(action);
+    expect(seen[0]?.action).toStrictEqual(action);
     expect(seen[0]?.value === password).toBe(true);
     expect(calls).toHaveLength(0);
   });
@@ -1960,45 +1953,52 @@ describe("useSecret — the ssh action's two shapes", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it.skipIf(SSH_ON_PATH === null)(
-    "an operation that answers the door absent and the engine bootstrap is served as the bootstrap alone",
-    async () => {
-      await storeSecret();
-      const commandInjector = vi.fn(() => Promise.resolve({ type: "ssh" }));
-      internals().sshInjector = { executeWithSecret: commandInjector };
-      const calls = installSeam(engine);
-      let operationReads = 0;
-      const commandReads: string[] = [];
-      const action = {
-        type: "ssh",
-        host: "h1.example",
-        user: "ubuntu",
-        public_key: KEY_A,
-        get operation(): string | undefined {
-          operationReads += 1;
-          return operationReads === 2 ? "bootstrap" : undefined;
-        },
-        get command(): string {
-          commandReads.push("command");
-          return "id";
-        },
-        get timeout_ms(): number {
-          commandReads.push("timeout_ms");
-          return 1000;
-        },
-      };
+  it("an operation that answers the door absent and the engine bootstrap is no bootstrap: its first answer holds and the block refuses it", async () => {
+    await storeSecret();
+    const commandInjector = vi.fn(() => Promise.resolve({ type: "ssh" }));
+    internals().sshInjector = { executeWithSecret: commandInjector };
+    const calls = installSeam(engine);
+    const getSecretValue = spyDecrypt();
+    let operationReads = 0;
+    const commandReads: string[] = [];
+    const action = {
+      type: "ssh",
+      host: "h1.example",
+      user: "ubuntu",
+      public_key: KEY_A,
+      get operation(): string | undefined {
+        operationReads += 1;
+        return operationReads === 2 ? "bootstrap" : undefined;
+      },
+      get command(): string {
+        commandReads.push("command");
+        return "id";
+      },
+      get timeout_ms(): number {
+        commandReads.push("timeout_ms");
+        return 1000;
+      },
+    };
 
-      const result = await engine.useSecret(HANDLE, unparsed(action));
+    const err = await expectVaultError(
+      () => engine.useSecret(HANDLE, unparsed(action)),
+      ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED,
+    );
 
-      expect(result).toStrictEqual(RESULT);
-      expect(calls).toHaveLength(1);
-      expect(commandInjector).not.toHaveBeenCalled();
-      expect(commandReads).toStrictEqual([]);
-      expect(useDetails()).toHaveLength(2);
-    },
-  );
+    expect(err.message).toBe(
+      "Use refused: the secret holds an ssh bootstrap block and serves the ssh bootstrap alone",
+    );
+    expect(operationReads).toBe(1);
+    expect(commandReads).toStrictEqual(["command", "timeout_ms"]);
+    expect(getSecretValue).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    expect(commandInjector).not.toHaveBeenCalled();
+    expect(useDetails()).toStrictEqual([
+      { handle: HANDLE, context: "ssh", error: ErrorCode.SSH_BOOTSTRAP_NOT_ALLOWED },
+    ]);
+  });
 
-  it("an operation that answers the door bootstrap and then absent is refused at the door", async () => {
+  it("an operation that answers the door bootstrap and then absent is refused at the door as the bootstrap it first read", async () => {
     await storeSecret();
     const commandInjector = vi.fn(() => Promise.resolve({ type: "ssh" }));
     internals().sshInjector = { executeWithSecret: commandInjector };
@@ -2018,11 +2018,15 @@ describe("useSecret — the ssh action's two shapes", () => {
     };
     const before = nonReadAuditCount(engine);
 
-    await expectVaultError(
+    const err = await expectVaultError(
       () => engine.useSecret(HANDLE, unparsed(action)),
       ErrorCode.INVALID_INPUT,
     );
 
+    expect(err.message).toBe(
+      "an ssh bootstrap takes type, operation, host, user, port, public_key and sudoers alone",
+    );
+    expect(operationReads).toBe(1);
     expect(nonReadAuditCount(engine)).toBe(before);
     expect(getSecretValue).not.toHaveBeenCalled();
     expect(commandInjector).not.toHaveBeenCalled();

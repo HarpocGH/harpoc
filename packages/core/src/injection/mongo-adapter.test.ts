@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MongoNetworkError } from "mongodb";
+import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { DbConnectOptions } from "./db-adapters.js";
 import { MongoAdapter } from "./mongo-adapter.js";
 
@@ -241,6 +243,30 @@ describe("MongoAdapter connection config (SSRF pinning, spec §10.7)", () => {
   it("forwards username/password from the split credential via the auth option", async () => {
     await new MongoAdapter().execute(opts({ user: "svc", password: "hunter2" }), { ping: 1 });
     expect(mongoClientCalls[0]?.options.auth).toEqual({ username: "svc", password: "hunter2" });
+  });
+
+  it("a signal aborted while mongodb loads: VAULT_LOCKED, no client built", async () => {
+    const controller = new AbortController();
+    const suiteModule = await import("mongodb");
+    vi.doMock("mongodb", () => {
+      controller.abort();
+      return suiteModule;
+    });
+    try {
+      await expectVaultError(
+        () => new MongoAdapter().execute(opts({ signal: controller.signal }), { ping: 1 }),
+        ErrorCode.VAULT_LOCKED,
+      );
+      expect(mongoClientCalls.length).toBe(0);
+    } finally {
+      vi.doMock("mongodb", () => suiteModule);
+    }
+  });
+
+  it("a live signal connects as before", async () => {
+    await new MongoAdapter().execute(opts({ signal: new AbortController().signal }), { ping: 1 });
+    expect(mongoClientCalls.length).toBe(1);
+    expect(dbCalls).toEqual(["app_db"]);
   });
 });
 

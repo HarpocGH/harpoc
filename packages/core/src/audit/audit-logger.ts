@@ -1,12 +1,14 @@
-import type { AuditEventType, PrincipalType } from "@harpoc/shared";
-import { AAD_AUDIT_DETAIL_V2 } from "@harpoc/shared";
+import type { PrincipalType } from "@harpoc/shared";
+import { AAD_AUDIT_DETAIL_V2, AuditEventType, VaultError } from "@harpoc/shared";
 import { encrypt } from "../crypto/aes-gcm.js";
+import { wipeBuffer } from "../crypto/random.js";
 import type { SqliteStore } from "../storage/sqlite-store.js";
 import {
   AUDIT_CHAIN_GENESIS_BYTES,
   computeAuditRowHmac,
   deriveAuditChainKey,
 } from "./audit-chain.js";
+import type { UseMark } from "./attribution.js";
 
 export interface AuditLogOptions {
   eventType: AuditEventType;
@@ -17,6 +19,7 @@ export interface AuditLogOptions {
   ipAddress?: string;
   sessionId?: string;
   success?: boolean;
+  use?: UseMark;
 }
 
 /**
@@ -29,6 +32,7 @@ export interface AuditLogOptions {
  */
 export class AuditLogger {
   private readonly chainKey: Uint8Array;
+  private isSealed = false;
 
   constructor(
     private readonly store: SqliteStore,
@@ -37,7 +41,17 @@ export class AuditLogger {
     this.chainKey = deriveAuditChainKey(auditKey);
   }
 
+  get sealed(): boolean {
+    return this.isSealed;
+  }
+
+  seal(): void {
+    this.isSealed = true;
+    wipeBuffer(this.chainKey);
+  }
+
   log(options: AuditLogOptions): number {
+    if (this.isSealed) throw VaultError.vaultLocked();
     const {
       eventType,
       secretId,
@@ -83,10 +97,12 @@ export class AuditLogger {
 
     // SELECT-last + compute + INSERT in one transaction so concurrent writers
     // serialize on SQLite's lock and the chain stays linear.
-    return this.store.transaction(() => {
+    const id = this.store.transaction(() => {
       const prev = this.store.getLastAuditRow()?.row_hmac ?? AUDIT_CHAIN_GENESIS_BYTES;
       const rowHmac = computeAuditRowHmac(this.chainKey, eventRow, prev);
       return this.store.insertAuditEvent(eventRow, rowHmac);
     });
+    if (eventType === AuditEventType.SECRET_USE && options.use) options.use.recorded = true;
+    return id;
   }
 }

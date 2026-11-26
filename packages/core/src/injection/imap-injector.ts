@@ -183,12 +183,13 @@ export class ImapInjector {
     policy: InjectionPolicy,
     connection: ImapTlsConfig | undefined,
     oauth: ImapOAuth | undefined,
+    signal?: AbortSignal,
   ): Promise<ImapExecution> {
     // Redaction material captured up front so it is available on every throw
     // path (mirrors the SMTP injector: origin-only, credential stripped).
     const material = redactionMaterial(secretValue, oauth);
     try {
-      return await this.execute(action, secretValue, policy, connection, oauth, material);
+      return await this.execute(action, secretValue, policy, connection, oauth, material, signal);
     } catch (err) {
       throw redactThrown(err, material);
     }
@@ -201,6 +202,7 @@ export class ImapInjector {
     connection: ImapTlsConfig | undefined,
     oauth: ImapOAuth | undefined,
     material: string[],
+    signal: AbortSignal | undefined,
   ): Promise<ImapExecution> {
     const { host, port } = resolveHostPort(action);
     const kind = action.operation.kind;
@@ -221,6 +223,7 @@ export class ImapInjector {
     //    address so the socket cannot be re-resolved (TLS identity stays
     //    bound to the logical host — mirrors the database/SMTP injectors).
     const validated = await validateHostPort(host, port);
+    if (signal?.aborted) throw VaultError.vaultLocked();
     const pinnedAddress = validated.resolvedAddress;
 
     // 4. Auth arm (credential injected here only).

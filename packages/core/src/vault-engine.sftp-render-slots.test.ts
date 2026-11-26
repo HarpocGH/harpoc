@@ -479,6 +479,26 @@ describeSsh("a slot's secret and policy (4.4)", () => {
     ]);
   });
 
+  it("a slot whose mark transaction fails before its row gets the slot's row", async () => {
+    const id = await plainX();
+    stored(id, approved);
+    const live = internals().store;
+    live.claimBootstrapMark(id, "lost", 1_700_000_000_000);
+    const read = live.getSecret.bind(live);
+    vi.spyOn(live, "getSecret").mockImplementation((secretId) => {
+      if (secretId === id && live.db.inTransaction) {
+        throw VaultError.vaultCorrupted("a secret row does not read");
+      }
+      return read(secretId);
+    });
+
+    await expectSlotRefused(ALICE, X, render("x"));
+
+    expect(useRows()).toStrictEqual([
+      { secret: id, success: false, detail: { ...JX, error: ErrorCode.VAULT_CORRUPTED, ...REST } },
+    ]);
+  });
+
   it("the key's own handle, met first as a secret with entries of its own", async () => {
     const self: RenderEntry = { ...ENTRY, name: "self", template: "K={{secret://deploy-key}}\n" };
     await engine.setInjectionPolicy(KEY, keyPolicy([ENTRY, self]));
@@ -658,6 +678,31 @@ describeSsh("a raw throw inside a slot's judgement", () => {
       expect(terminate).not.toHaveBeenCalled();
     },
   );
+
+  it("a raw throw of the mark's terminate after its row leaves the slot that one row", async () => {
+    await seedLiveStdioEntry(engine, ids[BOT] as string);
+    internals().store.claimBootstrapMark(ids[BOT] as string, "lost", 1_700_000_000_000);
+    const terminate = vi
+      .spyOn(registryOf(engine), "terminate")
+      .mockRejectedValue(new Error("the registry failed"));
+
+    await expectSlotRefused(ALICE, BOT);
+
+    expect(useRows()).toStrictEqual([
+      {
+        secret: ids[BOT],
+        success: false,
+        detail: {
+          ...J,
+          error: ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
+          secret_ended: true,
+          mark_at: 1_700_000_000_000,
+          ...REST,
+        },
+      },
+    ]);
+    expect(terminate).toHaveBeenCalledWith(ids[BOT], "secret_revoked", expect.anything());
+  });
 });
 
 describeSsh("a slot's approval (4.5)", () => {

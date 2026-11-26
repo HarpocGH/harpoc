@@ -289,7 +289,7 @@ export class CertManager {
     const caller = options?.caller;
     const handle = options?.handle;
 
-    const stored = this.engine.getAcmeAccount(secretId, caller, handle);
+    const stored = await this.engine.getAcmeAccount(secretId, caller, handle);
     if (stored === null) {
       throw VaultError.certAcmeFailed("no ACME account for this certificate");
     }

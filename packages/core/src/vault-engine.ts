@@ -136,7 +136,7 @@ import {
 import { AgentRegistry } from "./access/agent-registry.js";
 import { PolicyEngine } from "./access/policy-engine.js";
 import type { GrantPolicyInput, PolicyPrincipal } from "./access/policy-engine.js";
-import type { AuditAttribution } from "./audit/attribution.js";
+import type { AuditAttribution, UseMark } from "./audit/attribution.js";
 import {
   attributionFromCaller,
   callerColumns,
@@ -163,7 +163,11 @@ import {
 } from "./crypto/key-hierarchy.js";
 import { assertNever } from "./assert-never.js";
 import { generateRandomBytes, generateUUIDv7, wipeBuffer } from "./crypto/random.js";
-import { actionShapeRefusal, imapOperationRefusal } from "./injection/action-shape.js";
+import {
+  actionShapeRefusal,
+  imapOperationRefusal,
+  snapshotAction,
+} from "./injection/action-shape.js";
 import { actionTimeoutRefusal } from "./injection/action-timeout.js";
 import {
   allowlistNamesAuthority,
@@ -642,7 +646,14 @@ const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
  * query, fragment or userinfo rides in.
  */
 function proxyTargetUrl(target: ProxyTarget): URL | null {
-  if (!HTTP_METHOD_TOKEN.test(target.method) || !target.path.startsWith("/")) return null;
+  if (
+    typeof target.method !== "string" ||
+    typeof target.path !== "string" ||
+    !HTTP_METHOD_TOKEN.test(target.method) ||
+    !target.path.startsWith("/")
+  ) {
+    return null;
+  }
   let url: URL;
   try {
     url = new URL(target.path, target.origin);
@@ -760,6 +771,17 @@ type BootstrapClaim =
   | { kind: "taken" }
   | { kind: "unusable"; current: Secret | undefined }
   | { kind: "refused"; error: VaultError; endsChild: boolean };
+
+/** A use from its value block on: what its row at a wipe records, and whether a row of it is written. */
+interface OpenUse extends UseMark {
+  secretId: string;
+  detail: Record<string, unknown>;
+  /** The call's attribution, holding `use: this`. */
+  attribution: AuditAttribution;
+  logger: AuditLogger;
+  abort: AbortController;
+  sealed: boolean;
+}
 
 const SPAWN_AUDIT_KEYS = [
   "exit_code",
@@ -1046,6 +1068,10 @@ export class VaultEngine {
   private readonly renderHolds = new Set<string>();
   /** The registered renders, each its own seal — drained by `wipeKeys` before a key goes. */
   private readonly openRenders = new Set<() => void>();
+  /** The uses past their registration, each removed by its own call — sealed by `wipeKeys` before a key goes. */
+  private readonly openUses = new Set<OpenUse>();
+  /** The running bootstraps' spawns, each removed by its own call — aborted by `wipeKeys`. */
+  private readonly openBootstraps = new Set<AbortController>();
 
   constructor(private readonly options: VaultEngineOptions) {
     this.sessionManager = new SessionManager(options.sessionPath, {
@@ -1741,6 +1767,7 @@ export class VaultEngine {
         (secretId) => {
           revokedId = secretId;
           this.auditRevocation(s, secretId, handle, caller);
+          s.store.clearBootstrapMark(secretId);
         },
         secret,
       );
@@ -1787,6 +1814,20 @@ export class VaultEngine {
     );
   }
 
+  /** The child's end after a refusal whose row is written: a raw failure of it adds no second row. */
+  private async terminateAfterRow(
+    s: UnlockedState,
+    secretId: string,
+    reason: string,
+    attribution: AuditAttribution | undefined,
+  ): Promise<void> {
+    try {
+      await s.mcpRegistry.terminate(secretId, reason, attribution);
+    } catch (err) {
+      throw toUseError(err);
+    }
+  }
+
   /**
    * Use a secret via a context-specific action (use_secret). Dispatches to the
    * request-mediated (HTTP), process-mediated (process) or MCP proxy injector.
@@ -1809,10 +1850,11 @@ export class VaultEngine {
 
   private async useSecretInner(
     handle: string,
-    action: UseSecretAction,
+    sent: UseSecretAction,
     caller?: CallerContext,
   ): Promise<UseSecretResponse> {
     const s = this.assertUnlocked();
+    const action = snapshotAction(sent) as UseSecretAction;
     const shapeRefusal = actionShapeRefusal(action);
     if (shapeRefusal !== undefined) throw VaultError.invalidInput(shapeRefusal);
     const { type } = action;
@@ -1828,6 +1870,7 @@ export class VaultEngine {
     let policy: InjectionPolicy;
     let imapConnection: ConnectionConfig | undefined;
     let plan: BootstrapPlan | undefined;
+    let use: OpenUse | undefined;
     let value: Uint8Array;
     try {
       try {
@@ -1841,8 +1884,11 @@ export class VaultEngine {
           undefined,
           caller,
         );
-        throw toUseError(await this.concealHandleError(s, err, handle, caller).catch(toUseError));
+        const concealed = await this.concealHandleError(s, err, handle, caller, toUseError);
+        this.assertCallKeys(s);
+        throw concealed;
       }
+      this.assertCallKeys(s);
 
       // Per-secret policy enforcement (thesis §4.6) — before the injection
       // policy is read, any OAuth refresh runs, or the value is decrypted. A
@@ -1860,11 +1906,12 @@ export class VaultEngine {
           handle,
         );
       } catch (err) {
-        await s.mcpRegistry.terminate(
-          secret.id,
-          "use_denied",
-          attributionFromCaller(caller, this.sessionId),
-        );
+        const by = attributionFromCaller(caller, this.sessionId);
+        if (err instanceof VaultError) {
+          await this.terminateAfterRow(s, secret.id, "use_denied", by);
+        } else {
+          await s.mcpRegistry.terminate(secret.id, "use_denied", by);
+        }
         throw err;
       }
 
@@ -1903,7 +1950,7 @@ export class VaultEngine {
           secret.id,
           caller,
         );
-        await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+        await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
         throw toUseError(err);
       }
 
@@ -1917,7 +1964,11 @@ export class VaultEngine {
             attribution,
           );
         } catch (err) {
-          await s.mcpRegistry.terminate(secret.id, "render_enabled", attribution);
+          if (err instanceof VaultError) {
+            await this.terminateAfterRow(s, secret.id, "render_enabled", attribution);
+          } else {
+            await s.mcpRegistry.terminate(secret.id, "render_enabled", attribution);
+          }
           throw err;
         }
       }
@@ -1932,10 +1983,14 @@ export class VaultEngine {
             attribution,
           );
         } catch (err) {
-          await s.mcpRegistry.terminate(secret.id, "ssh_bootstrap_enabled", attribution);
+          if (err instanceof VaultError) {
+            await this.terminateAfterRow(s, secret.id, "ssh_bootstrap_enabled", attribution);
+          } else {
+            await s.mcpRegistry.terminate(secret.id, "ssh_bootstrap_enabled", attribution);
+          }
           throw err;
         }
-        await this.refuseOnBootstrapMark(
+        const refusal = await this.refuseOnBootstrapMark(
           s,
           secret,
           handle,
@@ -1943,6 +1998,8 @@ export class VaultEngine {
           caller,
           attribution,
         );
+        this.assertCallKeys(s);
+        if (refusal !== undefined) throw refusal;
       } else {
         plan = await this.judgeBootstrapAction(
           s,
@@ -1953,6 +2010,7 @@ export class VaultEngine {
           caller,
           attribution,
         );
+        this.assertCallKeys(s);
       }
 
       // Docker × isolation (design §5.4) — fail closed BEFORE the dispatch arm,
@@ -2001,26 +2059,19 @@ export class VaultEngine {
         return await this.runSftpRender(s, handle, render, secret, policy, caller, attribution);
       }
 
-      let resolvedId: string | undefined;
+      if (plan === undefined) {
+        use = this.openUse(s, secret.id, { handle, context: type }, attribution);
+        attribution = use.attribution;
+      }
       try {
-        if (plan !== undefined) {
-          value = await s.secretManager.getSecretValue(handle, (id) => (resolvedId = id));
-          if (resolvedId !== secret.id) {
-            wipeBuffer(value);
-            throw VaultError.secretRevoked(handle);
-          }
-        } else if (secret.type === SecretType.OAUTH_TOKEN) {
-          const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
+        if (plan === undefined && secret.type === SecretType.OAUTH_TOKEN) {
+          const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller, s);
           value = new Uint8Array(Buffer.from(accessToken, "utf8"));
         } else {
-          value = await s.secretManager.getSecretValue(handle);
+          value = await this.decryptJudged(s, handle, secret.id);
         }
-      } catch (thrown) {
+      } catch (err) {
         if (plan !== undefined && !this.holdsCallKeys(s)) throw VaultError.vaultLocked();
-        const err =
-          plan !== undefined && resolvedId !== undefined && resolvedId !== secret.id
-            ? VaultError.secretRevoked(handle)
-            : thrown;
         this.auditDenied(
           s,
           AuditEventType.SECRET_USE,
@@ -2028,15 +2079,21 @@ export class VaultEngine {
           plan !== undefined ? plan.detail : { handle, context: action.type },
           secret.id,
           caller,
+          use,
         );
         // Backstop for the out-of-process case (L2): a CLI `secret revoke`, or a
         // lazy expiry detected in another process, cannot reach this process's
         // registry. The credential is no longer usable here, so any downstream
         // child still holding it is torn down before the refusal returns.
-        await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
+        await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
         throw toUseError(err);
       }
+      if (use?.sealed) {
+        wipeBuffer(value);
+        throw VaultError.vaultLocked();
+      }
     } catch (err) {
+      if (use !== undefined) this.openUses.delete(use);
       if (!(err instanceof VaultError)) {
         try {
           this.auditDenied(
@@ -2081,6 +2138,7 @@ export class VaultEngine {
             policy,
             secret.id,
             attribution,
+            use?.abort.signal,
           );
 
         case "mcp": {
@@ -2103,6 +2161,7 @@ export class VaultEngine {
             config,
             secret.id,
             attribution,
+            use?.abort.signal,
           );
         }
 
@@ -2121,6 +2180,7 @@ export class VaultEngine {
               },
               success: false,
               sessionId: this.sessionId ?? undefined,
+              use,
             });
             throw VaultError.urlNotAllowed(action.url);
           }
@@ -2144,6 +2204,7 @@ export class VaultEngine {
               },
               success: false,
               sessionId: this.sessionId ?? undefined,
+              use,
             });
             throw VaultError.responseModeNotAllowed(action.response_mode, policyMode);
           }
@@ -2167,6 +2228,7 @@ export class VaultEngine {
             action.follow_redirects,
             secret.id,
             attribution,
+            use?.abort.signal,
           );
 
           return response;
@@ -2181,6 +2243,7 @@ export class VaultEngine {
             config,
             secret.id,
             attribution,
+            use?.abort.signal,
           );
         }
 
@@ -2193,6 +2256,7 @@ export class VaultEngine {
             config,
             secret.id,
             attribution,
+            use?.abort.signal,
           );
         }
 
@@ -2209,6 +2273,7 @@ export class VaultEngine {
               vaultFiles: [this.options.dbPath, this.options.sessionPath],
               ...(this.daemonPaths !== undefined ? { daemon: this.daemonPaths } : {}),
             },
+            use?.abort.signal,
           );
         }
 
@@ -2232,7 +2297,14 @@ export class VaultEngine {
 
           let execution: SmtpExecution;
           try {
-            execution = await s.smtpInjector.run(action, secretValue, policy, mail, oauth);
+            execution = await s.smtpInjector.run(
+              action,
+              secretValue,
+              policy,
+              mail,
+              oauth,
+              use?.abort.signal,
+            );
           } catch (err) {
             const mapped = mapSmtpThrow(err);
             this.auditUse(
@@ -2289,7 +2361,14 @@ export class VaultEngine {
 
           let execution: ImapExecution;
           try {
-            execution = await s.imapInjector.run(action, imapSecretValue, policy, mail, imapOAuth);
+            execution = await s.imapInjector.run(
+              action,
+              imapSecretValue,
+              policy,
+              mail,
+              imapOAuth,
+              use?.abort.signal,
+            );
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(
@@ -2327,7 +2406,7 @@ export class VaultEngine {
 
           let execution: WebsocketExecution;
           try {
-            execution = await s.websocketExecutor(action, value, policy);
+            execution = await s.websocketExecutor(action, value, policy, use?.abort.signal);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(
@@ -2378,6 +2457,7 @@ export class VaultEngine {
             execution = await s.sftpExecutor(action, value, policy, config, {
               vaultFiles: [this.options.dbPath, this.options.sessionPath],
               ...(this.daemonPaths !== undefined ? { daemon: this.daemonPaths } : {}),
+              signal: use?.abort.signal,
             });
           } catch (err) {
             const mapped = toVaultError(err);
@@ -2428,7 +2508,7 @@ export class VaultEngine {
 
           let execution: DockerExecution;
           try {
-            execution = await s.dockerExecutor(action, value, policy);
+            execution = await s.dockerExecutor(action, value, policy, use?.abort.signal);
           } catch (err) {
             const mapped = toVaultError(err);
             this.auditUse(s, secret.id, { ...auditDetail, error: mapped.code }, false, attribution);
@@ -2492,6 +2572,32 @@ export class VaultEngine {
       throw redactErrorMessage(thrown, [Buffer.from(value).toString("utf8")]);
     } finally {
       wipeBuffer(value);
+      if (use !== undefined) this.openUses.delete(use);
+    }
+  }
+
+  /**
+   * The value of the secret a call judged: a handle that has come to name
+   * another secret meanwhile is `SECRET_REVOKED`, that secret's value wiped.
+   */
+  private async decryptJudged(
+    s: UnlockedState,
+    handle: string,
+    secretId: string,
+  ): Promise<Uint8Array> {
+    let resolvedId: string | undefined;
+    try {
+      const value = await s.secretManager.getSecretValue(handle, (id) => (resolvedId = id));
+      if (resolvedId !== secretId) {
+        wipeBuffer(value);
+        throw VaultError.secretRevoked(handle);
+      }
+      return value;
+    } catch (err) {
+      if (resolvedId !== undefined && resolvedId !== secretId) {
+        throw VaultError.secretRevoked(handle);
+      }
+      throw err;
     }
   }
 
@@ -2528,118 +2634,161 @@ export class VaultEngine {
     if (!caller) {
       throw VaultError.invalidInput("resolveForProxy needs the token caller of the request");
     }
-    const url = proxyTargetUrl(target);
+    const { method, origin, path, plainOrigin } =
+      (target as ProxyTarget | null) ?? ({} as ProxyTarget);
+    const read: ProxyTarget = { method, origin, path, plainOrigin };
+    const url = proxyTargetUrl(read);
     if (url === null) {
       throw VaultError.invalidInput(
-        "Invalid proxy target: an http(s) origin and a path without query or fragment",
+        "Invalid proxy target: an https origin and a path without query or fragment",
       );
     }
     const s = this.assertUnlocked();
-    let request: Record<string, unknown> = {
-      context: "proxy",
-      method: target.method,
-      origin: target.origin,
-      path: target.path,
-    };
-    let denied = { handle, ...request };
-
-    let secret: Secret;
+    let request: Record<string, unknown> = { context: "proxy", method, origin, path };
+    let secret: Secret | undefined;
     try {
-      secret = await s.secretManager.resolveHandle(handle);
-    } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, undefined, caller);
-      throw await this.concealHandleError(s, err, handle, caller);
-    }
+      let denied = { handle, ...request };
+      try {
+        secret = await s.secretManager.resolveHandle(handle);
+      } catch (err) {
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, undefined, caller);
+        const concealed = await this.concealHandleError(s, err, handle, caller);
+        this.assertCallKeys(s);
+        throw concealed;
+      }
+      this.assertCallKeys(s);
 
-    const attribution = attributionFromCaller(caller, this.sessionId);
-    try {
-      this.checkResolvedCallerPolicy(
+      let attribution = attributionFromCaller(caller, this.sessionId);
+      try {
+        this.checkResolvedCallerPolicy(
+          s,
+          secret.id,
+          caller,
+          "use",
+          AuditEventType.SECRET_USE,
+          denied,
+          handle,
+        );
+      } catch (err) {
+        if (err instanceof VaultError) {
+          await this.terminateAfterRow(s, secret.id, "use_denied", attribution);
+        } else {
+          await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
+        }
+        throw err;
+      }
+
+      const policy = this.loadInjectionPolicy(s, secret.id);
+      try {
+        if (isVaultManagedCertificate(s.store, secret)) {
+          throw VaultError.certValueUnsupported(handle);
+        }
+        s.secretManager.assertUsable(secret, handle, {
+          pending:
+            secret.type === SecretType.OAUTH_TOKEN
+              ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
+              : undefined,
+        });
+      } catch (err) {
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+        await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
+        throw toVaultError(err);
+      }
+
+      this.refuseRenderOnly(s, secret.id, policy, request, attribution);
+      this.refuseBootstrapOnly(s, secret.id, policy, request, attribution);
+      const refusal = await this.refuseOnBootstrapMark(
         s,
-        secret.id,
-        caller,
-        "use",
-        AuditEventType.SECRET_USE,
-        denied,
+        secret,
         handle,
-      );
-    } catch (err) {
-      await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
-      throw err;
-    }
-
-    const policy = this.loadInjectionPolicy(s, secret.id);
-    try {
-      if (isVaultManagedCertificate(s.store, secret)) {
-        throw VaultError.certValueUnsupported(handle);
-      }
-      s.secretManager.assertUsable(secret, handle, {
-        pending:
-          secret.type === SecretType.OAUTH_TOKEN
-            ? () => VaultError.oauthNotConfigured("OAuth flow not completed")
-            : undefined,
-      });
-    } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
-      throw err;
-    }
-
-    this.refuseRenderOnly(s, secret.id, policy, request, attribution);
-    this.refuseBootstrapOnly(s, secret.id, policy, request, attribution);
-    await this.refuseOnBootstrapMark(s, secret, handle, request, caller, attribution);
-    if (!policy.proxy) {
-      this.auditUse(
-        s,
-        secret.id,
-        { ...request, error: ErrorCode.PROXY_PLACEHOLDER_DENIED },
-        false,
+        request,
+        caller,
         attribution,
       );
-      throw VaultError.proxyPlaceholderDenied(target.origin);
-    }
-    const plainUrl = plainTargetUrl(target);
-    const plainHttp =
-      plainUrl !== null &&
-      !allowlistNamesAuthority(url, policy.url_allowlist) &&
-      matchesPlainUpstream(plainUrl, policy.url_allowlist) &&
-      this.showsNoHttpCa(s, secret.id);
-    if (plainHttp) {
-      request = { ...request, origin: plainUrl.origin, plain_http: true };
-      denied = { handle, ...request };
-    } else if (!matchesUrlAllowlist(url.href, policy.url_allowlist)) {
-      this.auditUse(
-        s,
-        secret.id,
-        { ...request, error: ErrorCode.URL_NOT_ALLOWED },
-        false,
-        attribution,
-      );
-      throw VaultError.urlNotAllowed(target.origin);
-    }
+      this.assertCallKeys(s);
+      if (refusal !== undefined) throw refusal;
+      if (!policy.proxy) {
+        this.auditUse(
+          s,
+          secret.id,
+          { ...request, error: ErrorCode.PROXY_PLACEHOLDER_DENIED },
+          false,
+          attribution,
+        );
+        throw VaultError.proxyPlaceholderDenied(origin);
+      }
+      const plainUrl = plainTargetUrl(read);
+      const plainHttp =
+        plainUrl !== null &&
+        !allowlistNamesAuthority(url, policy.url_allowlist) &&
+        matchesPlainUpstream(plainUrl, policy.url_allowlist) &&
+        this.showsNoHttpCa(s, secret.id);
+      if (plainHttp) {
+        request = { ...request, origin: plainUrl.origin, plain_http: true };
+        denied = { handle, ...request };
+      } else if (!matchesUrlAllowlist(url.href, policy.url_allowlist)) {
+        this.auditUse(
+          s,
+          secret.id,
+          { ...request, error: ErrorCode.URL_NOT_ALLOWED },
+          false,
+          attribution,
+        );
+        throw VaultError.urlNotAllowed(origin);
+      }
 
-    const caPem = plainHttp ? undefined : this.loadConnectionConfig(s, secret.id)?.http?.ca_pem;
+      const caPem = plainHttp ? undefined : this.loadConnectionConfig(s, secret.id)?.http?.ca_pem;
 
-    let value: Uint8Array;
-    try {
-      if (secret.type === SecretType.OAUTH_TOKEN) {
-        const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller);
-        value = new Uint8Array(Buffer.from(accessToken, "utf8"));
-      } else {
-        value = await s.secretManager.getSecretValue(handle);
+      const use = this.openUse(s, secret.id, { ...request }, attribution);
+      attribution = use.attribution;
+      try {
+        let value: Uint8Array;
+        try {
+          if (secret.type === SecretType.OAUTH_TOKEN) {
+            const accessToken = await this.getOAuthAccessToken(secret.id, handle, caller, s);
+            value = new Uint8Array(Buffer.from(accessToken, "utf8"));
+          } else {
+            value = await this.decryptJudged(s, handle, secret.id);
+          }
+        } catch (err) {
+          this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller, use);
+          await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
+          throw toVaultError(err);
+        }
+        if (use.sealed) {
+          wipeBuffer(value);
+          throw VaultError.vaultLocked();
+        }
+
+        try {
+          // A seal during the awaits above has drained the open leases already: no
+          // lease opens on a sealed engine.
+          this.assertUnlocked();
+          this.assertCallKeys(s);
+          return this.openProxyLease(
+            secret.id,
+            value.slice(),
+            caPem,
+            request,
+            attribution,
+            plainHttp,
+          );
+        } finally {
+          wipeBuffer(value);
+        }
+      } finally {
+        this.openUses.delete(use);
       }
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
-      throw err;
-    }
-
-    try {
-      // A seal during the awaits above has drained the open leases already: no
-      // lease opens on a sealed engine.
-      this.assertUnlocked();
-      return this.openProxyLease(secret.id, value.slice(), caPem, request, attribution, plainHttp);
-    } finally {
-      wipeBuffer(value);
+      if (err instanceof VaultError) throw err;
+      try {
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, request, secret?.id, caller);
+      } catch (auditErr) {
+        throw auditErr instanceof VaultError
+          ? auditErr
+          : VaultError.internalError("the audit write failed unexpectedly");
+      }
+      throw VaultError.internalError("the proxy resolution failed unexpectedly");
     }
   }
 
@@ -2796,121 +2945,172 @@ export class VaultEngine {
       throw VaultError.invalidInput("signForAgentSocket needs an agent socket's caller");
     }
     // Only the signature slides the session (below); a refusal keeps none alive.
-    let s = this.assertUnlockedWithoutSlide();
+    const s = this.assertUnlockedWithoutSlide();
     this.agentSocketLimiter.checkSecret(`sign:${caller.principal_id}`, true);
-    const keyBlob = request.keyBlob;
-    const unresolved = { context: "ssh_agent", key_fingerprint: sshKeyFingerprint(keyBlob) };
-
-    const agent = s.agentRegistry.findByName(caller.principal_id);
-    if (agent?.status !== AgentStatus.ACTIVE) {
-      const err = agent
-        ? VaultError.agentInactive(agent.name)
-        : VaultError.agentNotFound(caller.principal_id);
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
-      throw err;
-    }
-
-    const servable = await this.agentSocketKeys(s, caller);
-    s = this.assertUnlockedWithoutSlide();
-    const served = servable.find((key) => key.publicKeyBlob.equals(keyBlob));
-    const secret = served?.secret ?? this.agentSocketDerivedSecret(s, keyBlob);
-    if (secret === undefined) {
-      const err = VaultError.secretNotFound();
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
-      throw err;
-    }
-    const handle = served?.handle ?? this.handleOf(s, secret);
-    const detail = { context: "ssh_agent", key_type: new SshReader(keyBlob).readCString() };
-    const denied = { handle, ...detail };
-    const attribution = attributionFromCaller(caller, this.sessionId);
-
-    try {
-      this.checkResolvedCallerPolicy(
-        s,
-        secret.id,
-        caller,
-        "use",
-        AuditEventType.SECRET_USE,
-        denied,
-        handle,
-      );
-    } catch (err) {
-      await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
-      throw err;
-    }
-    // After the grant, so a consumer without one cannot drain the key's bucket;
-    // refused like the other interfaces' limits, before any row.
-    this.agentSocketLimiter.checkSecret(secret.id, true);
-    try {
-      s.secretManager.assertUsable(secret, handle);
-    } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
-      throw err;
-    }
-
-    const refuse = (err: VaultError, extra: Record<string, unknown> = {}): VaultError => {
-      this.auditUse(s, secret.id, { ...detail, ...extra, error: err.code }, false, attribution);
-      return err;
+    let failed: { detail: Record<string, unknown>; secretId?: string } = {
+      detail: { context: "ssh_agent" },
     };
-    const unbound = (reason: SshAgentUnboundReason): VaultError =>
-      refuse(VaultError.sshAgentUnbound(reason), { reason });
+    try {
+      const { flags, binding, forwarding } = request;
+      const keyBlob = Buffer.from(request.keyBlob);
+      const data = Buffer.from(request.data);
+      const unresolved = { context: "ssh_agent", key_fingerprint: sshKeyFingerprint(keyBlob) };
+      failed = { detail: unresolved };
 
-    const policy = this.loadInjectionPolicy(s, secret.id);
-    if (policy.render.entries.length > 0) throw refuse(VaultError.renderOnlyKey());
-    if (policy.ssh_bootstrap !== null) {
-      throw refuse(VaultError.sshBootstrapNotAllowed("bootstrap_only"));
-    }
-    await this.refuseOnBootstrapMark(s, secret, handle, detail, caller, attribution);
-    if (!policy.ssh_agent_socket) {
-      throw refuse(
-        VaultError.accessDenied(
-          "the secret is not enabled for the agent socket (harpoc secret allow --ssh-agent-socket)",
-        ),
-        { required_policy: "ssh_agent_socket" },
+      const agent = s.agentRegistry.findByName(caller.principal_id);
+      if (agent?.status !== AgentStatus.ACTIVE) {
+        const err = agent
+          ? VaultError.agentInactive(agent.name)
+          : VaultError.agentNotFound(caller.principal_id);
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
+        throw err;
+      }
+
+      let servable: AgentSocketKey[];
+      try {
+        servable = await this.agentSocketKeys(s, caller);
+      } catch (err) {
+        this.assertCallKeys(s);
+        throw err;
+      }
+      this.assertUnlockedWithoutSlide();
+      this.assertCallKeys(s);
+      const served = servable.find((key) => key.publicKeyBlob.equals(keyBlob));
+      const secret = served?.secret ?? this.agentSocketDerivedSecret(s, keyBlob);
+      if (secret === undefined) {
+        const err = VaultError.secretNotFound();
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, unresolved, undefined, caller);
+        throw err;
+      }
+      const handle = served?.handle ?? this.handleOf(s, secret);
+      const detail = { context: "ssh_agent", key_type: new SshReader(keyBlob).readCString() };
+      failed = { detail, secretId: secret.id };
+      const denied = { handle, ...detail };
+      let attribution = attributionFromCaller(caller, this.sessionId);
+
+      try {
+        this.checkResolvedCallerPolicy(
+          s,
+          secret.id,
+          caller,
+          "use",
+          AuditEventType.SECRET_USE,
+          denied,
+          handle,
+        );
+      } catch (err) {
+        if (err instanceof VaultError) {
+          await this.terminateAfterRow(s, secret.id, "use_denied", attribution);
+        } else {
+          await s.mcpRegistry.terminate(secret.id, "use_denied", attribution);
+        }
+        throw err;
+      }
+      // After the grant, so a consumer without one cannot drain the key's bucket;
+      // refused like the other interfaces' limits, before any row.
+      this.agentSocketLimiter.checkSecret(secret.id, true);
+      try {
+        s.secretManager.assertUsable(secret, handle);
+      } catch (err) {
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
+        await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
+        throw toVaultError(err);
+      }
+
+      const refuse = (err: VaultError, extra: Record<string, unknown> = {}): VaultError => {
+        this.auditUse(s, secret.id, { ...detail, ...extra, error: err.code }, false, attribution);
+        return err;
+      };
+      const unbound = (reason: SshAgentUnboundReason): VaultError =>
+        refuse(VaultError.sshAgentUnbound(reason), { reason });
+
+      const policy = this.loadInjectionPolicy(s, secret.id);
+      if (policy.render.entries.length > 0) throw refuse(VaultError.renderOnlyKey());
+      if (policy.ssh_bootstrap !== null) {
+        throw refuse(VaultError.sshBootstrapNotAllowed("bootstrap_only"));
+      }
+      const refusal = await this.refuseOnBootstrapMark(
+        s,
+        secret,
+        handle,
+        detail,
+        caller,
+        attribution,
       );
-    }
-    if (request.forwarding) throw unbound("forwarding");
-    const binding = request.binding;
-    if (binding === null) throw unbound("unbound");
-    // The engine's own parse of the bytes it signs (RC-B3-9).
-    const userauth = parseUserauthRequest(request.data);
-    if (userauth === null) throw unbound("not_userauth");
-    if (
-      !userauth.sessionId.equals(binding.sessionId) ||
-      !userauth.publicKeyBlob.equals(keyBlob) ||
-      (userauth.hostKeyBlob !== undefined && !userauth.hostKeyBlob.equals(binding.hostKeyBlob))
-    ) {
-      throw unbound("session_mismatch");
-    }
-    const bound = this.agentSocketHost(s, secret.id, policy, binding.hostKeyBlob);
-    if (bound === null) throw unbound("host_unpinned");
-    const host = { host: bound.host, ...(bound.port !== undefined ? { port: bound.port } : {}) };
-    if (!bound.allowed) throw refuse(VaultError.hostNotAllowed(bound.host), host);
+      this.assertCallKeys(s);
+      if (refusal !== undefined) throw refusal;
+      if (!policy.ssh_agent_socket) {
+        throw refuse(
+          VaultError.accessDenied(
+            "the secret is not enabled for the agent socket (harpoc secret allow --ssh-agent-socket)",
+          ),
+          { required_policy: "ssh_agent_socket" },
+        );
+      }
+      if (forwarding) throw unbound("forwarding");
+      if (binding === null) throw unbound("unbound");
+      const { sessionId: boundSessionId, hostKeyBlob: boundHostKey } = binding;
+      // The engine's own parse of the bytes it signs (RC-B3-9).
+      const userauth = parseUserauthRequest(data);
+      if (userauth === null) throw unbound("not_userauth");
+      if (
+        !userauth.sessionId.equals(boundSessionId) ||
+        !userauth.publicKeyBlob.equals(keyBlob) ||
+        (userauth.hostKeyBlob !== undefined && !userauth.hostKeyBlob.equals(boundHostKey))
+      ) {
+        throw unbound("session_mismatch");
+      }
+      const bound = this.agentSocketHost(s, secret.id, policy, boundHostKey);
+      if (bound === null) throw unbound("host_unpinned");
+      const host = { host: bound.host, ...(bound.port !== undefined ? { port: bound.port } : {}) };
+      if (!bound.allowed) throw refuse(VaultError.hostNotAllowed(bound.host), host);
 
-    let value: Uint8Array;
-    try {
-      value = await s.secretManager.getSecretValue(handle);
+      const use = this.openUse(s, secret.id, detail, attribution);
+      attribution = use.attribution;
+      let signature: Buffer;
+      try {
+        let value: Uint8Array;
+        try {
+          value = await this.decryptJudged(s, handle, secret.id);
+        } catch (err) {
+          this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller, use);
+          throw toVaultError(err);
+        }
+        if (use.sealed) {
+          wipeBuffer(value);
+          throw VaultError.vaultLocked();
+        }
+        try {
+          // A seal during the decrypt: no signature leaves a sealed engine.
+          this.assertUnlockedWithoutSlide();
+          this.assertCallKeys(s);
+          const key = loadPrivateKey(Buffer.from(value).toString("utf8"));
+          if (!key.publicKeyBlob.equals(keyBlob)) throw VaultError.secretNotFound();
+          signature = key.sign(data, flags);
+        } catch (err) {
+          if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) throw err;
+          throw refuse(toVaultError(err), host);
+        } finally {
+          wipeBuffer(value);
+        }
+        this.auditUse(s, secret.id, { ...detail, ...host }, true, attribution);
+      } finally {
+        this.openUses.delete(use);
+      }
+      // The use slides the session, as useSecret's completion does.
+      this.touchSession();
+      return signature;
     } catch (err) {
-      this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, secret.id, caller);
-      throw err;
+      if (err instanceof VaultError) throw err;
+      try {
+        this.auditDenied(s, AuditEventType.SECRET_USE, err, failed.detail, failed.secretId, caller);
+      } catch (auditErr) {
+        throw auditErr instanceof VaultError
+          ? auditErr
+          : VaultError.internalError("the audit write failed unexpectedly");
+      }
+      throw VaultError.internalError("the signature failed unexpectedly");
     }
-    let signature: Buffer;
-    try {
-      // A seal during the decrypt: no signature leaves a sealed engine.
-      s = this.assertUnlockedWithoutSlide();
-      const key = loadPrivateKey(Buffer.from(value).toString("utf8"));
-      signature = key.sign(request.data, request.flags);
-    } catch (err) {
-      if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) throw err;
-      throw refuse(toVaultError(err), host);
-    } finally {
-      wipeBuffer(value);
-    }
-    this.auditUse(s, secret.id, { ...detail, ...host }, true, attribution);
-    // The use slides the session, as useSecret's completion does.
-    this.touchSession();
-    return signature;
   }
 
   /** The keys a consumer's socket may serve, sorted by handle — the identities before the binding's filter. */
@@ -3290,13 +3490,13 @@ export class VaultEngine {
     row: Record<string, unknown>,
     caller: CallerContext | undefined,
     attribution: AuditAttribution | undefined,
-  ): Promise<void> {
+  ): Promise<VaultError | undefined> {
     const mark = s.store.readBootstrapMark(secret.id);
-    if (mark === undefined) return;
+    if (mark === undefined) return undefined;
     if (this.bootstrapHolds.get(secret.id) === mark.claim) {
       const err = VaultError.sshBootstrapInFlight();
       this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
-      throw err;
+      return err;
     }
     const err = VaultError.sshBootstrapUnconfirmed();
     const met = s.store.transaction(() => {
@@ -3312,9 +3512,18 @@ export class VaultEngine {
       );
       return true;
     });
-    if (!met) return;
-    await this.endRevokedChild(s, secret.id, caller);
-    throw err;
+    if (!met) return undefined;
+    try {
+      await this.terminateAfterRow(
+        s,
+        secret.id,
+        "secret_revoked",
+        attributionFromCaller(caller, this.sessionId),
+      );
+    } catch (ended) {
+      return toUseError(ended);
+    }
+    return err;
   }
 
   /**
@@ -3362,7 +3571,16 @@ export class VaultEngine {
     if (installKey === undefined) throw refuse("key");
     if (sudoers && !block.sudoers) throw refuse("sudoers");
 
-    await this.refuseOnBootstrapMark(s, secret, handle, detail, caller, attribution);
+    const refusal = await this.refuseOnBootstrapMark(
+      s,
+      secret,
+      handle,
+      detail,
+      caller,
+      attribution,
+    );
+    this.assertCallKeys(s);
+    if (refusal !== undefined) throw refusal;
 
     let sshPath: string;
     try {
@@ -3447,12 +3665,21 @@ export class VaultEngine {
       }
       if (refusal instanceof VaultError) {
         this.auditUse(s, secret.id, { ...row, error: refusal.code }, false, attribution);
+        await this.terminateAfterRow(s, secret.id, "secret_unusable", attribution);
+      } else {
+        await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
       }
-      await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
       throw refusal;
     }
     if (claimed.kind === "refused") {
-      if (claimed.endsChild) await this.endRevokedChild(s, secret.id, caller);
+      if (claimed.endsChild) {
+        await this.terminateAfterRow(
+          s,
+          secret.id,
+          "secret_revoked",
+          attributionFromCaller(caller, this.sessionId),
+        );
+      }
       throw claimed.error;
     }
     this.bootstrapHolds.set(secret.id, claim);
@@ -3460,25 +3687,32 @@ export class VaultEngine {
     let outcome: BootstrapOutcome;
     let ends: boolean;
     try {
+      const abort = new AbortController();
+      this.openBootstraps.add(abort);
       try {
-        outcome = await s.sshBootstrap.run({
-          sshPath: plan.sshPath,
-          host: plan.block.host,
-          port: plan.block.port,
-          user: plan.block.user,
-          hostKeys: plan.hostKeys,
-          installKey: plan.installKey,
-          sudoers: plan.sudoers,
-          password: Buffer.from(value.buffer, value.byteOffset, value.byteLength),
-          policy,
-          budgetMs: SSH_BOOTSTRAP_TIMEOUT_MS,
-        });
+        outcome = await s.sshBootstrap.run(
+          {
+            sshPath: plan.sshPath,
+            host: plan.block.host,
+            port: plan.block.port,
+            user: plan.block.user,
+            hostKeys: plan.hostKeys,
+            installKey: plan.installKey,
+            sudoers: plan.sudoers,
+            password: Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+            policy,
+            budgetMs: SSH_BOOTSTRAP_TIMEOUT_MS,
+          },
+          abort.signal,
+        );
       } catch (err) {
         if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
         if (err instanceof VaultError) {
           this.auditUse(s, secret.id, { ...row, error: err.code }, false, attribution);
         }
         throw err;
+      } finally {
+        this.openBootstraps.delete(abort);
       }
       if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
       const read = outcome;
@@ -3502,7 +3736,14 @@ export class VaultEngine {
       if (this.bootstrapHolds.get(secret.id) === claim) this.bootstrapHolds.delete(secret.id);
     }
 
-    if (ends) await this.endRevokedChild(s, secret.id, caller);
+    if (ends) {
+      await this.terminateAfterRow(
+        s,
+        secret.id,
+        "secret_revoked",
+        attributionFromCaller(caller, this.sessionId),
+      );
+    }
     switch (outcome.kind) {
       case "done":
         return { type: "ssh_bootstrap", key: outcome.key, sudoers: outcome.sudoers };
@@ -3660,11 +3901,17 @@ export class VaultEngine {
         await s.mcpRegistry.terminate(slot.id, "ssh_bootstrap_enabled", attribution);
         throw err;
       }
-      try {
-        await this.refuseOnBootstrapMark(s, slot, slotHandle, row, caller, attribution);
-      } catch (err) {
-        if (err instanceof VaultError) recorded = true;
-        throw err;
+      const refusal = await this.refuseOnBootstrapMark(
+        s,
+        slot,
+        slotHandle,
+        row,
+        caller,
+        attribution,
+      );
+      if (refusal !== undefined) {
+        recorded = true;
+        throw refusal;
       }
       if (!this.holdsCallKeys(s)) throw VaultError.vaultLocked();
       if (slotPolicy.render.entries.length > 0) {
@@ -4011,6 +4258,52 @@ export class VaultEngine {
   /** Whether the engine still holds the keys a call began under: unlocked, and its live audit logger the call's. */
   private holdsCallKeys(s: UnlockedState): boolean {
     return this.state === VaultState.UNLOCKED && this.auditLogger === s.auditLogger;
+  }
+
+  /** The seal of the call's own logger, not the engine's state: in `lock()`'s window the keys still live. */
+  private assertCallKeys(s: UnlockedState): void {
+    if (s.auditLogger.sealed) throw VaultError.vaultLocked();
+  }
+
+  /** Register a use immediately before its value block; its call removes it once the use is over. */
+  private openUse(
+    s: UnlockedState,
+    secretId: string,
+    detail: Record<string, unknown>,
+    attribution: AuditAttribution | undefined,
+  ): OpenUse {
+    const entry: OpenUse = {
+      recorded: false,
+      secretId,
+      detail,
+      attribution: {},
+      logger: s.auditLogger,
+      abort: new AbortController(),
+      sealed: false,
+    };
+    entry.attribution = { ...attribution, use: entry };
+    this.openUses.add(entry);
+    return entry;
+  }
+
+  /** A wipe under an open use: once, its signal aborted and, where it has no row yet, its failed `VAULT_LOCKED` row. */
+  private sealUse(use: OpenUse): void {
+    if (use.sealed) return;
+    use.sealed = true;
+    use.abort.abort();
+    if (!use.recorded) {
+      use.logger.log(
+        withAttribution(
+          {
+            eventType: AuditEventType.SECRET_USE,
+            secretId: use.secretId,
+            detail: { ...use.detail, error: ErrorCode.VAULT_LOCKED },
+            success: false,
+          },
+          use.attribution,
+        ),
+      );
+    }
   }
 
   /**
@@ -5129,11 +5422,12 @@ export class VaultEngine {
   private async joinOrStartRefresh(
     secretId: string,
     caller?: CallerContext,
+    s?: UnlockedState,
   ): Promise<number | null> {
     const existing = this.oauthRefreshInFlight.get(secretId);
     if (existing) return existing;
 
-    const refresh = this.doRefreshOAuthToken(secretId, caller);
+    const refresh = this.doRefreshOAuthToken(secretId, caller, s);
     this.oauthRefreshInFlight.set(secretId, refresh);
     try {
       return await refresh;
@@ -5145,8 +5439,8 @@ export class VaultEngine {
   private async doRefreshOAuthToken(
     secretId: string,
     caller?: CallerContext,
+    s: UnlockedState = this.assertUnlocked(),
   ): Promise<number | null> {
-    const s = this.assertUnlocked();
     try {
       return await this.doRefreshOAuthTokenInner(s, secretId, caller);
     } catch (err) {
@@ -5404,9 +5698,8 @@ export class VaultEngine {
     secretId: string,
     handle?: string,
     caller?: CallerContext,
+    s: UnlockedState = this.assertUnlocked(),
   ): Promise<string> {
-    const s = this.assertUnlocked();
-
     // No denial row here: the callers are `useSecret` and `resolveForProxy`,
     // whose own catch writes the attributed `secret.use` refusal — a second,
     // unattributed `secret.read` row would double-count one refused use (E75h).
@@ -5443,7 +5736,7 @@ export class VaultEngine {
         oauthRow.grant_type === OAuthGrantType.CLIENT_CREDENTIALS
       ) {
         try {
-          await this.joinOrStartRefresh(secretId, caller);
+          await this.joinOrStartRefresh(secretId, caller, s);
           const refreshed = s.store.getOAuthToken(secretId);
           if (
             refreshed?.access_token_encrypted &&
@@ -5461,6 +5754,19 @@ export class VaultEngine {
             ).toString("utf8");
           }
         } catch (err) {
+          if (
+            err instanceof VaultError &&
+            (err.code === ErrorCode.SECRET_REVOKED ||
+              err.code === ErrorCode.SECRET_EXPIRED ||
+              err.code === ErrorCode.VAULT_LOCKED)
+          ) {
+            throw err;
+          }
+          const current = s.store.getSecret(secretId);
+          if (!current) throw VaultError.secretNotFound();
+          s.secretManager.assertUsable(current, forHandle, {
+            pending: () => VaultError.oauthNotConfigured("OAuth flow not completed"),
+          });
           if (oauthRow.access_token_expires_at <= Date.now()) {
             throw err instanceof VaultError ? err : VaultError.oauthRefreshFailed("Refresh failed");
           }
@@ -6118,7 +6424,11 @@ export class VaultEngine {
    * concealed refusal read exactly like an unknown handle (R5); absent, the
    * refusal reads "Secret not found".
    */
-  getAcmeAccount(secretId: string, caller?: CallerContext, handle?: string): string | null {
+  async getAcmeAccount(
+    secretId: string,
+    caller?: CallerContext,
+    handle?: string,
+  ): Promise<string | null> {
     const s = this.assertUnlocked();
     this.checkResolvedCallerPolicy(
       s,
@@ -7965,13 +8275,20 @@ export class VaultEngine {
     err: unknown,
     handle: string,
     caller: CallerContext | undefined,
-  ): Promise<unknown> {
-    if (!(err instanceof VaultError) || err.code !== ErrorCode.AMBIGUOUS_HANDLE) return err;
+    fallback: (err: unknown) => VaultError = () =>
+      VaultError.internalError("the operation failed unexpectedly"),
+  ): Promise<VaultError> {
+    if (!(err instanceof VaultError)) return fallback(err);
+    if (err.code !== ErrorCode.AMBIGUOUS_HANDLE) return err;
     if (!caller || isAdminUserCaller(caller)) return err;
-    const principals = this.callerPrincipals(caller);
-    for (const candidate of await s.secretManager.findByHandle(handle)) {
-      const held = s.policyEngine.grantedPermissions(candidate.id, principals);
-      if (held.has("read") || held.has("list") || held.has("admin")) return err;
+    try {
+      const principals = this.callerPrincipals(caller);
+      for (const candidate of await s.secretManager.findByHandle(handle)) {
+        const held = s.policyEngine.grantedPermissions(candidate.id, principals);
+        if (held.has("read") || held.has("list") || held.has("admin")) return err;
+      }
+    } catch (lookupErr) {
+      return lookupErr instanceof VaultError ? lookupErr : fallback(lookupErr);
     }
     return VaultError.secretNotFound(handle);
   }
@@ -7989,6 +8306,7 @@ export class VaultEngine {
     detail: Record<string, unknown>,
     secretId?: string,
     caller?: CallerContext,
+    use?: UseMark,
   ): void {
     const code = errorCodeOf(err);
     s.auditLogger.log({
@@ -7998,6 +8316,7 @@ export class VaultEngine {
       detail: { ...detail, error: code, ...callerInterfaceDetail(caller) },
       success: false,
       sessionId: this.sessionId ?? undefined,
+      use,
     });
   }
 
@@ -8134,7 +8453,7 @@ export class VaultEngine {
    * written, or terminated. Nine callers, byte-identical in behavior — the
    * eight secret-scoped configuration accessors and `enforceCallerPolicy`,
    * which adds only the caller-less short-circuit in front of it; the
-   * regression net is the `SITES` table of vault-engine.audit-lifecycle.test.ts.
+   * regression net is the `SITES` table of vault-engine.handle-resolution.test.ts.
    */
   private async resolveForConfig(
     s: UnlockedState,
@@ -8240,13 +8559,14 @@ export class VaultEngine {
     const kek = this.kek as Uint8Array;
     const auditKey = this.auditKey as Uint8Array;
 
-    // The lazy-expiry hook runs on secret access, long after initManagers
-    // completes — this.auditLogger (assigned below) is always set by then.
+    const logger = new AuditLogger(store, auditKey);
+    const registry = new McpConnectionRegistry(logger);
     this.secretManager = new SecretManager(store, kek, (secretId, handle) => {
-      this.auditLogger?.log({
+      logger.log({
         eventType: AuditEventType.SECRET_EXPIRE,
         secretId,
         detail: { handle },
+        // Read at the write: an unlock writes the session after the managers are built.
         sessionId: this.sessionId ?? undefined,
       });
       // An expired credential must not stay live in a downstream child (L2).
@@ -8254,20 +8574,20 @@ export class VaultEngine {
       // transaction (NM3), so the terminate — which writes its own audit row —
       // runs after that transaction has committed.
       queueMicrotask(() => {
-        void this.mcpRegistry?.terminate(secretId, "secret_expired").catch(() => undefined);
+        void registry.terminate(secretId, "secret_expired").catch(() => undefined);
       });
     });
     this.policyEngine = new PolicyEngine(store);
     this.agentRegistry = new AgentRegistry(store);
-    this.auditLogger = new AuditLogger(store, auditKey);
+    this.auditLogger = logger;
     this.auditQuery = new AuditQuery(store, auditKey);
-    this.httpInjector = new HttpInjector(this.auditLogger);
-    this.processInjector = new ProcessInjector(this.auditLogger);
-    this.mcpRegistry = new McpConnectionRegistry(this.auditLogger);
-    this.mcpInjector = new McpInjector(this.auditLogger, this.mcpRegistry);
-    this.databaseInjector = new DatabaseInjector(this.auditLogger);
-    this.sshInjector = new SshInjector(this.auditLogger);
-    this.gitInjector = new GitInjector(this.auditLogger);
+    this.httpInjector = new HttpInjector(logger);
+    this.processInjector = new ProcessInjector(logger);
+    this.mcpRegistry = registry;
+    this.mcpInjector = new McpInjector(logger, registry);
+    this.databaseInjector = new DatabaseInjector(logger);
+    this.sshInjector = new SshInjector(logger);
+    this.gitInjector = new GitInjector(logger);
     // The v1.3 mail injectors take no AuditLogger: they return a metadata-only
     // projection and the engine writes the `secret.use` row (design §7.2).
     this.smtpInjector = new SmtpInjector({
@@ -8287,7 +8607,22 @@ export class VaultEngine {
         // The wipe goes on: a failed write must not keep the keys in memory.
       }
     }
-    for (const seal of [...this.openRenders]) seal();
+    for (const seal of [...this.openRenders]) {
+      try {
+        seal();
+      } catch {
+        // Likewise: a seal that throws must not keep the keys in memory.
+      }
+    }
+    for (const use of [...this.openUses]) {
+      try {
+        this.sealUse(use);
+      } catch {
+        // Likewise.
+      }
+    }
+    for (const abort of this.openBootstraps) abort.abort();
+    this.auditLogger?.seal();
     if (this.kek) {
       wipeBuffer(this.kek);
       this.kek = null;

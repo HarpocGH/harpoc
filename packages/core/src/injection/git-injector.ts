@@ -506,6 +506,7 @@ export class GitInjector {
     secretId?: string,
     attribution?: AuditAttribution,
     local?: FloorPaths,
+    signal?: AbortSignal,
   ): Promise<GitResult> {
     let transport: "https" | "ssh" | null;
     try {
@@ -538,8 +539,28 @@ export class GitInjector {
     }
 
     return transport === "https"
-      ? this.runHttps(action, gitPath, secretValue, policy, config, secretId, attribution, local)
-      : this.runSsh(action, gitPath, secretValue, policy, config, secretId, attribution, local);
+      ? this.runHttps(
+          action,
+          gitPath,
+          secretValue,
+          policy,
+          config,
+          secretId,
+          attribution,
+          local,
+          signal,
+        )
+      : this.runSsh(
+          action,
+          gitPath,
+          secretValue,
+          policy,
+          config,
+          secretId,
+          attribution,
+          local,
+          signal,
+        );
   }
 
   private async runHttps(
@@ -551,6 +572,7 @@ export class GitInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
     local: FloorPaths | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<GitResult> {
     if (hostLeadsWithSign(action.repository)) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
@@ -689,6 +711,7 @@ export class GitInjector {
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
           floor: local,
+          signal,
         });
       } catch (err) {
         if (err instanceof VaultError) {
@@ -745,6 +768,7 @@ export class GitInjector {
     secretId: string | undefined,
     attribution: AuditAttribution | undefined,
     local: FloorPaths | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<GitResult> {
     const address = parseSshHost(action.repository);
     if (!address) {
@@ -880,6 +904,7 @@ export class GitInjector {
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
           floor: local,
+          signal,
         });
       } catch (err) {
         if (err instanceof VaultError) {
@@ -1404,6 +1429,7 @@ interface StepOptions {
   fsIsolation: boolean;
   strictTreeExit: boolean;
   floor: FloorPaths | undefined;
+  signal: AbortSignal | undefined;
 }
 
 type GitStep = (
@@ -1448,6 +1474,7 @@ async function runPlan(
       networkIsolation: opts.networkIsolation,
       fsIsolation: opts.fsIsolation,
       strictTreeExit: opts.strictTreeExit,
+      signal: opts.signal,
     });
   const step: GitStep = (args, cwd, env) => spawnStep(args, cwd, env, opts.redact);
   const probeStep: GitStep = async (args, cwd, env) => {

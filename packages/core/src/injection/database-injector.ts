@@ -8,6 +8,7 @@ import {
   databaseActionSchema,
   DatabaseEngine,
   DEFAULT_DB_TIMEOUT_MS,
+  ErrorCode,
   isDecimalInteger,
   MAX_DB_RESULT_BYTES,
   MAX_DB_ROWS,
@@ -93,6 +94,7 @@ export class DatabaseInjector {
     config: ConnectionConfig | undefined,
     secretId?: string,
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<DatabaseResult> {
     const resolved = this.resolveAdapter(action, secretId, attribution);
 
@@ -126,6 +128,7 @@ export class DatabaseInjector {
     let pinnedAddress: string;
     try {
       const validated = await validateHostPort(host, port);
+      if (signal?.aborted) throw VaultError.vaultLocked();
       pinnedAddress = validated.resolvedAddress;
     } catch (err) {
       if (err instanceof VaultError) {
@@ -181,13 +184,15 @@ export class DatabaseInjector {
       database: action.database,
       tls,
       timeoutMs,
+      ...(signal === undefined ? {} : { signal }),
     };
 
     if (resolved.kind === "command") {
       // Command-style engines (redis, mongodb) have no separate connect/query
       // split — `execute` owns its own connection lifecycle end to end — so a
       // failure anywhere inside it (connect or command) surfaces as one
-      // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to.
+      // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to;
+      // a VAULT_LOCKED keeps its own code.
       try {
         const res = await resolved.adapter.execute(connectOpts, action.command);
         const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
@@ -207,6 +212,16 @@ export class DatabaseInjector {
         );
         return result;
       } catch (err) {
+        if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
+          this.audit(
+            action,
+            secretId,
+            { host, port, error: err.code, ...tlsOptOut },
+            false,
+            attribution,
+          );
+          throw err;
+        }
         const detail = redactCredential(errMessage(err));
         this.audit(
           action,
@@ -225,6 +240,16 @@ export class DatabaseInjector {
     try {
       connection = await sqlAdapter.connect(connectOpts);
     } catch (err) {
+      if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
+        this.audit(
+          action,
+          secretId,
+          { host, port, error: err.code, ...tlsOptOut },
+          false,
+          attribution,
+        );
+        throw err;
+      }
       const detail = redactCredential(errMessage(err));
       this.audit(
         action,

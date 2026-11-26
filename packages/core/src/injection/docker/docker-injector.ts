@@ -298,10 +298,11 @@ export async function executeDockerRegistryAction(
   action: DockerRegistryAction,
   secretValue: Uint8Array,
   policy: InjectionPolicy,
+  signal?: AbortSignal,
 ): Promise<DockerExecution> {
   const { user, secret } = parseDockerCredential(secretValue);
   try {
-    return await runDocker(action, policy, user, secret);
+    return await runDocker(action, policy, user, secret, signal);
   } catch (rawErr) {
     // Every throw out of the injector passes redactErrorMessage: a thrown
     // message is a model-visible channel no result-shaped redaction touches.
@@ -314,6 +315,7 @@ async function runDocker(
   policy: InjectionPolicy,
   user: string,
   secret: string,
+  signal: AbortSignal | undefined,
 ): Promise<DockerExecution> {
   // The image reaches argv, so a leading dash must never parse as a docker
   // flag. The schema's image grammar refuses one too, but VaultEngine.useSecret
@@ -359,6 +361,7 @@ async function runDocker(
       timeoutMs: action.timeout_ms ?? DEFAULT_DOCKER_TIMEOUT_MS,
       redact,
       strictTreeExit: policy.strict_tree_exit === true,
+      signal,
     });
     return {
       result: toDockerResult(action, r),

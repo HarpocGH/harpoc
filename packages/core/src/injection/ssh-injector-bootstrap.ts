@@ -287,7 +287,10 @@ function tempFileUnprepared(): VaultError {
  * helper's and the known-hosts files are removed, and what the seam was handed no longer names
  * the password, on every path once the call settled.
  */
-export async function runBootstrap(call: BootstrapCall): Promise<BootstrapOutcome> {
+export async function runBootstrap(
+  call: BootstrapCall,
+  signal?: AbortSignal,
+): Promise<BootstrapOutcome> {
   if (
     !isSshName(call.host) ||
     !isSshName(call.user) ||
@@ -348,6 +351,7 @@ export async function runBootstrap(call: BootstrapCall): Promise<BootstrapOutcom
         networkIsolation,
         fsIsolation,
         strictTreeExit: call.policy.strict_tree_exit === true,
+        signal,
       });
     } catch (err) {
       if (!(err instanceof VaultError)) throw err;

@@ -21,6 +21,8 @@ vi.mock("./crypto/argon2.js", async (importOriginal) =>
 // fail and assert the paired state write rolled back — and that the vault
 // stays healthy for a retry once the audit log is writable again.
 
+const RESOLUTION_FAILED = "the operation failed unexpectedly";
+
 let tempDir: string;
 let engine: VaultEngine;
 
@@ -118,9 +120,11 @@ describe("fail-closed audit: secret CRUD", () => {
     await engine.createSecret({ name: "pending-key", type: "api_key" });
     failNextAuditInsert();
 
-    await expect(
-      engine.setSecretValue("secret://pending-key", new Uint8Array(Buffer.from("v1"))),
-    ).rejects.toThrow("audit unavailable");
+    const err = await expectVaultError(
+      () => engine.setSecretValue("secret://pending-key", new Uint8Array(Buffer.from("v1"))),
+      ErrorCode.INTERNAL_ERROR,
+    );
+    expect(err.message).toBe(RESOLUTION_FAILED);
 
     expect((await engine.getSecretInfo("secret://pending-key")).status).toBe(SecretStatus.PENDING);
     // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
@@ -139,9 +143,11 @@ describe("fail-closed audit: secret CRUD", () => {
     });
     failNextAuditInsert();
 
-    await expect(
-      engine.rotateSecret("secret://rotate-key", new Uint8Array(Buffer.from("new-value"))),
-    ).rejects.toThrow("audit unavailable");
+    const err = await expectVaultError(
+      () => engine.rotateSecret("secret://rotate-key", new Uint8Array(Buffer.from("new-value"))),
+      ErrorCode.INTERNAL_ERROR,
+    );
+    expect(err.message).toBe(RESOLUTION_FAILED);
 
     expect((await engine.getSecretInfo("secret://rotate-key")).version).toBe(1);
     expect(Buffer.from(await engine.getSecretValue("secret://rotate-key")).toString()).toBe(
@@ -164,7 +170,11 @@ describe("fail-closed audit: secret CRUD", () => {
     });
     failNextAuditInsert();
 
-    await expect(engine.revokeSecret("secret://revoke-key")).rejects.toThrow("audit unavailable");
+    const err = await expectVaultError(
+      () => engine.revokeSecret("secret://revoke-key"),
+      ErrorCode.INTERNAL_ERROR,
+    );
+    expect(err.message).toBe(RESOLUTION_FAILED);
 
     expect((await engine.getSecretInfo("secret://revoke-key")).status).toBe(SecretStatus.ACTIVE);
     // Successful rows only: the rolled-back attempt writes its own denial row (E75f).
@@ -186,9 +196,11 @@ describe("fail-closed audit: lazy expiry", () => {
     const secretId = await engine.resolveSecretId("secret://expiring-key");
     failNextAuditInsert();
 
-    await expect(engine.getSecretValue("secret://expiring-key")).rejects.toThrow(
-      "audit unavailable",
+    const err = await expectVaultError(
+      () => engine.getSecretValue("secret://expiring-key"),
+      ErrorCode.INTERNAL_ERROR,
     );
+    expect(err.message).toBe(RESOLUTION_FAILED);
 
     expect(rawStatus(secretId)).toBe(SecretStatus.ACTIVE);
     expect(auditCount(AuditEventType.SECRET_EXPIRE)).toBe(0);

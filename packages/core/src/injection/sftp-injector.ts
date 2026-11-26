@@ -271,7 +271,7 @@ export async function executeSftpAction(
   secretValue: Uint8Array,
   policy: InjectionPolicy,
   config: ConnectionConfig | undefined,
-  options?: { vaultFiles?: readonly string[]; daemon?: DaemonPaths },
+  options?: { vaultFiles?: readonly string[]; daemon?: DaemonPaths; signal?: AbortSignal },
 ): Promise<SftpExecution> {
   // Defense in depth beside the schema's first-character anchor (mirrors the
   // SSH context): host and user reach argv, so a leading dash must never
@@ -357,6 +357,7 @@ export async function executeSftpAction(
       networkIsolation,
       fsIsolation,
       strictTreeExit: policy.strict_tree_exit === true,
+      signal: options?.signal,
     });
 
     return {

@@ -43,6 +43,7 @@ export class ProcessInjector {
     },
     secretId?: string,
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<ProcessResult> {
     const pathDirs = controlledPathDirs();
     const valueStr = Buffer.from(secretValue).toString("utf8");
@@ -102,6 +103,7 @@ export class ProcessInjector {
         networkIsolation,
         fsIsolation,
         strictTreeExit,
+        signal,
       );
     } catch (err) {
       // Fail-closed refusal from the spawn seam (NETWORK_ISOLATION_UNAVAILABLE,
@@ -153,6 +155,7 @@ export class ProcessInjector {
     networkIsolation: boolean,
     fsIsolation: boolean,
     strictTreeExit: boolean,
+    signal: AbortSignal | undefined,
   ): Promise<{
     result: ProcessResult;
     isolationMechanism?: string;
@@ -170,6 +173,7 @@ export class ProcessInjector {
       networkIsolation,
       fsIsolation,
       strictTreeExit,
+      signal,
     });
     return {
       result: {

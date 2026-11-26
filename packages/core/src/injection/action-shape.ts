@@ -1,6 +1,14 @@
 import type { ImapAction, UseSecretAction } from "@harpoc/shared";
-import { isValidName, MAX_SSH_KEY_LINE_CHARS } from "@harpoc/shared";
+import { isValidName, MAX_SSH_KEY_LINE_CHARS, VaultError } from "@harpoc/shared";
 import { isSshName } from "./ssh-common.js";
+
+export function snapshotAction(action: unknown): unknown {
+  try {
+    return structuredClone(action);
+  } catch {
+    throw VaultError.invalidInput("action must be plain data");
+  }
+}
 
 const CONTEXTS: Record<UseSecretAction["type"], true> = {
   http: true,
@@ -25,7 +33,30 @@ export function actionShapeRefusal(action: unknown): string | undefined {
   if (!Object.hasOwn(CONTEXTS, type)) return `Unsupported action type: ${type}`;
   if (type === "ssh") return sshBootstrapShapeRefusal(action as Record<string, unknown>);
   if (type === "sftp") return sftpRenderShapeRefusal(action as Record<string, unknown>);
+  if (type === "smtp") return smtpShapeRefusal(action as Record<string, unknown>);
+  if (type === "imap") return imapShapeRefusal(action as Record<string, unknown>);
   return undefined;
+}
+
+function smtpShapeRefusal(action: Record<string, unknown>): string | undefined {
+  for (const field of [action.to, action.cc, action.bcc]) {
+    if (field !== undefined && !isStringArray(field)) {
+      return "smtp to, cc and bcc must be arrays of strings";
+    }
+  }
+  if (typeof action.from !== "string") return "smtp from must be a string";
+  return undefined;
+}
+
+function imapShapeRefusal(action: Record<string, unknown>): string | undefined {
+  if (action.account !== undefined && typeof action.account !== "string") {
+    return "imap account must be a string";
+  }
+  return undefined;
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.findIndex((member) => typeof member !== "string") === -1;
 }
 
 const SFTP_RENDER_FORBIDDEN_KEYS = ["host", "user", "port", "remote_path", "local_path"] as const;

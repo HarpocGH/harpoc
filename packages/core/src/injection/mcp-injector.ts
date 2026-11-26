@@ -124,6 +124,7 @@ export class McpInjector {
     config: McpServerConfig,
     secretId: string,
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<McpResult> {
     if (action.server !== config.server_name) {
       const err = VaultError.mcpServerMismatch(action.server, config.server_name);
@@ -209,6 +210,7 @@ export class McpInjector {
             configFingerprint,
           },
           attribution,
+          signal,
         ),
       );
     } catch (err) {
@@ -273,6 +275,7 @@ export class McpInjector {
     policy: InjectionPolicy,
     fingerprints: { credentialFingerprint: string; configFingerprint: string },
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<McpConnectionEntry> {
     const client = new sdk.Client(
       { name: "harpoc-vault", version: HARPOC_VERSION },
@@ -301,6 +304,7 @@ export class McpInjector {
         attribution,
         (t) => (stdioTransport = t),
         (d) => (dispose = d),
+        signal,
       );
     } catch (err) {
       // The child already holds the plaintext credential in its environment, so
@@ -342,10 +346,12 @@ export class McpInjector {
     attribution: AuditAttribution | undefined,
     setStdioTransport: (t: StdioChildTransport) => void,
     setDispose: (d: () => void) => void,
+    signal: AbortSignal | undefined,
   ): Promise<McpConnectionEntry> {
     let stdioTransport: StdioChildTransport | undefined;
     let dispose: (() => void) | undefined;
     if (config.transport === McpTransport.STDIO) {
+      if (signal?.aborted) throw VaultError.vaultLocked();
       const stdioLaunch = launch as StdioLaunch;
       stdioTransport = new StdioChildTransport({
         resolvedCommand: stdioLaunch.command,
@@ -356,7 +362,16 @@ export class McpInjector {
         strictTreeExit: stdioLaunch.strictTreeExit === true,
       });
       setStdioTransport(stdioTransport);
-      await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
+      const end = (): void => stdioTransport?.killSync();
+      signal?.addEventListener("abort", end);
+      try {
+        await client.connect(stdioTransport, { timeout: MCP_INIT_TIMEOUT_MS });
+      } catch (err) {
+        if (!signal?.aborted) throw err;
+      } finally {
+        signal?.removeEventListener("abort", end);
+      }
+      if (signal?.aborted) throw VaultError.vaultLocked();
     } else {
       // DNS-rebinding TOCTOU protection (parity with the HTTP injector): every
       // outbound request connects through a dispatcher whose connection-time
@@ -366,7 +381,7 @@ export class McpInjector {
       dispose = (): void => void dispatcher.close().catch(() => undefined);
       setDispose(dispose);
       const transport = new sdk.StreamableHTTPClientTransport(new URL(config.url as string), {
-        fetch: this.validatingAuthFetch(valueStr, pins, dispatcher),
+        fetch: this.validatingAuthFetch(valueStr, pins, dispatcher, signal),
         reconnectionOptions: {
           // A lost connection must fail visibly (no-auto-respawn semantics),
           // not be silently re-established mid-call.
@@ -376,7 +391,16 @@ export class McpInjector {
           reconnectionDelayGrowFactor: 1.5,
         },
       });
-      await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
+      const end = (): void => void client.close().catch(() => undefined);
+      signal?.addEventListener("abort", end);
+      try {
+        await client.connect(transport, { timeout: MCP_INIT_TIMEOUT_MS });
+      } catch (err) {
+        if (!signal?.aborted) throw err;
+      } finally {
+        signal?.removeEventListener("abort", end);
+      }
+      if (signal?.aborted) throw VaultError.vaultLocked();
     }
 
     // The spawn is the credential-injection moment — attributed to the
@@ -548,9 +572,11 @@ export class McpInjector {
     valueStr: string,
     pins: Map<string, readonly string[]>,
     dispatcher: Agent,
+    signal: AbortSignal | undefined,
   ): FetchLike {
     return async (url, init) => {
       const validated = await validateUrl(String(url));
+      if (signal?.aborted) throw VaultError.vaultLocked();
       if (validated.resolvedAddresses) {
         pins.set(validated.url.hostname.toLowerCase(), validated.resolvedAddresses);
       }

@@ -1,12 +1,18 @@
 import { createServer as createTcpServer } from "node:net";
 import type { AddressInfo, Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, WebsocketAction } from "@harpoc/shared";
 import { ActionType, ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { FakeWsServer, FakeWsScript } from "./__fixtures__/fake-ws-server.js";
 import { startFakeWsServer } from "./__fixtures__/fake-ws-server.js";
+import { validateUrl } from "./url-validator.js";
 import { buildWsAuditDetails, executeWebsocketAction } from "./websocket-injector.js";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return { ...actual, validateUrl: vi.fn(actual.validateUrl) };
+});
 
 const SECRET = "ws-secret-value";
 
@@ -457,5 +463,31 @@ describe("executeWebsocketAction — URL allowlist (deny-by-default, R1)", () =>
       message: `URL not in secret allowlist: ws://127.0.0.1:${fake.port}/feed`,
     });
     expect(fake.requests()).toHaveLength(0);
+  });
+});
+
+describe("executeWebsocketAction — a signal aborted during the lookup", () => {
+  it("an aborted signal sends nothing", async () => {
+    const fake = await start({});
+    const controller = new AbortController();
+    const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+    vi.mocked(validateUrl).mockImplementationOnce(async (...args) => {
+      const answer = await real.validateUrl(...args);
+      controller.abort();
+      return answer;
+    });
+
+    await expectVaultError(
+      () =>
+        executeWebsocketAction(
+          baseAction({ url: `ws://127.0.0.1:${fake.port}/` }),
+          secretBytes(),
+          basePolicy(),
+          controller.signal,
+        ),
+      ErrorCode.VAULT_LOCKED,
+    );
+
+    expect(fake.requests().length).toBe(0);
   });
 });

@@ -91,6 +91,9 @@ export class McpConnectionRegistry {
    * it with no teardown path left.
    */
   private generation = 0;
+  /** Set by `killAllSync` and never cleared: a sealed registry acquires nothing again. */
+  private closing = false;
+  private openCloses = 0;
   private readonly idleTtlMs: number;
   private readonly sweepIntervalMs: number;
   /** Runs exactly while `live` is non-empty; `unref`'d, so it never holds the process open. */
@@ -119,6 +122,7 @@ export class McpConnectionRegistry {
     secretId: string,
     factory: () => Promise<McpConnectionEntry>,
   ): Promise<McpConnectionEntry> {
+    if (this.closing || this.openCloses > 0) throw VaultError.vaultLocked();
     const existing = this.connections.get(secretId);
     if (existing) {
       const ready = this.live.get(secretId);
@@ -167,30 +171,38 @@ export class McpConnectionRegistry {
 
   /** Graceful session-end teardown (lock/destroy): close all within a budget. */
   async closeAll(reason = "session_end"): Promise<void> {
+    this.openCloses++;
     this.generation++;
-    const entries = [...this.live.values()];
-    this.connections.clear();
+    try {
+      const entries = [...this.live.values()];
+      this.connections.clear();
 
-    if (entries.length === 0) return;
+      if (entries.length === 0) return;
 
-    let budgetTimer: NodeJS.Timeout | undefined;
-    const budget = new Promise<void>((resolve) => {
-      budgetTimer = setTimeout(resolve, MCP_SHUTDOWN_TIMEOUT_MS);
-      if (budgetTimer.unref) budgetTimer.unref();
-    });
+      let budgetTimer: NodeJS.Timeout | undefined;
+      const budget = new Promise<void>((resolve) => {
+        budgetTimer = setTimeout(resolve, MCP_SHUTDOWN_TIMEOUT_MS);
+        if (budgetTimer.unref) budgetTimer.unref();
+      });
 
-    await Promise.race([
-      Promise.allSettled(entries.map((entry) => this.terminateEntry(entry, reason))),
-      budget,
-    ]);
-    if (budgetTimer) clearTimeout(budgetTimer);
+      await Promise.race([
+        Promise.allSettled(entries.map((entry) => this.terminateEntry(entry, reason))),
+        budget,
+      ]);
+      if (budgetTimer) clearTimeout(budgetTimer);
 
-    // Anything still alive after the budget is hard-killed.
-    for (const entry of entries) {
-      entry.stdioTransport?.killSync();
+      // Anything still alive after the budget is hard-killed.
+      for (const entry of entries) {
+        entry.stdioTransport?.killSync();
+      }
+      for (const entry of this.live.values()) {
+        if (!entries.includes(entry)) this.killEntrySync(entry);
+      }
+      this.live.clear();
+      this.stopSweep();
+    } finally {
+      this.openCloses--;
     }
-    this.live.clear();
-    this.stopSweep();
   }
 
   /**
@@ -198,6 +210,7 @@ export class McpConnectionRegistry {
    * (wipeKeys covers lock, destroy and the session-monitor expiry seal).
    */
   killAllSync(): void {
+    this.closing = true;
     this.generation++;
     for (const entry of this.live.values()) {
       this.killEntrySync(entry);

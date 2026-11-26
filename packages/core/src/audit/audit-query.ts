@@ -1,6 +1,7 @@
 import type { AuditEvent, AuditEventType, PrincipalType } from "@harpoc/shared";
 import { AAD_AUDIT_DETAIL_V2 } from "@harpoc/shared";
 import { decrypt } from "../crypto/aes-gcm.js";
+import { wipeBuffer } from "../crypto/random.js";
 import type { AuditFilter, SqliteStore } from "../storage/sqlite-store.js";
 import {
   AUDIT_CHAIN_GENESIS_BYTES,
@@ -119,26 +120,30 @@ export class AuditQuery {
     let valid = true;
     let anchorStatus: AuditAnchorStatus = "row_missing";
 
-    for (const row of rows) {
-      if (anchor && row.id === anchor.lastId) {
-        anchorStatus =
-          row.row_hmac !== null && auditHmacEqual(row.row_hmac, anchor.rowHmac)
-            ? "ok"
-            : "hmac_mismatch";
+    try {
+      for (const row of rows) {
+        if (anchor && row.id === anchor.lastId) {
+          anchorStatus =
+            row.row_hmac !== null && auditHmacEqual(row.row_hmac, anchor.rowHmac)
+              ? "ok"
+              : "hmac_mismatch";
+        }
+        if (row.row_hmac === null) {
+          valid = false;
+          if (firstBrokenId === null) firstBrokenId = row.id;
+          prev = AUDIT_CHAIN_GENESIS_BYTES;
+          continue;
+        }
+        const expected = computeAuditRowHmac(chainKey, row, prev);
+        if (!auditHmacEqual(expected, row.row_hmac)) {
+          valid = false;
+          if (firstBrokenId === null) firstBrokenId = row.id;
+        }
+        prev = row.row_hmac;
+        checked++;
       }
-      if (row.row_hmac === null) {
-        valid = false;
-        if (firstBrokenId === null) firstBrokenId = row.id;
-        prev = AUDIT_CHAIN_GENESIS_BYTES;
-        continue;
-      }
-      const expected = computeAuditRowHmac(chainKey, row, prev);
-      if (!auditHmacEqual(expected, row.row_hmac)) {
-        valid = false;
-        if (firstBrokenId === null) firstBrokenId = row.id;
-      }
-      prev = row.row_hmac;
-      checked++;
+    } finally {
+      wipeBuffer(chainKey);
     }
 
     if (!anchor) {

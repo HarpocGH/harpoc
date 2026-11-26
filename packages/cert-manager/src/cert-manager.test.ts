@@ -253,8 +253,8 @@ function makeEngine() {
       (secretId: string, caller?: CallerContext, handle?: string) => CertificateStatus
     >(() => STATUS),
     getAcmeAccount: vi.fn<
-      (secretId: string, caller?: CallerContext, handle?: string) => string | null
-    >(() => null),
+      (secretId: string, caller?: CallerContext, handle?: string) => Promise<string | null>
+    >(async () => null),
   };
 }
 
@@ -840,7 +840,7 @@ describe("CertManager", () => {
 
   describe("renewCertificate", () => {
     function primeRenewal(accountUrl = ACCOUNT_URL): void {
-      engine.getAcmeAccount.mockReturnValue(
+      engine.getAcmeAccount.mockResolvedValue(
         JSON.stringify({
           privateKeyPem: generateCertKeyPair({ algorithm: "ec" }).privateKeyPem,
           accountUrl,
@@ -984,7 +984,7 @@ describe("CertManager", () => {
     });
 
     it("refuses a stored ACME account that is not usable JSON", async () => {
-      engine.getAcmeAccount.mockReturnValue("{}");
+      engine.getAcmeAccount.mockResolvedValue("{}");
 
       await expect(manager.renewCertificate(SECRET_ID)).rejects.toThrow(acmeFailed);
       expect(scenario.instances).toHaveLength(0);
@@ -998,7 +998,7 @@ describe("CertManager", () => {
       ["not a JSON object", JSON.stringify([MARKED_KEY_PEM, ACCOUNT_URL])],
       ["incomplete", JSON.stringify({ privateKeyPem: MARKED_KEY_PEM })],
     ])("keeps the stored account key out of the %s refusal", async (reason, stored) => {
-      engine.getAcmeAccount.mockReturnValue(stored);
+      engine.getAcmeAccount.mockResolvedValue(stored);
 
       const err = await expectVaultError(
         () => manager.renewCertificate(SECRET_ID),
@@ -1221,7 +1221,7 @@ describe("CertManager", () => {
       onTestFinished(() => {
         vi.useRealTimers();
       });
-      engine.getAcmeAccount.mockReturnValue(
+      engine.getAcmeAccount.mockResolvedValue(
         JSON.stringify({ privateKeyPem: MARKED_KEY_PEM, accountUrl: ACCOUNT_URL }).slice(0, -1),
       );
       const schedulerEngine = {

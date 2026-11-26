@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { DbConnectOptions, DbEngineAdapter, DbSqlEngine } from "./db-adapters.js";
 import { defaultDbAdapters } from "./db-adapters.js";
 
@@ -99,6 +101,29 @@ describe("PostgresAdapter connection config", () => {
     expect(cfg.host).toBe("203.0.113.7");
     expect(cfg.ssl).toBe(false);
   });
+
+  it("a signal aborted while pg loads: VAULT_LOCKED, no client built", async () => {
+    const controller = new AbortController();
+    const suiteModule = await import("pg");
+    vi.doMock("pg", () => {
+      controller.abort();
+      return suiteModule;
+    });
+    try {
+      await expectVaultError(
+        () => adapterFor("postgresql").connect(opts({ signal: controller.signal })),
+        ErrorCode.VAULT_LOCKED,
+      );
+      expect(pgClientConfigs.length).toBe(0);
+    } finally {
+      vi.doMock("pg", () => suiteModule);
+    }
+  });
+
+  it("a live signal connects as before", async () => {
+    await adapterFor("postgresql").connect(opts({ signal: new AbortController().signal }));
+    expect(pgClientConfigs.length).toBe(1);
+  });
 });
 
 describe("MysqlAdapter connection config", () => {
@@ -140,5 +165,28 @@ describe("MysqlAdapter connection config", () => {
     expect(typeof cfg.stream).toBe("function");
     (cfg.stream as () => unknown)();
     expect(netConnectCalls[0]).toEqual([3306, "203.0.113.7"]);
+  });
+
+  it("a signal aborted while mysql2 loads: VAULT_LOCKED, no connection created", async () => {
+    const controller = new AbortController();
+    const suiteModule = await import("mysql2/promise");
+    vi.doMock("mysql2/promise", () => {
+      controller.abort();
+      return suiteModule;
+    });
+    try {
+      await expectVaultError(
+        () => adapterFor("mysql").connect(opts({ port: 3306, signal: controller.signal })),
+        ErrorCode.VAULT_LOCKED,
+      );
+      expect(mysqlConfigs.length).toBe(0);
+    } finally {
+      vi.doMock("mysql2/promise", () => suiteModule);
+    }
+  });
+
+  it("a live signal connects as before", async () => {
+    await adapterFor("mysql").connect(opts({ port: 3306, signal: new AbortController().signal }));
+    expect(mysqlConfigs.length).toBe(1);
   });
 });

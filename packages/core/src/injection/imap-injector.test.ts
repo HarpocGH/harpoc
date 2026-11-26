@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ImapAction, ImapResult, InjectionPolicy, InjectionPolicyInput } from "@harpoc/shared";
 import { ActionType, ErrorCode, VaultError, injectionPolicyInputSchema } from "@harpoc/shared";
 import type { ImapConnectOptions, ImapMessage } from "./mail/imap-client.js";
@@ -9,7 +9,13 @@ import type {
   ImapOperationFields,
 } from "./imap-injector.js";
 import { ImapInjector, buildImapAuditDetails, executeImapAction } from "./imap-injector.js";
+import { validateHostPort } from "./url-validator.js";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return { ...actual, validateHostPort: vi.fn(actual.validateHostPort) };
+});
 
 const SECRET = "imapuser:imappass";
 
@@ -274,6 +280,23 @@ describe("ImapInjector — host allowlist", () => {
     expect(client.selectCalls.length).toBe(1);
   });
 
+  it("a live signal connects as before", async () => {
+    const client = makeFakeClient();
+    const { fn, opts } = connectReturning(client);
+    const injector = new ImapInjector({ connectImap: fn });
+
+    await injector.run(
+      baseAction(),
+      SECRET,
+      basePolicy({}),
+      undefined,
+      undefined,
+      new AbortController().signal,
+    );
+    expect(opts.length).toBe(1);
+    expect(client.selectCalls.length).toBe(1);
+  });
+
   it("an allowlisted private target is refused SSRF_BLOCKED before any socket", async () => {
     const { fn, calls } = connectMustNotBeCalled();
     const injector = new ImapInjector({ connectImap: fn });
@@ -290,6 +313,25 @@ describe("ImapInjector — host allowlist", () => {
       ErrorCode.SSRF_BLOCKED,
     );
     expect(calls).toEqual([]);
+  });
+
+  it("an aborted signal sends nothing", async () => {
+    const controller = new AbortController();
+    const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+    vi.mocked(validateHostPort).mockImplementationOnce(async (host, port) => {
+      const answer = await real.validateHostPort(host, port);
+      controller.abort();
+      return answer;
+    });
+    const { fn, opts } = connectReturning(makeFakeClient());
+    const injector = new ImapInjector({ connectImap: fn });
+
+    await expectVaultError(
+      () =>
+        injector.run(baseAction(), SECRET, basePolicy({}), undefined, undefined, controller.signal),
+      ErrorCode.VAULT_LOCKED,
+    );
+    expect(opts.length).toBe(0);
   });
 });
 

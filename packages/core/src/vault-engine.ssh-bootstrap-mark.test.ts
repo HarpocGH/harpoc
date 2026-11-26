@@ -7,15 +7,29 @@ import type { CallerContext, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, SecretStatus } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { registerAgents, registryOf, seedLiveStdioEntry } from "./__fixtures__/engine-seams.js";
+import { B0, BLOCK, BOOT } from "./injection/__fixtures__/ssh-public-keys.js";
+import { controlledPathDirs, resolveExecutable } from "./injection/allowlist.js";
+import type { BootstrapOutcome } from "./injection/ssh-injector-bootstrap.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
+import type { SshBootstrapSeam } from "./vault-engine.js";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
   (await import("./__fixtures__/argon2-stub.js")).argon2Stub(importOriginal),
 );
 
+// From the allowlist on, a bootstrap resolves `ssh` on the vault's PATH; a host without one skips.
+const SSH_ON_PATH = resolveExecutable("ssh", controlledPathDirs());
+
 const HANDLE = "secret://pw";
 const MARK_AT = 1_700_000_000_000;
+const SPAWN = { exit_code: 0, timed_out: false, network_isolation: false, fs_isolation: false };
+const DONE: BootstrapOutcome = {
+  kind: "done",
+  key: "installed",
+  sudoers: "not_asked",
+  spawn: SPAWN,
+};
 const HTTP = {
   type: "http",
   method: "GET",
@@ -36,6 +50,7 @@ interface EngineInternals {
   secretManager: { getSecretValue: (handle: string) => Promise<Uint8Array> };
   store: SqliteStore;
   bootstrapHolds: Map<string, string>;
+  sshBootstrap: SshBootstrapSeam;
 }
 
 function internals(of: VaultEngine = engine): EngineInternals {
@@ -307,4 +322,82 @@ describe("useSecret — a bootstrap mark this engine holds", () => {
 
     await expectVaultError(() => engine.useSecret(HANDLE, HTTP), ErrorCode.SECRET_REVOKED);
   });
+});
+
+describe("revokeSecret — the secret's bootstrap mark", () => {
+  it("a revoke clears the secret's mark", async () => {
+    store().claimBootstrapMark(secretId, "claim-other", MARK_AT);
+
+    await engine.revokeSecret(HANDLE);
+
+    expect(store().getSecret(secretId)?.status).toBe(SecretStatus.REVOKED);
+    expect(store().readBootstrapMark(secretId)).toBeUndefined();
+  });
+
+  it("a revoke whose row fails keeps the mark", async () => {
+    store().claimBootstrapMark(secretId, "claim-other", MARK_AT);
+    failAuditInsert(1);
+
+    await expectVaultError(() => engine.revokeSecret(HANDLE), ErrorCode.INTERNAL_ERROR);
+    vi.restoreAllMocks();
+
+    expect(store().getSecret(secretId)?.status).toBe(SecretStatus.ACTIVE);
+    expect(store().readBootstrapMark(secretId)).toEqual({ claim: "claim-other", at: MARK_AT });
+    expect(rowsOf(AuditEventType.SECRET_REVOKE).map((row) => row.success)).toStrictEqual([false]);
+  });
+
+  it.skipIf(SSH_ON_PATH === null)(
+    "a bootstrap whose secret is revoked under it writes mark: gone",
+    async () => {
+      await engine.setInjectionPolicy(HANDLE, { command_allowlist: ["ssh"], ssh_bootstrap: BLOCK });
+      let finish: (outcome: BootstrapOutcome) => void = () => undefined;
+      const running = new Promise<undefined>((entered) => {
+        internals().sshBootstrap = {
+          refuseVaultHost: () => undefined,
+          refuseOldClient: () => Promise.resolve(),
+          run: () => {
+            entered(undefined);
+            return new Promise<BootstrapOutcome>((settle) => {
+              finish = settle;
+            });
+          },
+        };
+      });
+      const use = engine.useSecret(HANDLE, BOOT);
+      await Promise.race([running, use]);
+
+      await engine.revokeSecret(HANDLE);
+      finish(DONE);
+
+      await expect(use).resolves.toStrictEqual({
+        type: "ssh_bootstrap",
+        key: "installed",
+        sudoers: "not_asked",
+      });
+      const uses = rowsOf(AuditEventType.SECRET_USE).map(({ detail, success }) => ({
+        detail,
+        success,
+      }));
+      expect(uses).toStrictEqual([
+        {
+          detail: {
+            ...B0,
+            outcome: "done",
+            key: "installed",
+            drop_in: "not_asked",
+            secret_ended: false,
+            mark: "gone",
+            ...SPAWN,
+          },
+          success: true,
+        },
+        { detail: { ...B0, began: true }, success: true },
+      ]);
+      expect(rowsOf(AuditEventType.SECRET_REVOKE).map((row) => row.detail)).toStrictEqual([
+        { handle: HANDLE },
+      ]);
+      expect(store().getSecret(secretId)?.status).toBe(SecretStatus.REVOKED);
+      expect(store().readBootstrapMark(secretId)).toBeUndefined();
+    },
+  );
 });

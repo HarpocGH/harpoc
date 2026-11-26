@@ -1,9 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditEventType } from "@harpoc/shared";
 import { generateRandomBytes } from "../crypto/random.js";
 import { SqliteStore } from "../storage/sqlite-store.js";
+import { deriveAuditChainKey } from "./audit-chain.js";
 import { AuditLogger } from "./audit-logger.js";
 import { AuditQuery } from "./audit-query.js";
+
+vi.mock("./audit-chain.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./audit-chain.js")>();
+  return { ...actual, deriveAuditChainKey: vi.fn(actual.deriveAuditChainKey) };
+});
 
 let store: SqliteStore;
 let auditKey: Uint8Array;
@@ -155,5 +161,16 @@ describe("AuditQuery", () => {
     expect(event).not.toHaveProperty("detail_encrypted");
     expect(event).not.toHaveProperty("detail_iv");
     expect(event).not.toHaveProperty("detail_tag");
+  });
+
+  it("verifyChain leaves no chain key behind", () => {
+    logger.log({ eventType: AuditEventType.VAULT_UNLOCK });
+    const derive = vi.mocked(deriveAuditChainKey);
+    derive.mockClear();
+
+    expect(query.verifyChain()).toEqual({ valid: true, checked: 1, firstBrokenId: null });
+    expect(derive).toHaveBeenCalledOnce();
+    const chainKey = derive.mock.results[0]?.value as Uint8Array;
+    expect(chainKey.every((b) => b === 0)).toBe(true);
   });
 });

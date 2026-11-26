@@ -38,6 +38,7 @@ export class SshInjector {
     config: ConnectionConfig | undefined,
     secretId?: string,
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<SshResult> {
     // Defense in depth beside the schema's first-character anchor: host and
     // user reach ssh's argv, so a leading dash must never parse as an option.
@@ -115,6 +116,7 @@ export class SshInjector {
           networkIsolation,
           fsIsolation,
           strictTreeExit: policy.strict_tree_exit === true,
+          signal,
         });
       } catch (err) {
         if (err instanceof VaultError) {

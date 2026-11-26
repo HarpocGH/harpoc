@@ -360,7 +360,7 @@ describe("useSecret — a render's door and the handle's own ladder", () => {
     expect(nonReadAuditCount(engine)).toBe(before);
   });
 
-  itSsh("the engine reads operation, entry and timeout_ms once after the door", async () => {
+  itSsh("operation, entry, timeout_ms and host are read once, by the door's copy", async () => {
     installRenderSeam(engine);
     const reads: Record<string, number> = {};
     const getter = (key: string, value: unknown) => ({
@@ -382,7 +382,7 @@ describe("useSecret — a render's door and the handle's own ladder", () => {
 
     await expect(engine.useSecret(KEY, unparsed(action), ALICE)).resolves.toStrictEqual(RESULT);
 
-    expect(reads).toStrictEqual({ operation: 2, entry: 2, timeout_ms: 1, host: 1 });
+    expect(reads).toStrictEqual({ operation: 1, entry: 1, timeout_ms: 1, host: 1 });
   });
 
   it.each([
@@ -433,7 +433,7 @@ describe("useSecret — a render's door and the handle's own ladder", () => {
   );
 
   itSsh(
-    "an action whose type answers otherwise on a later read is no render beside a bootstrap of a stored block",
+    "an action whose type answers otherwise on a later read is judged by its first answer everywhere, neither a render nor a bootstrap beside a stored block",
     async () => {
       storeInjectionPolicyBlob(
         engine,
@@ -466,7 +466,7 @@ describe("useSecret — a render's door and the handle's own ladder", () => {
 
       expect(calls).toHaveLength(0);
       expect(details(keyId)).toStrictEqual([
-        { handle: KEY, context: "ssh", error: ErrorCode.RENDER_ONLY_KEY, ...REST },
+        { handle: KEY, context: "http", error: ErrorCode.RENDER_ONLY_KEY, ...REST },
       ]);
     },
   );
@@ -503,8 +503,8 @@ describe("useSecret — a render's entry, before the hold (step 2)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("an entry that is no name, past the door, is no entry, recorded without it", async () => {
-    installRenderSeam(engine);
+  itSsh("an entry that is no name past the door is rendered as the door read it", async () => {
+    const calls = installRenderSeam(engine);
     let reads = 0;
     const action = Object.defineProperties(
       { type: "sftp", operation: "render" },
@@ -519,11 +519,10 @@ describe("useSecret — a render's entry, before the hold (step 2)", () => {
       },
     );
 
-    await expectVaultError(
-      () => engine.useSecret(KEY, unparsed(action)),
-      ErrorCode.RENDER_ENTRY_NOT_FOUND,
-    );
-    expect(details(keyId)).toStrictEqual([{ ...R0, error: ErrorCode.RENDER_ENTRY_NOT_FOUND }]);
+    await expect(engine.useSecret(KEY, unparsed(action), ALICE)).resolves.toStrictEqual(RESULT);
+
+    expect(reads).toBe(1);
+    expect(calls.map((call) => call.plan.entry.name)).toStrictEqual(["env"]);
   });
 
   it("an entry whose host the stored allowlist does not admit", async () => {

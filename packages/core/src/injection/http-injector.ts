@@ -187,10 +187,12 @@ export class HttpInjector {
     followRedirects: FollowRedirects = "same-origin",
     secretId?: string,
     attribution?: AuditAttribution,
+    signal?: AbortSignal,
   ): Promise<HttpResult> {
     try {
       // Validate URL (includes DNS rebinding check)
       const validated = await validateUrl(request.url);
+      if (signal?.aborted) throw VaultError.vaultLocked();
       const url = validated.url;
 
       // Build headers + inject credential (bearer/header/query/basic_auth),

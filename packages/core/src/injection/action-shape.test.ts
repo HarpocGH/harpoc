@@ -19,7 +19,10 @@ const CONTEXTS = [
 
 describe("actionShapeRefusal", () => {
   it("passes an action of each context", () => {
-    for (const type of CONTEXTS) expect(actionShapeRefusal({ type })).toBeUndefined();
+    for (const type of CONTEXTS) {
+      const action = type === "smtp" ? { type, from: "a@example.org" } : { type };
+      expect(actionShapeRefusal(action)).toBeUndefined();
+    }
   });
 
   it("passes an action with keys it does not know, and one on a null-prototype object", () => {
@@ -188,6 +191,57 @@ describe("actionShapeRefusal — the sftp render's shape", () => {
   it("leaves timeout_ms to the timeout guard", () => {
     expect(actionShapeRefusal({ ...RENDER, timeout_ms: -1 })).toBeUndefined();
     expect(actionShapeRefusal({ ...RENDER, timeout_ms: "5" })).toBeUndefined();
+  });
+});
+
+describe("actionShapeRefusal — the mail fields", () => {
+  const RECIPIENTS = "smtp to, cc and bcc must be arrays of strings";
+  const FROM = "smtp from must be a string";
+  const ACCOUNT = "imap account must be a string";
+  const SMTP = { type: "smtp", from: "a@example.org" };
+  const NO_STRING_ARRAYS = ["a@example.org", 5, null, {}, [5], ["a@example.org", 5], [null]];
+  const NO_STRINGS = [5, null, true, {}, ["a@example.org"]];
+
+  it.each(["to", "cc", "bcc"])(
+    "refuses an smtp %s that is present and no array of strings",
+    (field) => {
+      for (const value of NO_STRING_ARRAYS) {
+        expect(actionShapeRefusal({ ...SMTP, [field]: value })).toBe(RECIPIENTS);
+      }
+    },
+  );
+
+  it.each(["to", "cc", "bcc"])(
+    "passes an smtp %s that is an array of strings, or absent",
+    (field) => {
+      expect(actionShapeRefusal({ ...SMTP, [field]: ["a@example.org"] })).toBeUndefined();
+      expect(actionShapeRefusal({ ...SMTP, [field]: [] })).toBeUndefined();
+      expect(actionShapeRefusal({ ...SMTP, [field]: undefined })).toBeUndefined();
+      expect(actionShapeRefusal(SMTP)).toBeUndefined();
+    },
+  );
+
+  it("refuses an smtp from that is no string, an absent one included", () => {
+    expect(actionShapeRefusal({ type: "smtp", to: ["a@example.org"] })).toBe(FROM);
+    for (const from of [undefined, ...NO_STRINGS]) {
+      expect(actionShapeRefusal({ type: "smtp", from, to: ["a@example.org"] })).toBe(FROM);
+    }
+  });
+
+  it("passes an smtp from that is a string", () => {
+    expect(actionShapeRefusal({ type: "smtp", from: "a@example.org" })).toBeUndefined();
+  });
+
+  it("refuses an imap account that is present and no string", () => {
+    for (const account of NO_STRINGS) {
+      expect(actionShapeRefusal({ type: "imap", account })).toBe(ACCOUNT);
+    }
+  });
+
+  it("passes an imap account that is a string, or absent", () => {
+    expect(actionShapeRefusal({ type: "imap", account: "a@example.org" })).toBeUndefined();
+    expect(actionShapeRefusal({ type: "imap", account: undefined })).toBeUndefined();
+    expect(actionShapeRefusal({ type: "imap" })).toBeUndefined();
   });
 });
 

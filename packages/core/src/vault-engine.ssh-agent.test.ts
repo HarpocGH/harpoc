@@ -697,7 +697,49 @@ describe("signForAgentSocket — a bound, allowlisted signature", () => {
     expect(retained.every(allZero)).toBe(true);
   });
 
-  it("a seal between the decrypt and the sign refuses VAULT_LOCKED: no signature, the key wiped, no row, no slide", async () => {
+  it("a request whose data changes during the decrypt signs what was judged", async () => {
+    await engine.listAgentSocketIdentities(caller(), null);
+    const request = signRequest(ED_KEY, boundTo(HOST_A));
+    const judged = Buffer.from(request.data);
+    const manager = (engine as unknown as { secretManager: SecretManager }).secretManager;
+    const decrypt = manager.getSecretValue.bind(manager);
+    manager.getSecretValue = async (...args: Parameters<SecretManager["getSecretValue"]>) => {
+      const value = await decrypt(...args);
+      request.data.fill(0x41);
+      return value;
+    };
+
+    const signature = await engine.signForAgentSocket(caller(), request);
+
+    const reader = new SshReader(signature);
+    expect(reader.readCString()).toBe("ssh-ed25519");
+    expect(verify(null, judged, ed25519PublicKey(ED_KEY), reader.readString())).toBe(true);
+  });
+
+  it("a binding's host key is read once, for the session check and the host alike", async () => {
+    const data = buildUserauthRequest({
+      sessionId: SESSION,
+      user: "git",
+      algorithm: "ssh-ed25519",
+      publicKeyBlob: ED_KEY,
+      hostKeyBlob: HOST_A,
+    });
+    let reads = 0;
+    const binding = Object.defineProperty({ sessionId: SESSION }, "hostKeyBlob", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return HOST_A;
+      },
+    }) as AgentBinding;
+
+    await engine.signForAgentSocket(caller(), signRequest(ED_KEY, binding, { data }));
+
+    expect(reads).toBe(1);
+    expect(useRows(ids["deploy-ed"]).map((row) => row.success)).toEqual([true]);
+  });
+
+  it("a seal between the decrypt and the sign refuses VAULT_LOCKED: no signature, the key wiped, the seal's one row, no slide", async () => {
     await engine.listAgentSocketIdentities(caller(), null);
     const retained = retainDecryptedValues(engine);
     const manager = (engine as unknown as { secretManager: SecretManager }).secretManager;
@@ -717,7 +759,17 @@ describe("signForAgentSocket — a bound, allowlisted signature", () => {
     expect(retained.every(allZero)).toBe(true);
     expect(slide).not.toHaveBeenCalled();
     await engine.unlock("password");
-    expect(useRows(ids["deploy-ed"])).toHaveLength(0);
+    expect(useRows(ids["deploy-ed"]).map((row) => [row.success, row.detail])).toStrictEqual([
+      [
+        false,
+        {
+          context: "ssh_agent",
+          key_type: "ssh-ed25519",
+          error: ErrorCode.VAULT_LOCKED,
+          interface: "ssh_agent",
+        },
+      ],
+    ]);
   });
 });
 

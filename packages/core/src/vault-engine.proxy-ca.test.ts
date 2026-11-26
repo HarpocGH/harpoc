@@ -558,7 +558,9 @@ describe("the reads that can find nothing write found: false (A-6)", () => {
   it("getAcmeAccount without a stored account: null, one vault.read row found: false with the caller's principal and no secret id, no secret.read row", async () => {
     const secretId = await certificateWithoutAccount();
 
-    expect(engine.getAcmeAccount(secretId, READER, `secret://${CERT_NAME}`)).toBeNull();
+    await expect(
+      engine.getAcmeAccount(secretId, READER, `secret://${CERT_NAME}`),
+    ).resolves.toBeNull();
 
     expect(rows(AuditEventType.SECRET_READ, secretId)).toEqual([]);
     const reads = vaultReads("acme_account");
@@ -586,7 +588,7 @@ describe("the reads that can find nothing write found: false (A-6)", () => {
       acmeAccountJson: JSON.stringify({ accountUrl: "u" }),
     });
 
-    expect(engine.getAcmeAccount(secretId)).toContain("accountUrl");
+    await expect(engine.getAcmeAccount(secretId)).resolves.toContain("accountUrl");
 
     expect(vaultReads("acme_account")).toEqual([]);
     const reads = rows(AuditEventType.SECRET_READ, secretId);
@@ -598,11 +600,7 @@ describe("the reads that can find nothing write found: false (A-6)", () => {
     const secretId = await certificateWithoutAccount();
     failNextAuditInsert();
 
-    let answer: unknown;
-    expect(() => {
-      answer = engine.getAcmeAccount(secretId, READER);
-    }).toThrow("audit unavailable");
-    expect(answer).toBeUndefined();
+    await expect(engine.getAcmeAccount(secretId, READER)).rejects.toThrow("audit unavailable");
     expect(vaultReads("acme_account")).toEqual([]);
   });
 });

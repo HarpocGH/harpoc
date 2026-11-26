@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { UseSecretAction } from "@harpoc/shared";
+import type { CallerContext, UseSecretAction } from "@harpoc/shared";
 import { AuditEventType, ErrorCode, injectionPolicyInputSchema, VaultError } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { nonReadAuditCount, storeInjectionPolicyBlob } from "./__fixtures__/engine-seams.js";
@@ -48,11 +48,15 @@ interface EngineInternals {
   secretManager: {
     getSecretValue: (handle: string) => Promise<Uint8Array>;
     resolveHandle: (handle: string) => Promise<unknown>;
+    findByHandle: (handle: string) => Promise<unknown[]>;
     assertUsable: (...args: unknown[]) => void;
   };
   store: { insertAuditEvent: (...args: unknown[]) => unknown };
   loadInjectionPolicy: (...args: unknown[]) => unknown;
-  concealHandleError: (...args: unknown[]) => unknown;
+  assertDockerIsolationAllowed: (...args: unknown[]) => void;
+  httpInjector: { executeWithSecret: (...args: unknown[]) => Promise<unknown> };
+  smtpInjector: { run: (...args: unknown[]) => Promise<unknown> };
+  dockerExecutor: (...args: unknown[]) => Promise<unknown>;
 }
 
 const HANDLE = "secret://k";
@@ -185,6 +189,161 @@ describe("useSecret — the door", () => {
   });
 });
 
+function answering(
+  fields: Record<string, unknown>,
+  key: string,
+  first: unknown,
+  then: unknown,
+): { action: UseSecretAction; reads: () => number } {
+  let reads = 0;
+  const action = Object.defineProperty({ ...fields }, key, {
+    enumerable: true,
+    get: () => {
+      reads += 1;
+      return reads === 1 ? first : then;
+    },
+  });
+  return { action: unparsed(action), reads: () => reads };
+}
+
+type SmtpRun = EngineInternals["smtpInjector"]["run"];
+
+const SMTP_SEND = {
+  type: "smtp",
+  host: "smtp.example.com",
+  from: "ops@example.com",
+  to: ["dev@example.com"],
+  subject: "s",
+  text: "t",
+};
+const SMTP_EXECUTION = {
+  result: { type: "smtp", accepted: 1, message_id: "<m@harpoc>" },
+  auditDetails: {
+    host: "smtp.example.com",
+    from: "ops@example.com",
+    recipients: ["dev@example.com"],
+    attachment_paths: [],
+    attachment_total_bytes: 0,
+  },
+};
+
+describe("useSecret — the action copied at the door", () => {
+  beforeEach(async () => {
+    await initWithSecret("k", "value-for-no-injector");
+  });
+
+  it("a Proxy as the action is refused at the door, without a row", async () => {
+    const guard = vi.spyOn(internals(), "assertDockerIsolationAllowed");
+    try {
+      const err = await expectVaultError(
+        () => engine.useSecret(HANDLE, unparsed(new Proxy({ type: "http" }, {}))),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe("action must be plain data");
+      expect(useRows()).toHaveLength(0);
+      expect(guard).not.toHaveBeenCalled();
+    } finally {
+      guard.mockRestore();
+    }
+  });
+
+  it("an action that answers http to the guard and docker_registry to the dispatch runs as what the door read", async () => {
+    const dockerExecutor = vi.fn();
+    internals().dockerExecutor = dockerExecutor;
+    const { action, reads } = answering(
+      {
+        method: "GET",
+        url: "https://api.example.com/",
+        operation: "pull",
+        image: "registry.example.com/app:1",
+      },
+      "type",
+      "http",
+      "docker_registry",
+    );
+
+    await expectVaultError(() => engine.useSecret(HANDLE, action), ErrorCode.URL_NOT_ALLOWED);
+
+    expect(dockerExecutor).not.toHaveBeenCalled();
+    expect(reads()).toBe(1);
+  });
+
+  it("an http url is matched and sent from one read", async () => {
+    await engine.setInjectionPolicy(HANDLE, { url_allowlist: ["https://api.example.com/*"] });
+    const executeWithSecret = vi.fn<EngineInternals["httpInjector"]["executeWithSecret"]>(() =>
+      Promise.resolve({ type: "http", status: 200 }),
+    );
+    internals().httpInjector = { executeWithSecret };
+    const { action, reads } = answering(
+      { type: "http", method: "GET", injection: { type: "bearer" } },
+      "url",
+      "https://api.example.com/ok",
+      "https://evil.example.com/collect",
+    );
+
+    await engine.useSecret(HANDLE, action);
+
+    expect(executeWithSecret).toHaveBeenCalledTimes(1);
+    expect(executeWithSecret.mock.calls[0]?.[0]).toMatchObject({
+      url: "https://api.example.com/ok",
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it("smtp's security is judged and recorded from one read", async () => {
+    await engine.setConnectionConfig(HANDLE, { mail: { tls: false } });
+    const run = vi.fn<SmtpRun>(() => Promise.resolve(SMTP_EXECUTION));
+    internals().smtpInjector = { run };
+    const { action, reads } = answering(SMTP_SEND, "security", "tls", "starttls");
+
+    await engine.useSecret(HANDLE, action);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]).toMatchObject({ security: "tls" });
+    expect(useRows()).toStrictEqual([
+      {
+        detail: { context: "smtp", ...SMTP_EXECUTION.auditDetails, tls_opt_out: true },
+        success: true,
+      },
+    ]);
+    expect(reads()).toBe(1);
+  });
+
+  it("timeout_ms is judged and run from one read", async () => {
+    const run = vi.fn<SmtpRun>(() => Promise.resolve(SMTP_EXECUTION));
+    internals().smtpInjector = { run };
+    const { action, reads } = answering(SMTP_SEND, "timeout_ms", 1000, 999_999_999);
+
+    await engine.useSecret(HANDLE, action);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]).toMatchObject({ timeout_ms: 1000 });
+    expect(reads()).toBe(1);
+  });
+
+  it("a locked vault answers VAULT_LOCKED before the copy", async () => {
+    await engine.lock();
+    await expectVaultError(
+      () => engine.useSecret(HANDLE, unparsed(new Proxy({ type: "http" }, {}))),
+      ErrorCode.VAULT_LOCKED,
+    );
+  });
+
+  it("a string as smtp bcc is refused at the door", async () => {
+    const run = vi.fn<SmtpRun>(() => Promise.resolve(SMTP_EXECUTION));
+    internals().smtpInjector = { run };
+
+    const err = await expectVaultError(
+      () => engine.useSecret(HANDLE, unparsed({ ...SMTP_SEND, bcc: "audit@example.com" })),
+      ErrorCode.INVALID_INPUT,
+    );
+
+    expect(err.message).toBe("smtp to, cc and bcc must be arrays of strings");
+    expect(useRows()).toHaveLength(0);
+    expect(run).not.toHaveBeenCalled();
+  });
+});
+
 const IMAP = {
   type: "imap",
   host: "imap.example.com",
@@ -273,13 +432,9 @@ describe("useSecret — the STARTTLS refusal of a malformed smtp action", () => 
     await engine.setConnectionConfig("secret://mail", { mail: { tls: false } });
   });
 
-  it("is refused with one failed row whatever the recipients and attachments look like", async () => {
+  it("is refused with one failed row whatever the attachments look like, and without recipients", async () => {
     const shapes = [
       {},
-      { to: 5 },
-      { to: "dev@example.com" },
-      { to: ["dev@example.com"], cc: 5 },
-      { to: ["dev@example.com"], bcc: {} },
       { to: ["dev@example.com"], attachments: "x" },
       { to: ["dev@example.com"], attachments: [null] },
     ];
@@ -299,6 +454,31 @@ describe("useSecret — the STARTTLS refusal of a malformed smtp action", () => 
     }
   });
 
+  it("recipients that are no arrays of strings never reach it: the door refuses them without a row", async () => {
+    const shapes = [
+      { to: 5 },
+      { to: "dev@example.com" },
+      { to: ["dev@example.com", 5] },
+      { to: ["dev@example.com"], cc: 5 },
+      { to: ["dev@example.com"], cc: "cc@example.com" },
+      { to: ["dev@example.com"], bcc: {} },
+    ];
+    const getSecretValue = vi.spyOn(internals().secretManager, "getSecretValue");
+    try {
+      for (const shape of shapes) {
+        const err = await expectVaultError(
+          () => engine.useSecret("secret://mail", unparsed({ ...STARTTLS, ...shape })),
+          ErrorCode.INVALID_INPUT,
+        );
+        expect(err.message).toBe("smtp to, cc and bcc must be arrays of strings");
+      }
+      expect(getSecretValue).not.toHaveBeenCalled();
+      expect(useRows()).toHaveLength(0);
+    } finally {
+      getSecretValue.mockRestore();
+    }
+  });
+
   it("the row names what has its schema's type and nothing else", async () => {
     await expectVaultError(
       () =>
@@ -306,8 +486,7 @@ describe("useSecret — the STARTTLS refusal of a malformed smtp action", () => 
           "secret://mail",
           unparsed({
             ...STARTTLS,
-            to: ["dev@example.com", 5],
-            cc: "cc@example.com",
+            to: ["dev@example.com"],
             attachments: [null, { path: "/tmp/a.txt" }, { path: 5 }],
           }),
         ),
@@ -543,6 +722,11 @@ describe("useSecret — a raw throw before the decrypt", () => {
     context: "http",
     error: ErrorCode.INTERNAL_ERROR,
   };
+  const TOKEN_CALLER: CallerContext = {
+    principal_type: "agent",
+    principal_id: "bob",
+    interface: "rest",
+  };
 
   beforeEach(async () => {
     await initWithSecret("k", "value-for-no-injector");
@@ -575,14 +759,31 @@ describe("useSecret — a raw throw before the decrypt", () => {
   it("a raw throw while the resolution's error is concealed leaves one row", async () => {
     const resolve = vi
       .spyOn(internals().secretManager, "resolveHandle")
-      .mockRejectedValue(new Error("raw-marker"));
-    const conceal = vi
-      .spyOn(internals(), "concealHandleError")
+      .mockRejectedValue(new VaultError(ErrorCode.AMBIGUOUS_HANDLE, `Ambiguous handle: ${HANDLE}`));
+    const lookup = vi
+      .spyOn(internals().secretManager, "findByHandle")
       .mockRejectedValue(new Error("raw-marker"));
     try {
-      await refusedInternally();
+      const err = await expectVaultError(
+        () => engine.useSecret(HANDLE, ACTION, TOKEN_CALLER),
+        ErrorCode.INTERNAL_ERROR,
+      );
+      expect(err.message).toBe("the use failed unexpectedly");
+      const rows = useRows();
+      expect(rows).toStrictEqual([
+        {
+          detail: {
+            handle: HANDLE,
+            context: "http",
+            error: ErrorCode.AMBIGUOUS_HANDLE,
+            interface: "rest",
+          },
+          success: false,
+        },
+      ]);
+      expect(JSON.stringify(rows)).not.toContain("raw-marker");
     } finally {
-      conceal.mockRestore();
+      lookup.mockRestore();
       resolve.mockRestore();
     }
   });

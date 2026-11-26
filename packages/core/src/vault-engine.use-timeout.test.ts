@@ -89,6 +89,7 @@ describe("useSecret — an out-of-schema timeout_ms of an unparsed caller", () =
             unparsed({
               type,
               security: "tls",
+              from: "ops@example.com",
               ...(type === "ssh" ? {} : { operation: { kind: "search" } }),
               timeout_ms: 0,
             }),

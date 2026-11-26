@@ -11,7 +11,9 @@ import {
   tokenlessStdioCaller,
   VaultError,
 } from "@harpoc/shared";
+import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
+import type { ProxyTarget } from "./vault-engine.js";
 import { VaultEngine } from "./vault-engine.js";
 import { registerAgents } from "./__fixtures__/engine-seams.js";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -305,6 +307,121 @@ describe("AMBIGUOUS_HANDLE is concealed for a grantless token caller", () => {
     expect((await manager.findByHandle(H)).length).toBe(2);
     expect((await manager.findByHandle("secret://nope")).length).toBe(0);
   });
+});
+
+describe("a raw throw at a concealment site leaves as INTERNAL_ERROR", () => {
+  const H = "secret://twice";
+  const RESOLUTION_FAILED = "the operation failed unexpectedly";
+  const TARGET: ProxyTarget = { method: "GET", origin: "https://api.example.com", path: "/x" };
+
+  interface ConcealSite {
+    name: string;
+    eventType: AuditEventType;
+    message: string;
+    call: (caller?: CallerContext) => Promise<unknown>;
+  }
+  const CONCEAL_SITES: ConcealSite[] = [
+    {
+      name: "getSecretInfo",
+      eventType: AuditEventType.SECRET_READ,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.getSecretInfo(H, caller),
+    },
+    {
+      name: "getSecretValue",
+      eventType: AuditEventType.SECRET_READ,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.getSecretValue(H, caller),
+    },
+    {
+      name: "setSecretValue",
+      eventType: AuditEventType.SECRET_CREATE,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.setSecretValue(H, VALUE, caller),
+    },
+    {
+      name: "rotateSecret",
+      eventType: AuditEventType.SECRET_ROTATE,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.rotateSecret(H, VALUE, caller),
+    },
+    {
+      name: "revokeSecret",
+      eventType: AuditEventType.SECRET_REVOKE,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.revokeSecret(H, caller),
+    },
+    {
+      name: "useSecret",
+      eventType: AuditEventType.SECRET_USE,
+      message: "the use failed unexpectedly",
+      call: (caller) => engine.useSecret(H, USE, caller),
+    },
+    {
+      name: "resolveForProxy",
+      eventType: AuditEventType.SECRET_USE,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.resolveForProxy(H, caller ?? agent("bob"), TARGET),
+    },
+    {
+      name: "resolveSecretId",
+      eventType: AuditEventType.SECRET_READ,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.resolveSecretId(H, caller),
+    },
+    {
+      name: "getInjectionPolicy",
+      eventType: AuditEventType.SECRET_READ,
+      message: RESOLUTION_FAILED,
+      call: (caller) => engine.getInjectionPolicy(H, caller),
+    },
+  ];
+
+  function manager(): SecretManager {
+    return (engine as unknown as { secretManager: SecretManager }).secretManager;
+  }
+
+  function failedRows(eventType: AuditEventType) {
+    return engine.queryAudit({ eventType }).filter((row) => !row.success);
+  }
+
+  it.each(CONCEAL_SITES)(
+    "$name: a raw throw of the resolution leaves as INTERNAL_ERROR",
+    async ({ eventType, message, call }) => {
+      vi.spyOn(manager(), "findByHandle").mockRejectedValue(new Error("boom"));
+
+      const err = await expectVaultError(() => call(), ErrorCode.INTERNAL_ERROR);
+
+      expect(err.message).toBe(message);
+      expect(err.message.includes("boom")).toBe(false);
+      expect(failedRows(eventType).map((row) => row.detail?.error)).toStrictEqual([
+        ErrorCode.INTERNAL_ERROR,
+      ]);
+    },
+  );
+
+  it.each(CONCEAL_SITES)(
+    "$name: a raw throw of the concealment's lookup leaves as INTERNAL_ERROR",
+    async ({ eventType, message, call }) => {
+      await makeSecret("twice");
+      await engine.revokeSecret(H);
+      await makeSecret("twice");
+      await engine.revokeSecret(H);
+      registerAgents(engine, "bob");
+      const lookup = manager().findByHandle.bind(manager());
+      vi.spyOn(manager(), "findByHandle")
+        .mockImplementationOnce((handle) => lookup(handle))
+        .mockRejectedValueOnce(new Error("boom"));
+
+      const err = await expectVaultError(() => call(agent("bob")), ErrorCode.INTERNAL_ERROR);
+
+      expect(err.message).toBe(message);
+      expect(err.message.includes("boom")).toBe(false);
+      expect(failedRows(eventType).map((row) => row.detail?.error)).toStrictEqual([
+        ErrorCode.AMBIGUOUS_HANDLE,
+      ]);
+    },
+  );
 });
 
 // R16(a): a caller-ful wrapped method resolved the handle twice — once in

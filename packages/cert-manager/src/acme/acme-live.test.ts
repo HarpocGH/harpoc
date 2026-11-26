@@ -122,7 +122,7 @@ describe("CertManager against a local ACME CA double (M-P3-5)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.success).toBe(true);
     expect(rows[0]?.detail).toMatchObject({ acme: true, acme_account: true });
-    const account = JSON.parse(engine.getAcmeAccount(issued.secretId) as string) as {
+    const account = JSON.parse((await engine.getAcmeAccount(issued.secretId)) as string) as {
       accountUrl: string;
     };
     expect(account.accountUrl).toBe(`${new URL(double.directoryUrl).origin}/acct/1`);
@@ -133,7 +133,7 @@ describe("CertManager against a local ACME CA double (M-P3-5)", () => {
     const first = new X509Certificate(
       engine.getCertificatePem(issued.secretId).certificatePem as string,
     );
-    const { accountUrl } = JSON.parse(engine.getAcmeAccount(issued.secretId) as string) as {
+    const { accountUrl } = JSON.parse((await engine.getAcmeAccount(issued.secretId)) as string) as {
       accountUrl: string;
     };
     const issuance = double.requests.length;

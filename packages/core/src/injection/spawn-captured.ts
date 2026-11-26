@@ -91,6 +91,11 @@ export interface SpawnCapturedOptions {
   strictTreeExit?: boolean;
   /** Written to the child's standard input, which is then ended; zeroed when the call settles. */
   stdin?: Buffer;
+  /**
+   * Its abort ends the child's tree as the timeout does; aborted before the spawn, no child
+   * starts and the run settles as a failed spawn.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -440,6 +445,27 @@ function superviseChild(
   return new Promise<SpawnCapturedResult>((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
     const spawnedAtMs = Date.now();
+    const notSpawned: SpawnCapturedResult = {
+      exit_code: null,
+      stdout: "",
+      stderr: "",
+      timed_out: false,
+      truncated: false,
+      signal: null,
+      spawn_failed: true,
+      redacted: false,
+      isolation_mechanism: isolationMechanism,
+      fs_isolation_mechanism: fsIsolationMechanism,
+      ...(treeKill ? { tree_kill: treeKill } : {}),
+      // The policy that was in force for this spawn, like the isolation
+      // booleans on the rows — copied from the policy, not from what the
+      // child did (L81, 2026-09-10). Nothing started, so nothing survived.
+      ...(strict ? { strict_tree_exit: true as const } : {}),
+    };
+    if (opts.signal?.aborted) {
+      resolvePromise(notSpawned);
+      return;
+    }
     try {
       child = spawn(command, args, {
         shell: false,
@@ -452,23 +478,7 @@ function superviseChild(
         detached: process.platform !== "win32",
       });
     } catch {
-      resolvePromise({
-        exit_code: null,
-        stdout: "",
-        stderr: "",
-        timed_out: false,
-        truncated: false,
-        signal: null,
-        spawn_failed: true,
-        redacted: false,
-        isolation_mechanism: isolationMechanism,
-        fs_isolation_mechanism: fsIsolationMechanism,
-        ...(treeKill ? { tree_kill: treeKill } : {}),
-        // The policy that was in force for this spawn, like the isolation
-        // booleans on the rows — copied from the policy, not from what the
-        // child did (L81, 2026-09-10). Nothing started, so nothing survived.
-        ...(strict ? { strict_tree_exit: true as const } : {}),
-      });
+      resolvePromise(notSpawned);
       return;
     }
 
@@ -478,6 +488,7 @@ function superviseChild(
     let flushTimer: NodeJS.Timeout | undefined;
     let backstopTimer: NodeJS.Timeout | undefined;
     let sweep: Promise<DescendantSweepResult> | undefined;
+    const onAbort = (): void => expire();
 
     const settle = (result: SpawnCapturedResult): void => {
       if (settled) return;
@@ -485,6 +496,7 @@ function superviseChild(
       clearTimeout(timer);
       if (flushTimer) clearTimeout(flushTimer);
       if (backstopTimer) clearTimeout(backstopTimer);
+      opts.signal?.removeEventListener("abort", onAbort);
       resolvePromise(result);
     };
 
@@ -562,6 +574,7 @@ function superviseChild(
     };
     const timer = setTimeout(expire, opts.timeoutMs);
     if (timer.unref) timer.unref();
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
     wiring.wire(child, expire);
 
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));

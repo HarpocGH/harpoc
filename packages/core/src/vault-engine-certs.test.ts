@@ -1028,7 +1028,7 @@ describe("certificate accessors", () => {
     await expect(engine.getCertificatePrivateKey(plainId)).rejects.toMatchObject({
       code: ErrorCode.CERT_NOT_CONFIGURED,
     });
-    expect(() => engine.getAcmeAccount(plainId)).toThrow(notConfigured);
+    await expectVaultError(() => engine.getAcmeAccount(plainId), ErrorCode.CERT_NOT_CONFIGURED);
   });
 
   it("an import carrying acmeAccountJson stores the account in the cert.issue transaction", async () => {
@@ -1041,7 +1041,7 @@ describe("certificate accessors", () => {
     const row = storedCert(acmeId) as StoredCertRow;
     expect(row.acme_account_encrypted).not.toBeNull();
     expect((row.acme_account_encrypted as Buffer).toString("utf8")).not.toContain("accountUrl");
-    expect(JSON.parse(engine.getAcmeAccount(acmeId) as string)).toEqual({
+    expect(JSON.parse((await engine.getAcmeAccount(acmeId)) as string)).toEqual({
       privateKeyPem: "k",
       accountUrl: "u",
     });
@@ -1104,8 +1104,9 @@ describe("certificate accessors", () => {
     // ACME account with it.
     const rolledBackId = await engine.resolveSecretId("secret://acme-rb");
     expect(storedCert(rolledBackId)).toBeUndefined();
-    expect(() => engine.getAcmeAccount(rolledBackId)).toThrow(
-      expect.objectContaining({ code: ErrorCode.CERT_NOT_CONFIGURED }),
+    await expectVaultError(
+      () => engine.getAcmeAccount(rolledBackId),
+      ErrorCode.CERT_NOT_CONFIGURED,
     );
   });
 
@@ -1121,7 +1122,7 @@ describe("certificate accessors", () => {
       .queryAudit({ eventType: AuditEventType.CERT_ISSUE })
       .filter((e) => e.secret_id === plainCertId);
     expect(issue[0]?.detail).toMatchObject({ acme: false, acme_account: false });
-    expect(engine.getAcmeAccount(plainCertId)).toBeNull();
+    await expect(engine.getAcmeAccount(plainCertId)).resolves.toBeNull();
   });
 
   it("acmeAccountJson without acmeIssued is refused before any write", async () => {
@@ -1139,7 +1140,7 @@ describe("certificate accessors", () => {
   });
 
   it("ACME account roundtrips through KEK encryption and is stored encrypted", async () => {
-    expect(engine.getAcmeAccount(secretId)).toBeNull();
+    await expect(engine.getAcmeAccount(secretId)).resolves.toBeNull();
 
     const { secretId: acmeId } = await engine.importCertificate(
       "roundtrip-acme",
@@ -1150,7 +1151,7 @@ describe("certificate accessors", () => {
         acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
       },
     );
-    expect(JSON.parse(engine.getAcmeAccount(acmeId) as string)).toEqual({
+    expect(JSON.parse((await engine.getAcmeAccount(acmeId)) as string)).toEqual({
       privateKeyPem: "k",
       accountUrl: "u",
     });
@@ -1166,7 +1167,7 @@ describe("certificate accessors", () => {
       acmeIssued: true,
       acmeAccountJson: JSON.stringify({ privateKeyPem: "k", accountUrl: "u" }),
     });
-    expect(engine.getAcmeAccount(acmeId)).toContain("accountUrl");
+    await expect(engine.getAcmeAccount(acmeId)).resolves.toContain("accountUrl");
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
@@ -1177,8 +1178,8 @@ describe("certificate accessors", () => {
     expect(JSON.stringify(reads[0]?.detail)).not.toContain("privateKeyPem");
   });
 
-  it("getAcmeAccount writes no secret.read row when no account is stored", () => {
-    expect(engine.getAcmeAccount(secretId)).toBeNull();
+  it("getAcmeAccount writes no secret.read row when no account is stored", async () => {
+    await expect(engine.getAcmeAccount(secretId)).resolves.toBeNull();
     expect(engine.queryAudit({ eventType: AuditEventType.SECRET_READ }).length).toBe(0);
   });
 
@@ -1192,9 +1193,7 @@ describe("certificate accessors", () => {
       certificatePem: fx("ec-cert.pem"),
     });
     transplantAcmeBlob(acmeId, otherId);
-    expect(() => engine.getAcmeAccount(otherId)).toThrow(
-      expect.objectContaining({ code: ErrorCode.ENCRYPTION_ERROR }),
-    );
+    await expectVaultError(() => engine.getAcmeAccount(otherId), ErrorCode.ENCRYPTION_ERROR);
   });
 
   it("getExpiringCertificates finds the expired fixture within 30 days", async () => {
@@ -1231,7 +1230,7 @@ describe("certificate accessors", () => {
       code: ErrorCode.VAULT_LOCKED,
     });
     expect(() => engine.getExpiringCertificates(30)).toThrow(locked);
-    expect(() => engine.getAcmeAccount(secretId)).toThrow(locked);
+    await expectVaultError(() => engine.getAcmeAccount(secretId), ErrorCode.VAULT_LOCKED);
   });
 });
 
@@ -1849,13 +1848,15 @@ describe("certificate accessors — caller policy enforcement", () => {
   it("getAcmeAccount refuses an ungranted caller before decrypting", async () => {
     const acmeId = await gatedAcmeCert("pol-acme-denied", JSON.stringify({ privateKeyPem: "k" }));
 
-    expect(() =>
-      engine.getAcmeAccount(acmeId, {
-        principal_type: PrincipalType.AGENT,
-        principal_id: "other-agent",
-        interface: "cli",
-      }),
-    ).toThrow(expect.objectContaining({ code: ErrorCode.SECRET_NOT_FOUND }));
+    await expectVaultError(
+      () =>
+        engine.getAcmeAccount(acmeId, {
+          principal_type: PrincipalType.AGENT,
+          principal_id: "other-agent",
+          interface: "cli",
+        }),
+      ErrorCode.SECRET_NOT_FOUND,
+    );
 
     const denials = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
@@ -1868,13 +1869,13 @@ describe("certificate accessors — caller policy enforcement", () => {
   it("getAcmeAccount attributes the granted read to its caller", async () => {
     const acmeId = await gatedAcmeCert("pol-acme-granted", "account-blob");
 
-    expect(
+    await expect(
       engine.getAcmeAccount(acmeId, {
         principal_type: PrincipalType.AGENT,
         principal_id: "reader",
         interface: "cli",
       }),
-    ).toBe("account-blob");
+    ).resolves.toBe("account-blob");
 
     const reads = engine
       .queryAudit({ eventType: AuditEventType.SECRET_READ })
@@ -1920,6 +1921,6 @@ describe("certificate accessors — caller policy enforcement", () => {
     expect(engine.getCertificateStatus(secretId).renewal_status).toBe("ok");
     await expect(engine.getCertificatePrivateKey(secretId)).resolves.toContain("PRIVATE KEY");
     expect(engine.getCertificatePem(secretId).certificatePem).toBe(fx("rsa-cert.pem"));
-    expect(engine.getAcmeAccount(secretId)).toBeNull();
+    await expect(engine.getAcmeAccount(secretId)).resolves.toBeNull();
   });
 });

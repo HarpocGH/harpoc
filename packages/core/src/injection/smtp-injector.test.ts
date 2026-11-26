@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, InjectionPolicyInput, SmtpAction, SmtpResult } from "@harpoc/shared";
 import {
   ActionType,
@@ -13,7 +13,13 @@ import {
 import type { SmtpSendOptions } from "./mail/smtp-client.js";
 import type { MailTlsConfig, SmtpInjectorDeps, SmtpOAuth } from "./smtp-injector.js";
 import { SmtpInjector, buildSmtpAuditDetails, executeSmtpAction } from "./smtp-injector.js";
+import { validateHostPort } from "./url-validator.js";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return { ...actual, validateHostPort: vi.fn(actual.validateHostPort) };
+});
 
 const SECRET = "smtpuser:smtppass";
 const IGNORED_PASSWORD = "ignored-pass";
@@ -176,6 +182,25 @@ describe("SmtpInjector — refusal ordering (security guardrails)", () => {
     );
     expect(calls).toEqual([]);
   });
+
+  it("an aborted signal sends nothing", async () => {
+    const controller = new AbortController();
+    const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+    vi.mocked(validateHostPort).mockImplementationOnce(async (host, port) => {
+      const answer = await real.validateHostPort(host, port);
+      controller.abort();
+      return answer;
+    });
+    const { fn, calls } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+
+    await expectVaultError(
+      () =>
+        injector.run(baseAction(), SECRET, basePolicy({}), undefined, undefined, controller.signal),
+      ErrorCode.VAULT_LOCKED,
+    );
+    expect(calls.length).toBe(0);
+  });
 });
 
 describe("SmtpInjector — attachment caps (vault-authored reasons only)", () => {
@@ -301,6 +326,21 @@ describe("SmtpInjector — envelope and bcc", () => {
       undefined,
     );
     expect(result.message_id).toMatch(/^<.+@harpoc\.local>$/);
+  });
+
+  it("a live signal sends as before", async () => {
+    const { fn, calls } = makeFakeSend();
+    const injector = new SmtpInjector({ sendSmtp: fn });
+    const { result } = await injector.run(
+      baseAction(),
+      SECRET,
+      basePolicy({}),
+      undefined,
+      undefined,
+      new AbortController().signal,
+    );
+    expect(calls.length).toBe(1);
+    expect(result.accepted).toBe(1);
   });
 });
 

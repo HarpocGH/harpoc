@@ -3,10 +3,16 @@ import type { Server } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import type { AddressInfo, Socket } from "node:net";
 import { ErrorCode, MAX_HTTP_RESPONSE_BYTES } from "@harpoc/shared";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { HttpInjector, applyInjectionConfig } from "./http-injector.js";
+import { validateUrl } from "./url-validator.js";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
+
+vi.mock("./url-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./url-validator.js")>();
+  return { ...actual, validateUrl: vi.fn(actual.validateUrl) };
+});
 
 let server: Server;
 let baseUrl: string;
@@ -21,6 +27,7 @@ const logger = {
 const HEADER_ECHO_TOKEN = "header-echo-token-value";
 const ECHOED_CREDENTIAL = "echo-me-token-value";
 const HEAD_REQUEST_TOKEN = "head-token";
+const ABORT_TOKEN = "abort-probe-token";
 
 // The recording logger is module-scoped, so every case that reads `rows.at(-1)`
 // starts from an empty log — no row may be load-bearing across cases.
@@ -1206,6 +1213,50 @@ describe("HttpInjector", () => {
       expect(response.headers?.["x-echo"]).toBe("header-echo-token-value");
       const last = rows.at(-1) as { detail: Record<string, unknown> };
       expect("sanitized" in last.detail).toBe(false);
+    });
+  });
+
+  describe("a signal aborted during the lookup", () => {
+    it("an aborted signal sends nothing", async () => {
+      const controller = new AbortController();
+      const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+      vi.mocked(validateUrl).mockImplementationOnce(async (...args) => {
+        const answer = await real.validateUrl(...args);
+        controller.abort();
+        return answer;
+      });
+      const before = requestPaths.length;
+
+      await expectVaultError(
+        () =>
+          new HttpInjector(logger).executeWithSecret(
+            { method: "GET", url: `${baseUrl}/echo` },
+            new Uint8Array(Buffer.from(ABORT_TOKEN)),
+            { type: "bearer" },
+            undefined,
+            "secret-1",
+            undefined,
+            controller.signal,
+          ),
+        ErrorCode.VAULT_LOCKED,
+      );
+
+      expect(requestPaths.length).toBe(before);
+      expect(rows).toStrictEqual([
+        {
+          eventType: "secret.use",
+          secretId: "secret-1",
+          detail: {
+            context: "http",
+            method: "GET",
+            url: `${baseUrl}/echo`,
+            error: ErrorCode.VAULT_LOCKED,
+            injection_type: "bearer",
+            response_mode: "filtered",
+          },
+          success: false,
+        },
+      ]);
     });
   });
 });

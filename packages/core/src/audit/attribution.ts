@@ -2,6 +2,10 @@ import type { AccessInterface, CallerContext, PrincipalType } from "@harpoc/shar
 import { ErrorCode, VaultError } from "@harpoc/shared";
 import type { AuditLogOptions } from "./audit-logger.js";
 
+export interface UseMark {
+  recorded: boolean;
+}
+
 /**
  * Per-invocation audit attribution threaded from the engine into the
  * injectors' audit writes (thesis §4.3.4 "by whom" / "through which
@@ -19,6 +23,7 @@ export interface AuditAttribution {
   interface?: AccessInterface;
   /** The caller's socket peer, landing in `ip_address` (E75i). */
   remote_address?: string;
+  use?: UseMark;
 }
 
 /**
@@ -84,6 +89,7 @@ export function withAttribution(
   if (attribution.principal_id !== undefined) merged.principalId = attribution.principal_id;
   if (attribution.session_id !== undefined) merged.sessionId = attribution.session_id;
   if (attribution.remote_address !== undefined) merged.ipAddress = attribution.remote_address;
+  if (attribution.use !== undefined) merged.use = attribution.use;
   if (attribution.interface !== undefined) {
     merged.detail = {
       ...(options.detail ?? {}),

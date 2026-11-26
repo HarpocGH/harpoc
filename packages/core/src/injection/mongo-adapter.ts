@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { VaultError } from "@harpoc/shared";
 import type { MongoClient } from "mongodb";
 import type { DbCommandAdapter, DbConnectOptions, DbQueryResult } from "./db-adapters.js";
 import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
@@ -72,6 +73,7 @@ import { DB_CLOSE_GRACE_MS, identityCheckerFor } from "./db-adapters.js";
 export class MongoAdapter implements DbCommandAdapter {
   async execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult> {
     const { MongoClient, MongoNetworkError } = await import("mongodb");
+    if (opts.signal?.aborted) throw VaultError.vaultLocked();
 
     // SNI (and the driver's own servername auto-default) forbids an
     // IP-literal servername — supply `database.servername` when configured,

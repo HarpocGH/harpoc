@@ -263,7 +263,7 @@ describe("resolveForProxy — the plain reading of a loopback literal", () => {
         ErrorCode.INVALID_INPUT,
       );
       expect(err.message).toBe(
-        "Invalid proxy target: an http(s) origin and a path without query or fragment",
+        "Invalid proxy target: an https origin and a path without query or fragment",
       );
     }
     expect(useRows()).toHaveLength(0);

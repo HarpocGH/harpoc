@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import type { ConnectionConfig, DatabaseAction } from "@harpoc/shared";
-import { DEFAULT_DB_TIMEOUT_MS, ErrorCode, MAX_DB_RESULT_BYTES } from "@harpoc/shared";
+import { DEFAULT_DB_TIMEOUT_MS, ErrorCode, MAX_DB_RESULT_BYTES, VaultError } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import type { AuditLogger, AuditLogOptions } from "../audit/audit-logger.js";
 import { DatabaseInjector } from "./database-injector.js";
@@ -12,6 +12,7 @@ import {
   action,
   injector,
   policy,
+  redisAction,
 } from "./__fixtures__/database-injector-doubles.js";
 import { validateHostPort } from "./url-validator.js";
 
@@ -85,6 +86,21 @@ describe("DatabaseInjector", () => {
     expect(res.row_count).toBe(1);
     expect(mock.lastConnect?.user).toBe("admin");
     expect(mock.lastConnect?.password).toBe("s3cr3t");
+    expect(mock.lastQuery?.sql).toBe("SELECT 1");
+  });
+
+  it("a live signal sends as before", async () => {
+    const mock = new MockAdapter({ rows: [{ id: 1 }], fields: [{ name: "id" }] });
+    const res = await injector(mock).executeWithSecret(
+      action(),
+      SECRET,
+      policy(),
+      undefined,
+      undefined,
+      undefined,
+      new AbortController().signal,
+    );
+    expect(res.row_count).toBe(1);
     expect(mock.lastQuery?.sql).toBe("SELECT 1");
   });
 
@@ -165,6 +181,131 @@ describe("DatabaseInjector", () => {
     ).rejects.toMatchObject({ code: ErrorCode.SSRF_BLOCKED });
     expect(mock.lastConnect).toBeUndefined();
   });
+
+  it.each([
+    ["a sql engine's connect", action(), "postgresql", "app", 5432],
+    ["a command engine's execute", redisAction(), "redis", "0", 6379],
+  ] as const)("an aborted signal sends nothing: %s", async (_arm, act, engine, db, port) => {
+    const controller = new AbortController();
+    const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+    vi.mocked(validateHostPort).mockImplementationOnce(async (host, hostPort) => {
+      const answer = await real.validateHostPort(host, hostPort);
+      controller.abort();
+      return answer;
+    });
+    const log = vi.fn();
+    const sql = new MockAdapter({ rows: [] });
+    const cmd = new MockCommandAdapter();
+    const inj = new DatabaseInjector(
+      { log } as unknown as AuditLogger,
+      { postgresql: sql },
+      { redis: cmd },
+    );
+
+    await expectVaultError(
+      () =>
+        inj.executeWithSecret(
+          act,
+          SECRET,
+          policy(),
+          undefined,
+          "secret-1",
+          undefined,
+          controller.signal,
+        ),
+      ErrorCode.VAULT_LOCKED,
+    );
+
+    expect(sql.lastConnect === undefined).toBe(true);
+    expect(cmd.lastExecute === undefined).toBe(true);
+    expect(log.mock.calls).toStrictEqual([
+      [
+        {
+          eventType: "secret.use",
+          secretId: "secret-1",
+          detail: {
+            context: "database",
+            engine,
+            database: db,
+            host: "8.8.8.8",
+            port,
+            error: ErrorCode.VAULT_LOCKED,
+          },
+          success: false,
+        },
+      ],
+    ]);
+  });
+
+  it.each([
+    ["a sql engine's connect", action(), "postgresql", "app", 5432],
+    ["a command engine's execute", redisAction(), "redis", "0", 6379],
+  ] as const)(
+    "an adapter's VAULT_LOCKED leaves as VAULT_LOCKED with its one row, the adapter handed the signal: %s",
+    async (_arm, act, engine, db, port) => {
+      const signal = new AbortController().signal;
+      const log = vi.fn();
+      const sql = new MockAdapter({ connectError: VaultError.vaultLocked() });
+      const cmd = new MockCommandAdapter({ error: VaultError.vaultLocked() });
+      const inj = new DatabaseInjector(
+        { log } as unknown as AuditLogger,
+        { postgresql: sql },
+        { redis: cmd },
+      );
+
+      await expectVaultError(
+        () =>
+          inj.executeWithSecret(act, SECRET, policy(), undefined, "secret-1", undefined, signal),
+        ErrorCode.VAULT_LOCKED,
+      );
+
+      expect((sql.lastConnect ?? cmd.lastExecute?.opts)?.signal === signal).toBe(true);
+      expect(log.mock.calls).toStrictEqual([
+        [
+          {
+            eventType: "secret.use",
+            secretId: "secret-1",
+            detail: {
+              context: "database",
+              engine,
+              database: db,
+              host: "8.8.8.8",
+              port,
+              error: ErrorCode.VAULT_LOCKED,
+            },
+            success: false,
+          },
+        ],
+      ]);
+    },
+  );
+
+  it.each([
+    ["a sql engine's connect", action(), ErrorCode.DB_CONNECTION_FAILED],
+    ["a command engine's execute", redisAction(), ErrorCode.DB_QUERY_FAILED],
+  ] as const)(
+    "an adapter's other VaultError still maps as before: %s",
+    async (_arm, act, mapped) => {
+      const log = vi.fn();
+      const refusal = VaultError.invalidDatabaseConfig("refused by the adapter");
+      const sql = new MockAdapter({ connectError: refusal });
+      const cmd = new MockCommandAdapter({ error: refusal });
+      const inj = new DatabaseInjector(
+        { log } as unknown as AuditLogger,
+        { postgresql: sql },
+        { redis: cmd },
+      );
+
+      await expectVaultError(
+        () => inj.executeWithSecret(act, SECRET, policy(), undefined, "secret-1"),
+        mapped,
+      );
+
+      const row = log.mock.calls[0]?.[0] as AuditLogOptions;
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(row.detail?.error).toBe(mapped);
+    },
+  );
 
   it("rejects an unsupported engine", async () => {
     const mock = new MockAdapter({ rows: [] });

@@ -164,12 +164,13 @@ export class SmtpInjector {
     policy: InjectionPolicy,
     connection: MailTlsConfig | undefined,
     oauth: SmtpOAuth | undefined,
+    signal?: AbortSignal,
   ): Promise<SmtpExecution> {
     // Redaction material captured up front so it is available on every throw
     // path (SMTP joins the HTTP rule: origin-only, credential stripped).
     const material = redactionMaterial(secretValue, oauth);
     try {
-      return await this.execute(action, secretValue, policy, connection, oauth);
+      return await this.execute(action, secretValue, policy, connection, oauth, signal);
     } catch (err) {
       throw redactThrown(err, material);
     }
@@ -181,6 +182,7 @@ export class SmtpInjector {
     policy: InjectionPolicy,
     connection: MailTlsConfig | undefined,
     oauth: SmtpOAuth | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<SmtpExecution> {
     const { host, port } = resolveHostPort(action);
 
@@ -292,6 +294,7 @@ export class SmtpInjector {
     //    address so the socket cannot be re-resolved (TLS identity stays bound
     //    to the logical host — mirrors the database injector).
     const validated = await validateHostPort(host, port);
+    if (signal?.aborted) throw VaultError.vaultLocked();
     const pinnedAddress = validated.resolvedAddress;
 
     // 7. Auth arm (credential injected here only).

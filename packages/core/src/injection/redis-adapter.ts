@@ -29,6 +29,7 @@ export class RedisAdapter implements DbCommandAdapter {
     }
 
     const { createClient } = await import("redis");
+    if (opts.signal?.aborted) throw VaultError.vaultLocked();
 
     // SNI forbids an IP-literal servername; send `database.servername` when
     // configured, else one only when `opts.host` is a hostname that was

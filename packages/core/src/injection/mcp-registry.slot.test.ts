@@ -195,14 +195,14 @@ describe("McpConnectionRegistry — a connect publishes only while its slot is i
     expect(again).not.toBe(entry);
   });
 
-  it("a connect that resolves after a seal cleared the map and a post-seal acquire seated a successor leaves the successor alone (the catch's second beneficiary)", async () => {
+  it("a connect that resolves after closeAll cleared the map and a later acquire seated a successor leaves the successor alone (the catch's second beneficiary)", async () => {
     const registry = new McpConnectionRegistry(null);
     let resolveFirst: (entry: McpConnectionEntry) => void = () => undefined;
     const first = registry.acquire(
       "s1",
       () => new Promise<McpConnectionEntry>((resolve) => (resolveFirst = resolve)),
     );
-    registry.killAllSync();
+    await registry.closeAll("vault_lock");
     const closeSecond = vi.fn().mockResolvedValue(undefined);
     const second = await registry.acquire("s1", () =>
       Promise.resolve(fakeEntry("s1", closeSecond)),
@@ -305,7 +305,7 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expect(dispose).toHaveBeenCalledTimes(1);
   }
 
-  it("each live entry is closing, killed once, closed once and disposed once — both maps are empty, no row, and the next acquire of either slot connects fresh", async () => {
+  it("each live entry is closing, killed once, closed once and disposed once — both maps are empty and no row", async () => {
     const { logger, rows } = recordingLogger();
     const registry = new McpConnectionRegistry(logger);
     const closeA = vi.fn().mockResolvedValue(undefined);
@@ -333,22 +333,8 @@ describe("McpConnectionRegistry — killAllSync tears every live entry down sync
     expectTornDown(b, killB, closeB, disposeB);
     expect(registry.get("s1")).toBeUndefined();
     expect(registry.get("s2")).toBeUndefined();
+    expect((registry as unknown as { connections: Map<string, unknown> }).connections.size).toBe(0);
     expect(rows).toEqual([]);
-
-    const factory = vi.fn(() =>
-      Promise.resolve(fakeEntry("s1", vi.fn().mockResolvedValue(undefined))),
-    );
-    const fresh = await registry.acquire("s1", factory);
-    expect(factory).toHaveBeenCalledTimes(1);
-    expect(registry.get("s1")).toBe(fresh);
-    const factory2 = vi.fn(() =>
-      Promise.resolve(fakeEntry("s2", vi.fn().mockResolvedValue(undefined))),
-    );
-    const fresh2 = await registry.acquire("s2", factory2);
-    expect(factory2).toHaveBeenCalledTimes(1);
-    expect(registry.get("s2")).toBe(fresh2);
-
-    await registry.closeAll("test_cleanup");
   });
 
   it("a close that rejects is swallowed: a plain rejecting close, not a spy, reaches no unhandledRejection listener and is called once", async () => {

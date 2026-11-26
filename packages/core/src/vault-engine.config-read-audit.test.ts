@@ -234,8 +234,7 @@ describe("a granted configuration read is audited (E75a)", () => {
     {
       config: "acme_account",
       code: ErrorCode.CERT_NOT_CONFIGURED,
-      read: (id: string, c?: CallerContext) =>
-        Promise.resolve().then(() => engine.getAcmeAccount(id, c, "secret://not-set")),
+      read: (id: string, c?: CallerContext) => engine.getAcmeAccount(id, c, "secret://not-set"),
     },
   ])(
     "$config: $code after the gate writes one failed secret.read row — the secret's id, the config kind, the error",

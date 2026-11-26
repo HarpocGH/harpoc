@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import type { DbConnectOptions } from "./db-adapters.js";
 import { RedisAdapter } from "./redis-adapter.js";
 
@@ -262,6 +263,30 @@ describe("RedisAdapter connection config (SSRF pinning + TLS identity, spec §10
       new RedisAdapter().execute(opts({ database: "-1" }), ["PING"]),
     ).rejects.toMatchObject({ code: ErrorCode.INVALID_DATABASE_CONFIG });
     expect(createClientCalls).toHaveLength(0);
+  });
+
+  it("a signal aborted while redis loads: VAULT_LOCKED, no client built", async () => {
+    const controller = new AbortController();
+    const suiteModule = await import("redis");
+    vi.doMock("redis", () => {
+      controller.abort();
+      return suiteModule;
+    });
+    try {
+      await expectVaultError(
+        () => new RedisAdapter().execute(opts({ signal: controller.signal }), ["PING"]),
+        ErrorCode.VAULT_LOCKED,
+      );
+      expect(createClientCalls.length).toBe(0);
+    } finally {
+      vi.doMock("redis", () => suiteModule);
+    }
+  });
+
+  it("a live signal connects as before", async () => {
+    await new RedisAdapter().execute(opts({ signal: new AbortController().signal }), ["PING"]);
+    expect(createClientCalls.length).toBe(1);
+    expect(lastClient?.sendCommand).toHaveBeenCalledWith(["PING"]);
   });
 });
 

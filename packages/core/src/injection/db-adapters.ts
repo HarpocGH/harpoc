@@ -3,6 +3,7 @@ import type { Socket } from "node:net";
 import { checkServerIdentity } from "node:tls";
 import type { PeerCertificate } from "node:tls";
 import type { DatabaseEngine } from "@harpoc/shared";
+import { VaultError } from "@harpoc/shared";
 import { MongoAdapter } from "./mongo-adapter.js";
 import { RedisAdapter } from "./redis-adapter.js";
 
@@ -41,6 +42,7 @@ export interface DbConnectOptions {
   database: string;
   tls: DbTlsOptions;
   timeoutMs: number;
+  signal?: AbortSignal;
 }
 
 export interface DbQueryResult {
@@ -109,6 +111,7 @@ function dialPinned(opts: DbConnectOptions): Socket {
 class PostgresAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const { default: pg } = await import("pg");
+    if (opts.signal?.aborted) throw VaultError.vaultLocked();
     // Dial the pinned address; `servername` keeps SNI + certificate hostname
     // verification on `database.servername` when configured, else on the
     // logical host (pg self-derives servername only for hostname dials, so it
@@ -157,6 +160,7 @@ class PostgresAdapter implements DbEngineAdapter {
 class MysqlAdapter implements DbEngineAdapter {
   async connect(opts: DbConnectOptions): Promise<DbConnection> {
     const mysql = await import("mysql2/promise");
+    if (opts.signal?.aborted) throw VaultError.vaultLocked();
     // mysql2 derives the TLS servername from `host` and offers no override, so
     // `host` carries the TLS identity (the configured servername, else the
     // logical name) and the address is dialed through a custom socket factory.

@@ -175,6 +175,32 @@ describe("resolveForProxy — the lease", () => {
     });
   });
 
+  it("a target whose origin changes between reads is judged and leased from one read", async () => {
+    let reads = 0;
+    const target = Object.defineProperty({ method: "GET", path: "/user" }, "origin", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return reads === 1 ? "https://api.github.com" : "https://evil.example.com";
+      },
+    }) as ProxyTarget;
+
+    const lease = await engine.resolveForProxy(HANDLE, proxyCaller("alice"), target);
+    lease.complete({ status: 200, sanitized: false });
+
+    expect(reads).toBe(1);
+    expect(useRows(secretId).map((row) => row.detail)).toEqual([
+      {
+        context: "proxy",
+        method: "GET",
+        origin: "https://api.github.com",
+        path: "/user",
+        status: 200,
+        interface: "proxy",
+      },
+    ]);
+  });
+
   it("hands over the handle's --http-ca pin, and the row says ca_pinned", async () => {
     await engine.setConnectionConfig(HANDLE, { http: { ca_pem: CA_PEM } });
 
@@ -235,7 +261,9 @@ describe("resolveForProxy — the lease", () => {
     );
     expect(allZero(decrypted as Uint8Array)).toBe(true);
     await engine.unlock("password");
-    expect(useRows(secretId)).toHaveLength(0);
+    expect(useRows(secretId).map((row) => [row.success, row.detail])).toStrictEqual([
+      [false, { ...TARGET, context: "proxy", error: ErrorCode.VAULT_LOCKED, interface: "proxy" }],
+    ]);
   });
 
   it("a stale lease's late complete after lock and unlock is a no-op (no slide)", async () => {
@@ -667,6 +695,25 @@ describe("resolveForProxy — the refusals, each with its failed secret.use row"
       await expectVaultError(
         () => engine.resolveForProxy(HANDLE, proxyCaller("alice"), target),
         ErrorCode.INVALID_INPUT,
+      );
+    }
+    expect(useRows()).toHaveLength(0);
+  });
+
+  it("refuses a target that is null or whose method or path is no string INVALID_INPUT with the malformed target's text, unaudited", async () => {
+    for (const target of [
+      null,
+      { ...TARGET, path: 42 },
+      { ...TARGET, method: Symbol("GET") },
+      { ...TARGET, method: 7 },
+    ]) {
+      const err = await expectVaultError(
+        () =>
+          engine.resolveForProxy(HANDLE, proxyCaller("alice"), target as unknown as ProxyTarget),
+        ErrorCode.INVALID_INPUT,
+      );
+      expect(err.message).toBe(
+        "Invalid proxy target: an https origin and a path without query or fragment",
       );
     }
     expect(useRows()).toHaveLength(0);

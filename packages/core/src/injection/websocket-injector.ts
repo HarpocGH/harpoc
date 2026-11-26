@@ -298,6 +298,7 @@ export async function executeWebsocketAction(
   action: WebsocketAction,
   secretValue: Uint8Array,
   policy: InjectionPolicy,
+  signal?: AbortSignal,
 ): Promise<WebsocketExecution> {
   const responseMode = resolveResponseMode(action, policy);
 
@@ -308,6 +309,7 @@ export async function executeWebsocketAction(
   const valueStr = Buffer.from(secretValue).toString("utf8");
 
   const validated = await validateUrl(action.url, WS_SCHEMES);
+  if (signal?.aborted) throw VaultError.vaultLocked();
   const url = validated.url;
   const origin = url.origin;
 
