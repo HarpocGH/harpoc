@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { setImmediate } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { redactSecretEncodings } from "@harpoc/core";
 import { REDACTION_MARKER, createRedactingTransform, redactBytes } from "./redact.js";
@@ -8,6 +9,8 @@ const NEEDLE = "ghp_S3cr3tValue-xyz";
 const MARK = REDACTION_MARKER;
 const SECRET_TOKEN = "s3cr3t-token";
 const MULTIBYTE_NEEDLE = "pässwörd-🔑";
+const SSE_NEEDLE = "SECRET";
+const END = Symbol("end");
 
 async function redact(
   chunks: readonly (Buffer | string)[],
@@ -25,6 +28,37 @@ async function redact(
   transform.end();
   await ended;
   return { output: Buffer.concat(pieces), changed: transform.changed };
+}
+
+/** Writes each step, or ends the stream at `END`, and records the piece each step emits (`null`: none) and the whole output as text. */
+async function stepwise(
+  needles: readonly string[],
+  steps: readonly (string | typeof END)[],
+): Promise<{ pieces: (string | null)[]; text: string; changed: boolean }> {
+  const transform = createRedactingTransform(needles.map((needle) => Buffer.from(needle)));
+  const emitted: Buffer[] = [];
+  const output: Buffer[] = [];
+  transform.on("data", (piece: Buffer) => {
+    emitted.push(piece);
+    output.push(piece);
+  });
+  const pieces: (string | null)[] = [];
+  for (const step of steps) {
+    if (step === END) {
+      const ended = once(transform, "end");
+      transform.end();
+      await ended;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        transform.write(Buffer.from(step), (err) => (err ? reject(err) : resolve()));
+      });
+      await setImmediate();
+    }
+    expect(emitted.length).toBeLessThanOrEqual(1);
+    pieces.push(emitted.length === 0 ? null : (emitted.shift() as Buffer).toString());
+  }
+  transform.destroy();
+  return { pieces, text: Buffer.concat(output).toString(), changed: transform.changed };
 }
 
 /** The whole-body reference: one leftmost-longest regex pass over the bytes (latin1 maps each byte to one code unit). */
@@ -222,6 +256,29 @@ describe("createRedactingTransform — exact-value redaction of a response strea
     expect(result.changed).toBe(true);
   });
 
+  it("a 1 MiB body with line feeds in random splits equals the whole-body reference", async () => {
+    const next = xorshift(0x0a_5eed_b2);
+    const encoded = Buffer.from(Buffer.from(`user:${NEEDLE}`).toString("base64"));
+    const needles = [Buffer.from(NEEDLE), encoded];
+    const body = Buffer.alloc(1024 * 1024);
+    for (let i = 0; i < body.length; i++) {
+      body[i] = next() % 64 === 0 ? 0x0a : 0x20 + (next() % 95);
+    }
+    for (let k = 0; k < 400; k++) {
+      const needle = needles[k % 2] as Buffer;
+      needle.copy(body, next() % (body.length - needle.length));
+    }
+    const chunks: Buffer[] = [];
+    for (let at = 0; at < body.length;) {
+      const size = 1 + (next() % 1024);
+      chunks.push(body.subarray(at, at + size));
+      at += size;
+    }
+    const result = await redact(chunks, needles);
+    expect(result.output.equals(reference(body, needles))).toBe(true);
+    expect(result.changed).toBe(true);
+  });
+
   it("streaming: each write emits all but the last maxNeedleLength − 1 bytes at once", async () => {
     const transform = createRedactingTransform([Buffer.from(NEEDLE), Buffer.from("short")]);
     const first = once(transform, "data");
@@ -232,6 +289,90 @@ describe("createRedactingTransform — exact-value redaction of a response strea
     transform.end();
     await ended;
   });
+
+  it.each<[string, string[], (string | typeof END)[], (string | null)[]]>([
+    [
+      "a needle split over three writes after a line feed",
+      [SSE_NEEDLE],
+      [`ab\n${SSE_NEEDLE.slice(0, 2)}`, SSE_NEEDLE.slice(2, 4), `${SSE_NEEDLE.slice(4)}\ncd`, END],
+      ["ab\n", null, `${MARK}\n`, "cd"],
+    ],
+    [
+      "a longer needle that starts earlier, held after the line feed",
+      ["bcd", "abcde"],
+      ["x\nabcd", "ef", END],
+      ["x\n", MARK, "f"],
+    ],
+    [
+      "a needle that is the beginning of another, ended by a line feed",
+      ["tok", "token"],
+      ["a\ntok", "en\n"],
+      ["a\n", `${MARK}\n`],
+    ],
+    [
+      "server-sent events leave whole, each with its blank line",
+      [SSE_NEEDLE],
+      ["data: 1\n\n", ": ping\n\n", `data: ${SSE_NEEDLE}\n\n`],
+      ["data: 1\n\n", ": ping\n\n", `data: ${MARK}\n\n`],
+    ],
+    [
+      "a match across the fixed carry's edge is replaced whole and none of it held",
+      [SSE_NEEDLE],
+      [`a\nxxxxx${SSE_NEEDLE}y`, END],
+      [`a\nxxxxx${MARK}`, "y"],
+    ],
+    [
+      "a needle that holds a line feed keeps the fixed carry",
+      ["X\nY"],
+      ["aX\n", "Yb", END],
+      ["a", MARK, "b"],
+    ],
+    [
+      "CRLF line ends: a needle before the last line feed is redacted and nothing held",
+      [SSE_NEEDLE],
+      [`a\r\n${SSE_NEEDLE}\r\n`],
+      [`a\r\n${MARK}\r\n`],
+    ],
+    [
+      "a carriage return releases nothing: a needle that holds one keeps the fixed carry across it",
+      ["X\rY"],
+      ["aX\r", "Yb", END],
+      ["a", MARK, "b"],
+    ],
+  ])("release at the line feed: %s", async (_label, needles, steps, expected) => {
+    const result = await stepwise(needles, steps);
+    for (const needle of needles) expectAbsent(result.text, needle);
+    expect(result.pieces).toEqual(expected);
+    expect(result.changed).toBe(true);
+  });
+
+  it.each<[string, string[], (string | typeof END)[], (string | null)[]]>([
+    [
+      "a needle that holds a line feed keeps the fixed carry for every needle",
+      [SSE_NEEDLE, "X\nY"],
+      ["data: 1\n\n"],
+      ["data"],
+    ],
+    [
+      "a needle's prefix after the line feed is held, then flushed as sent",
+      [SSE_NEEDLE],
+      [`x\n${SSE_NEEDLE.slice(0, 5)}`, END],
+      ["x\n", SSE_NEEDLE.slice(0, 5)],
+    ],
+    [
+      "a body whose only line feed is its last byte leaves whole",
+      [SSE_NEEDLE],
+      ["abc\n"],
+      ["abc\n"],
+    ],
+  ])(
+    "release at the line feed, nothing to redact: %s",
+    async (_label, needles, steps, expected) => {
+      const result = await stepwise(needles, steps);
+      expect(result.pieces).toEqual(expected);
+      expect(result.changed).toBe(false);
+    },
+  );
 
   it("the caller may wipe its needles once the transform exists: it redacts with its own copies", async () => {
     const needle = Buffer.from(NEEDLE);

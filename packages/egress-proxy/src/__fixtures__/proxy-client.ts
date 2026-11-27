@@ -63,6 +63,74 @@ export function proxyRequest(call: ProxyCall): Promise<ProxyReply> {
   });
 }
 
+export interface ProxyStreamReply {
+  status: number;
+  headers: IncomingHttpHeaders;
+  /** Every body byte that arrived, decoded as UTF-8. */
+  body: string;
+  /** Node's `IncomingMessage.complete`: the response's terminating chunk arrived. */
+  complete: boolean;
+  /** From the request's start to the response's close. */
+  elapsedMs: number;
+}
+
+/**
+ * `proxyRequest` for a streamed reply: `onData` runs with each body chunk as
+ * it arrives, and the promise resolves when the response closes, whole or cut.
+ * It rejects once `deadlineMs` has passed since the request's start.
+ */
+export function proxyStream(
+  call: ProxyCall,
+  onData: (chunk: string) => void,
+  deadlineMs: number = PROXY_CLIENT_TIMEOUT_MS,
+): Promise<ProxyStreamReply> {
+  return new Promise((resolve, reject) => {
+    const started = performance.now();
+    let body = "";
+    const req = request({
+      ...(call.socketPath === undefined
+        ? { host: "127.0.0.1", port: call.port }
+        : { socketPath: call.socketPath }),
+      path: call.path,
+      method: call.method ?? "GET",
+      headers: call.headers,
+      agent: false,
+    });
+    const deadline = setTimeout(() => {
+      reject(
+        new Error(
+          `the streamed request outlived its ${deadlineMs} ms deadline, ${body.length} body characters in`,
+        ),
+      );
+      req.destroy();
+    }, deadlineMs);
+    req.on("response", (res) => {
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => {
+        body += chunk;
+        onData(chunk);
+      });
+      res.on("error", () => undefined);
+      res.on("close", () => {
+        clearTimeout(deadline);
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          body,
+          complete: res.complete,
+          elapsedMs: performance.now() - started,
+        });
+      });
+    });
+    req.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "ECONNRESET") return;
+      clearTimeout(deadline);
+      reject(err);
+    });
+    req.end(call.body);
+  });
+}
+
 /** A raw request line written to the proxy's TCP port; resolves with every byte the proxy sent back. */
 export function rawProxyExchange(port: number, text: string): Promise<string> {
   return new Promise((resolve, reject) => {

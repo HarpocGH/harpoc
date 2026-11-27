@@ -14,8 +14,10 @@ export interface RedactingTransform extends Transform {
 /**
  * Best-effort exact-value redaction of a brokered response (DB-8): every
  * occurrence of a needle becomes {@link REDACTION_MARKER}, leftmost first and
- * the longest needle at one position, with the last `maxNeedleLength − 1`
- * bytes carried across chunk boundaries and flushed at the end. Byte-based,
+ * the longest needle at one position. A write holds back at most the last
+ * `maxNeedleLength − 1` bytes of what it scanned and, where no needle holds a
+ * line feed, none up to and including the last line feed; what it holds is
+ * carried across chunk boundaries and flushed at the end. Byte-based,
  * so a needle split inside a UTF-8 sequence is found the same way. The
  * transform holds its own copies of the needles and zero-fills them at its
  * end or destroy; empty needles are dropped, and none left is a pass-through.
@@ -37,12 +39,14 @@ export function redactBytes(
 
 class RedactingStream extends Transform implements RedactingTransform {
   private readonly needles: Buffer[];
+  private readonly lineBound: boolean;
   private carry: Buffer = Buffer.alloc(0);
   private replaced = false;
 
   constructor(values: readonly Uint8Array[]) {
     super();
     this.needles = ownNeedles(values);
+    this.lineBound = !this.needles.some((needle) => needle.includes(0x0a));
   }
 
   get changed(): boolean {
@@ -55,7 +59,7 @@ class RedactingStream extends Transform implements RedactingTransform {
       return;
     }
     const buf = this.carry.length === 0 ? chunk : Buffer.concat([this.carry, chunk]);
-    const result = scan(buf, this.needles, false);
+    const result = scan(buf, this.needles, false, this.lineBound);
     this.carry = result.carry;
     this.replaced ||= result.replaced;
     callback(null, result.output.length > 0 ? result.output : undefined);
@@ -91,16 +95,20 @@ function ownNeedles(values: readonly Uint8Array[]): Buffer[] {
 
 /**
  * Replace every match that starts where the whole of every needle is already
- * in `buf`; on a non-final scan the tail a match could still extend into —
- * at most `longest − 1` bytes — comes back as `carry`.
+ * in `buf` or, with `lineBound`, before its last line feed; on a non-final
+ * scan the tail a match could still extend into — at most `longest − 1`
+ * bytes, and with `lineBound` none before that line feed — comes back as
+ * `carry`.
  */
 function scan(
   buf: Buffer,
   needles: readonly Buffer[],
   final: boolean,
+  lineBound = false,
 ): { output: Buffer; carry: Buffer; replaced: boolean } {
   const longest = needles[0]?.length ?? 0;
-  const limit = final ? buf.length : buf.length - (longest - 1);
+  let limit = final ? buf.length : buf.length - (longest - 1);
+  if (!final && lineBound) limit = Math.max(limit, buf.lastIndexOf(0x0a) + 1);
   const next = needles.map((needle) => buf.indexOf(needle));
   const pieces: Buffer[] = [];
   let from = 0;

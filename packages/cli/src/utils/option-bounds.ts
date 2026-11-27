@@ -32,3 +32,11 @@ export const DEFAULT_BACKUP_INTERVAL_MINUTES = 1_440;
 export const MIN_BACKUP_KEEP = 1;
 export const MAX_BACKUP_KEEP = 365;
 export const DEFAULT_BACKUP_KEEP = 7;
+
+/**
+ * `server start --proxy-head-timeout` and `--proxy-idle-timeout` in seconds, the egress proxy's two
+ * upstream limits: refused outside the range, never clamped; without the option the proxy keeps
+ * its own default.
+ */
+export const MIN_PROXY_TIMEOUT_SECONDS = 1;
+export const MAX_PROXY_TIMEOUT_SECONDS = 3_600;

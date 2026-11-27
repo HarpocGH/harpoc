@@ -21,7 +21,9 @@ import {
   consumerDirs,
   consumerSocketPaths,
   isPrivateDirMode,
+  PROXY_TRUSTED_SOCKET,
   resolveRuntimeDir,
+  trustedProxySockets,
   WINDOWS_CONSUMER_DIR_RIGHTS,
   windowsDirAclRefusal,
   windowsTokenDirAclRefusal,
@@ -968,6 +970,153 @@ describe("consumerSocketPaths", () => {
         ErrorCode.INVALID_INPUT,
       );
       expect(err.message.includes(LINK_REFUSAL)).toBe(true);
+      expect(err.message).toBe(
+        `--runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${entry}`,
+      );
+    },
+  );
+});
+
+describe("trustedProxySockets", () => {
+  const source = "--runtime-dir" as const;
+  const SPEC = { agent: "agent1", secrets: ["api-key", "db-*"] };
+
+  /** A consumer directory whose `proxy-trusted.sock` path is exactly `bytes` bytes: its name and that path. */
+  function consumerOfTrustedPathBytes(bytes: number): { name: string; path: string } {
+    const name = "a".repeat(bytes - Buffer.byteLength(join(dir, PROXY_TRUSTED_SOCKET)) - 1);
+    const path = join(dir, name, PROXY_TRUSTED_SOCKET);
+    expect(Buffer.byteLength(path)).toBe(bytes);
+    return { name, path };
+  }
+
+  it("names the trusted socket proxy-trusted.sock", () => {
+    expect(PROXY_TRUSTED_SOCKET).toBe("proxy-trusted.sock");
+  });
+
+  it("a spec for a listed consumer directory returns its consumer, its socket path and its patterns; a directory no spec names gets none", () => {
+    mkdirSync(join(dir, "agent1"));
+    mkdirSync(join(dir, "agent2"));
+    expect(trustedProxySockets({ path: dir, source }, [SPEC])).toEqual([
+      {
+        consumer: "agent1",
+        socketPath: join(dir, "agent1", "proxy-trusted.sock"),
+        secrets: ["api-key", "db-*"],
+      },
+    ]);
+  });
+
+  it("keeps the specs' order; no spec, no socket", () => {
+    mkdirSync(join(dir, "agent1"));
+    mkdirSync(join(dir, "agent2"));
+    expect(
+      trustedProxySockets({ path: dir, source }, [
+        { agent: "agent2", secrets: ["db-*"] },
+        { agent: "agent1", secrets: ["api-key"] },
+      ]).map(({ consumer }) => consumer),
+    ).toEqual(["agent2", "agent1"]);
+    expect(trustedProxySockets({ path: dir, source }, [])).toEqual([]);
+  });
+
+  it("refuses Agent1 beside a directory agent1: the agent is matched byte for byte against the listing, never by a stat a case-insensitive filesystem would answer", async () => {
+    mkdirSync(join(dir, "agent1"));
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: dir, source }, [{ ...SPEC, agent: "Agent1" }]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `--proxy-trust-socket: agent "Agent1" has no consumer directory under ${dir}`,
+    );
+  });
+
+  it("refuses an agent without a consumer directory, naming it and the runtime directory", async () => {
+    mkdirSync(join(dir, "agent1"));
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: dir, source }, [SPEC, { ...SPEC, agent: "agent2" }]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `--proxy-trust-socket: agent "agent2" has no consumer directory under ${dir}`,
+    );
+  });
+
+  it("refuses an agent whose name is a plain file under the runtime directory: a file is no consumer directory", async () => {
+    writeFileSync(join(dir, "agent1"), "");
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: dir, source }, [SPEC]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `--proxy-trust-socket: agent "agent1" has no consumer directory under ${dir}`,
+    );
+  });
+
+  it("names the runtime directory's source when it cannot be listed", async () => {
+    const missing = join(dir, "missing");
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: missing, source: "$RUNTIME_DIRECTORY" }, [SPEC]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `$RUNTIME_DIRECTORY: the consumer directories cannot be listed: ${missing}`,
+    );
+  });
+
+  it("checks the bound for the opted-in consumers alone: a consumer whose proxy-trusted.sock passes this platform's bound (107; darwin 103) while its proxy.sock fits is refused once opted in, and ignored while not", async () => {
+    const bound = maxUnixSocketPathBytes(process.platform);
+    const { name, path } = consumerOfTrustedPathBytes(bound + 1);
+    mkdirSync(join(dir, name));
+    mkdirSync(join(dir, "agent1"));
+    expect(Buffer.byteLength(join(dir, name, "proxy.sock")) <= bound).toBe(true);
+
+    expect(trustedProxySockets({ path: dir, source }, [SPEC])).toEqual([
+      {
+        consumer: "agent1",
+        socketPath: join(dir, "agent1", "proxy-trusted.sock"),
+        secrets: ["api-key", "db-*"],
+      },
+    ]);
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: dir, source }, [SPEC, { ...SPEC, agent: name }]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `--proxy-trust-socket: consumer "${name}": the socket path is ${String(bound + 1)} bytes, over the ${String(bound)} a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it("accepts a consumer whose proxy-trusted.sock path is exactly this platform's bound", () => {
+    const { name, path } = consumerOfTrustedPathBytes(maxUnixSocketPathBytes(process.platform));
+    mkdirSync(join(dir, name));
+    expect(trustedProxySockets({ path: dir, source }, [{ ...SPEC, agent: name }])).toEqual([
+      { consumer: name, socketPath: path, secrets: ["api-key", "db-*"] },
+    ]);
+  });
+
+  it("the bound follows process.platform: stubbed to darwin, a 104-byte trusted socket path is refused naming the 103", async () => {
+    const { name, path } = consumerOfTrustedPathBytes(104);
+    mkdirSync(join(dir, name));
+    stubPlatform("darwin");
+    const err = await expectVaultError(
+      () => trustedProxySockets({ path: dir, source }, [{ ...SPEC, agent: name }]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      `--proxy-trust-socket: consumer "${name}": the socket path is 104 bytes, over the 103 a Unix socket path holds: ${path}`,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a symbolic link named for the agent as consumerSocketPaths does (POSIX; a symbolic link needs a privilege on Windows)",
+    async () => {
+      const runtime = join(dir, "run");
+      mkdirSync(runtime);
+      const target = join(dir, "target");
+      mkdirSync(target);
+      const entry = link(target, join(runtime, "agent1"));
+      const err = await expectVaultError(
+        () => trustedProxySockets({ path: runtime, source }, [SPEC]),
+        ErrorCode.INVALID_INPUT,
+      );
       expect(err.message).toBe(
         `--runtime-dir: the entry is a symbolic link or junction, not a consumer directory: ${entry}`,
       );

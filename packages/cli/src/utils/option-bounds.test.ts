@@ -11,12 +11,14 @@ import {
   MAX_BACKUP_KEEP,
   MAX_CA_DAYS,
   MAX_PORT,
+  MAX_PROXY_TIMEOUT_SECONDS,
   MAX_RENEW_BEFORE_DAYS,
   MAX_UNCONSTRAINED_CA_DAYS,
   MIN_BACKUP_INTERVAL_MINUTES,
   MIN_BACKUP_KEEP,
   MIN_CA_DAYS,
   MIN_PORT,
+  MIN_PROXY_TIMEOUT_SECONDS,
   MIN_RENEW_BEFORE_DAYS,
 } from "./option-bounds.js";
 
@@ -66,9 +68,14 @@ describe("option-bounds", () => {
     expect(DEFAULT_BACKUP_KEEP).toBe(7);
   });
 
+  it("names the egress proxy's upstream limits: 1-3600 seconds each", () => {
+    expect(MIN_PROXY_TIMEOUT_SECONDS).toBe(1);
+    expect(MAX_PROXY_TIMEOUT_SECONDS).toBe(3600);
+  });
+
   it("no command declares a bound of its own (CM-5 tripwire)", () => {
     const declaration =
-      /^\s*(?:export )?const (?:MIN|MAX|DEFAULT)_(?:PORT|RENEW_BEFORE_DAYS|CA_DAYS|UNCONSTRAINED_CA_DAYS|BACKUP_INTERVAL_MINUTES|BACKUP_KEEP)\b/m;
+      /^\s*(?:export )?const (?:MIN|MAX|DEFAULT)_(?:PORT|RENEW_BEFORE_DAYS|CA_DAYS|UNCONSTRAINED_CA_DAYS|BACKUP_INTERVAL_MINUTES|BACKUP_KEEP|PROXY_TIMEOUT_SECONDS)\b/m;
     const offenders = collectSources(new URL("../commands/", import.meta.url))
       .filter(({ url }) => declaration.test(readFileSync(url, "utf8")))
       .map(({ path }) => path)

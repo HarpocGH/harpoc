@@ -2,6 +2,7 @@ import { chmodSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
+import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { prepareUnixSocketPath, validateUrl } from "@harpoc/core";
 import type { ProxyLease, ProxyOutcome, ProxyTarget } from "@harpoc/core";
@@ -17,6 +18,8 @@ import {
   isLoopbackBindHost,
   normalizeSocketPeer,
   parseHandle,
+  proxySocketCaller,
+  tokenScopeRefusal,
 } from "@harpoc/shared";
 import type {
   CallerContext,
@@ -45,7 +48,7 @@ import {
 import type { ParsedTarget, ProxyHeaders } from "./upstream.js";
 
 /**
- * The engine surface the proxy uses — five members a `VaultEngine` has;
+ * The engine surface the proxy uses — six members a `VaultEngine` has;
  * declared here so the package depends on them, not on the class. The lease
  * types are core's (`resolveForProxy`).
  */
@@ -62,7 +65,9 @@ export interface ProxyEngine {
     tokenless: boolean;
     port?: number;
     host?: string;
+    consumer?: string;
   }): void;
+  assertProxyConsumer(caller: CallerContext): void;
   resolveForProxy(handle: string, caller: CallerContext, target: ProxyTarget): Promise<ProxyLease>;
 }
 
@@ -72,10 +77,12 @@ export interface EgressProxyOptions {
   rateLimiter?: Pick<RateLimiter, "checkSecret">;
   /** The per-principal budget of refusals that leave a row; `RATE_LIMIT_PROXY_REFUSALS` per `RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS` by default. */
   refusalBudget?: RefusalBudget;
-  /** Upstream connect and response-head budget; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
+  /** Upstream connect budget and response-head budget, each; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
   timeoutMs?: number;
   /** Upstream idle budget between response body chunks; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
   bodyIdleTimeoutMs?: number;
+  /** A tunnel's deadline — its TLS handshake and the gaps between its requests; `DEFAULT_HTTP_TIMEOUT_MS` by default. */
+  tunnelTimeoutMs?: number;
   /** Every refusal and failure but a spent budget's 429 and a repeated CONNECT host refusal, value-free: the error the client was answered with, or — for a refusal after the lease behind the generic 500 — the refusal's own code. `status` is the HTTP status the refusal answers, or would have answered once the response head was sent — never a relayed one. The budget's trip is reported once, with its own error and the 429 the principal gets from then on. */
   onError?: (err: VaultError, status: number) => void;
   /** A listener's error after its bind (an accept failure), value-free: `INTERNAL_ERROR` naming the address and the errno; without it the error is ignored. */
@@ -89,6 +96,8 @@ export interface EgressProxy {
   listenTcp(port: number, host: string): Promise<{ port: number }>;
   /** Listen on a Unix socket (`<runtime-dir>/<consumer>/proxy.sock`), mode 0660, no row of its own; refused on Windows. */
   listenSocket(path: string): Promise<void>;
+  /** Listen on a consumer's trusted Unix socket (`<runtime-dir>/<consumer>/proxy-trusted.sock`), mode 0660, then one `server.start` row naming the consumer; a request outside a tunnel without `Proxy-Authorization` is served as `consumer`, limited to the `secrets` patterns; refused on Windows, for an empty `secrets` and on a closed proxy, a `close()` during the start included (no file, no row). */
+  listenTrustedSocket(path: string, consumer: string, secrets: readonly string[]): Promise<void>;
   /** Close every listener and tunnel, end every in-flight request (its lease completed), remove the socket files. */
   close(): Promise<void>;
 }
@@ -141,6 +150,10 @@ function socketRefusal(err: unknown, path: string): VaultError {
   );
 }
 
+function closedRefusal(path: string): VaultError {
+  return VaultError.invalidInput(`${SOCKET_LABEL}: the proxy is closed: ${path}`);
+}
+
 function tcpAddress(host: string, port: number): string {
   return host.includes(":") ? `[${host}]:${String(port)}` : `${host}:${String(port)}`;
 }
@@ -161,10 +174,19 @@ function tcpRefusal(err: unknown, host: string, port: number): VaultError {
 }
 
 interface Authenticated {
-  token: VaultApiToken;
+  /** Absent on a trusted socket's request without `Proxy-Authorization`, which also has no `raw`. */
+  token?: VaultApiToken;
   caller: CallerContext;
   /** The token as verified — a Bearer's as sent, a Basic credential's decoded; a tunnel keeps it to verify every request it carries again. */
-  raw: string;
+  raw?: string;
+}
+
+type TokenAuthenticated = Required<Authenticated>;
+
+/** The consumer a trusted socket serves a request without `Proxy-Authorization` as, and its secret-name patterns. */
+interface TrustedConsumer {
+  consumer: string;
+  secrets: readonly string[];
 }
 
 /** REST's remap: a sealed vault is a temporarily unavailable service (`error-handler.ts`). */
@@ -228,6 +250,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     new RefusalBudget(RATE_LIMIT_PROXY_REFUSALS, RATE_LIMIT_PROXY_REFUSAL_WINDOW_MS);
   const timeoutMs = options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const bodyIdleTimeoutMs = options.bodyIdleTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+  const tunnelTimeoutMs = options.tunnelTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const servers = new Set<Server>();
   const socketPaths = new Set<string>();
   const dispatchers = new Set<Agent>();
@@ -235,7 +258,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   const caHosts = options.ca?.hosts;
   const leaves: LeafCache | null =
     options.ca === undefined ? null : createLeafCache({ ca: options.ca });
-  const tunnels = createTunnelHost((req, res) => track(req, res), timeoutMs);
+  const tunnels = createTunnelHost((req, res) => track(req, res), tunnelTimeoutMs);
   let closed = false;
 
   function report(err: VaultError, status: number): void {
@@ -283,10 +306,11 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   /**
    * `Proxy-Authorization: Bearer <jwt>` or `Basic base64(<user>:<jwt>)`, the
    * user ignored — the form clients build from a proxy URL's userinfo — on
-   * every request outside a tunnel, a CONNECT included (DB-14); nothing else is
-   * read before it.
+   * every request outside a tunnel, a CONNECT included, but a trusted socket's
+   * request that carries no such header (`admit`); nothing else is read before
+   * it.
    */
-  function authenticate(req: IncomingMessage): Authenticated | Refusal {
+  function authenticate(req: IncomingMessage): TokenAuthenticated | Refusal {
     const header = req.headers["proxy-authorization"];
     if (header === undefined) {
       return {
@@ -308,7 +332,7 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     return verify(raw, peerOf(req));
   }
 
-  function verify(raw: string, peer: string | undefined): Authenticated | Refusal {
+  function verify(raw: string, peer: string | undefined): TokenAuthenticated | Refusal {
     let token: VaultApiToken;
     try {
       token = engine.verifyToken(raw);
@@ -325,12 +349,64 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
   }
 
   /**
+   * On a trusted socket a request without `Proxy-Authorization` at all is its
+   * consumer's, with no token; a header present is authenticated as on every
+   * listener, a malformed one `401` — never the consumer.
+   */
+  function admit(
+    req: IncomingMessage,
+    trusted: TrustedConsumer | undefined,
+  ): Authenticated | Refusal {
+    if (trusted !== undefined && req.headers["proxy-authorization"] === undefined) {
+      return { caller: proxySocketCaller(trusted.consumer, trusted.secrets) };
+    }
+    return authenticate(req);
+  }
+
+  /**
+   * The engine's gate on a request served without a token: a refusal of the
+   * consumer is answered after its `access.denied` row and charge, a sealed
+   * vault `503` without either.
+   */
+  function gate(caller: CallerContext, operation: string): Refusal | undefined {
+    try {
+      engine.assertProxyConsumer(caller);
+    } catch (err) {
+      if (!(err instanceof VaultError)) throw err;
+      if (err.code === ErrorCode.VAULT_LOCKED) return { status: statusOf(err), error: err };
+      return audited(caller, operation, { status: statusOf(err), error: err });
+    }
+    return undefined;
+  }
+
+  /**
+   * Which side ended a relayed body, read once the relay has failed: the first
+   * of the upstream body's `error` and the response's `close` before it
+   * finished decides. The upstream's error is answered only when it came first
+   * and the proxy was not closing; a client's hang-up, `close()` and a relay
+   * neither event ended answer `null`.
+   */
+  function watchCut(body: Readable, res: ServerResponse): () => { error: unknown } | null {
+    let first: { error: unknown } | null | undefined;
+    body.once("error", (error: unknown) => {
+      if (first === undefined) first = closed ? null : { error };
+    });
+    res.once("close", () => {
+      if (first === undefined && !res.writableFinished) first = null;
+    });
+    return () => first ?? null;
+  }
+
+  /**
    * Validate, forward, relay. `needles` is set on a brokered request: the body
    * runs through the redactor and every response field is redacted. A brokered
    * request goes upstream to `brokered.url` (the credential in place), while a
    * `Location` is mapped against `target`, the client's own URL. The outcome is
    * what the lease's `complete` records; a pass-through ignores it and hands
-   * `refused`, through which its `SSRF_BLOCKED` is answered.
+   * `refused`, through which its `SSRF_BLOCKED` is answered. A body the
+   * upstream cuts after the head (`watchCut`) is reported once, a 502
+   * `PROXY_UPSTREAM_FAILED`, and its outcome carries that code beside the
+   * relayed status.
    */
   async function exchange(
     req: IncomingMessage,
@@ -391,19 +467,21 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       // The status reaches the client now, not when the redactor first releases
       // bytes (it holds back up to the longest needle's length − 1).
       res.flushHeaders();
+      const cutByUpstream = watchCut(upstream.body, res);
+      let cut: { error: unknown } | null = null;
       try {
         if (transform === null) await pipeline(upstream.body, res);
         else await pipeline(upstream.body, transform, res);
       } catch {
-        // The client went away or the upstream body failed after the head was
-        // sent: the use happened, so the row records the status (the HTTP
-        // injector's precedent for a body it could not read).
+        cut = cutByUpstream();
         res.destroy();
       }
-      return {
-        status: upstream.statusCode,
-        sanitized: relayed.changed || transform?.changed === true,
-      };
+      const status = upstream.statusCode;
+      const sanitized = relayed.changed || transform?.changed === true;
+      if (cut === null) return { status, sanitized };
+      const failure = VaultError.proxyUpstreamFailed(target.url.origin, failureClass(cut.error));
+      report(scrub(failure), failure.statusCode);
+      return { status, error: ErrorCode.PROXY_UPSTREAM_FAILED, sanitized };
     } finally {
       await upstream.release();
     }
@@ -428,14 +506,23 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     try {
       // Token scope is the interface's (shared.md: "per-secret name scope
       // stays checkTokenScope's"); the refusal's access.denied row first (D2g).
-      checkTokenScope(auth.token, "use", project, name, (reason) => {
+      const refused = (reason: ScopeRefusalReason): void => {
         engine.auditScopeRefusal(
           auth.caller,
           `${judged.method} ${judged.origin}${judged.path}`,
           reason,
         );
         charge(auth.caller);
-      });
+      };
+      if (auth.token !== undefined) {
+        checkTokenScope(auth.token, "use", project, name, refused);
+      } else {
+        const reason = tokenScopeRefusal(auth.caller, project, name);
+        if (reason !== undefined) {
+          refused(reason);
+          throw VaultError.accessDenied("The trusted socket does not serve this secret");
+        }
+      }
       limiter.checkSecret(placeholder.handle, true);
       lease = await engine
         .resolveForProxy(placeholder.handle, auth.caller, judged)
@@ -505,11 +592,15 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     }
   }
 
-  async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function serve(
+    req: IncomingMessage,
+    res: ServerResponse,
+    trusted?: TrustedConsumer,
+  ): Promise<void> {
     const tunnel = tunnels.tunnelOf(req);
     // Inside a tunnel the CONNECT's token is verified again for every request:
     // an expiry or a revocation mid-tunnel answers this request and ends the tunnel.
-    const auth = tunnel === undefined ? authenticate(req) : verify(tunnel.token, tunnel.peer);
+    const auth = tunnel === undefined ? admit(req, trusted) : verify(tunnel.token, tunnel.peer);
     if ("error" in auth) {
       if (tunnel !== undefined) res.shouldKeepAlive = false;
       return refuse(res, auth);
@@ -522,6 +613,10 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
       return refuse(res, { status: 400, error: VaultError.invalidInput(parsed.message) });
     }
     const operation = `${req.method ?? "GET"} ${parsed.target.url.origin}`;
+    if (auth.token === undefined) {
+      const refusal = gate(auth.caller, operation);
+      if (refusal !== undefined) return refuse(res, refusal);
+    }
     // Lane P's scan reads node's req.headers (never headersDistinct) and skips
     // the fields that never go upstream.
     const scan = findPlaceholder(req.headers, parsed.target.url);
@@ -548,8 +643,8 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     await broker(req, res, parsed.target, scan.match, auth);
   }
 
-  function track(req: IncomingMessage, res: ServerResponse): void {
-    const handled = serve(req, res).catch(() => {
+  function track(req: IncomingMessage, res: ServerResponse, trusted?: TrustedConsumer): void {
+    const handled = serve(req, res, trusted).catch(() => {
       refuse(res, { status: 500, error: internalProxyError() });
     });
     inFlight.add(handled);
@@ -629,14 +724,24 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     }
   }
 
-  function newServer(): Server {
-    const server = createServer(track);
+  /**
+   * A trusted server reads every request field (no `maxHeadersCount` cap), so
+   * a `Proxy-Authorization` past node's default cap is judged, never dropped
+   * and the request taken for the consumer's.
+   */
+  function newServer(trusted?: TrustedConsumer): Server {
+    const server = createServer((req, res) => track(req, res, trusted));
+    if (trusted !== undefined) server.maxHeadersCount = 0;
     server.on("connect", onConnect);
     servers.add(server);
     return server;
   }
 
-  async function startListener(server: Server, target: ListenTarget): Promise<void> {
+  async function startListener(
+    server: Server,
+    target: ListenTarget,
+    consumer?: string,
+  ): Promise<void> {
     let boundPort = "port" in target ? target.port : 0;
     const failed = (err: unknown): void => {
       if (onListenerError === undefined) return;
@@ -660,8 +765,12 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     }
     try {
       if ("path" in target) {
+        if (consumer !== undefined && closed) throw closedRefusal(target.path);
         chmodSync(target.path, 0o660);
-        // The sockets ride the TCP listener's row pair (RA-4): no row of their own.
+        // A proxy.sock rides the TCP listener's row pair, with no row of its own;
+        // a trusted socket has a pair of its own, naming its consumer.
+        if (consumer === undefined) return;
+        engine.auditServerStart({ transport: "proxy", tokenless: true, consumer });
         return;
       }
       boundPort = (server.address() as AddressInfo).port;
@@ -681,6 +790,29 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     }
   }
 
+  async function listenUnixSocket(path: string, trusted?: TrustedConsumer): Promise<void> {
+    if (process.platform === "win32") {
+      throw VaultError.invalidInput(
+        `${SOCKET_LABEL}: not supported on Windows (no socket directory mode to rely on): ${path}`,
+      );
+    }
+    if (trusted !== undefined) {
+      if (trusted.secrets.length === 0) {
+        throw VaultError.invalidInput(
+          `${SOCKET_LABEL}: a trusted socket needs at least one secret-name pattern: ${path}`,
+        );
+      }
+      if (closed) throw closedRefusal(path);
+    }
+    try {
+      await prepareUnixSocketPath(path, SOCKET_LABEL);
+      await startListener(newServer(trusted), { path }, trusted?.consumer);
+    } catch (err) {
+      throw socketRefusal(err, path);
+    }
+    socketPaths.add(path);
+  }
+
   return {
     async listenTcp(port: number, host: string): Promise<{ port: number }> {
       const bindHost = host.trim().toLowerCase();
@@ -698,18 +830,15 @@ export function createEgressProxy(options: EgressProxyOptions): EgressProxy {
     },
 
     async listenSocket(path: string): Promise<void> {
-      if (process.platform === "win32") {
-        throw VaultError.invalidInput(
-          `${SOCKET_LABEL}: not supported on Windows (no socket directory mode to rely on): ${path}`,
-        );
-      }
-      try {
-        await prepareUnixSocketPath(path, SOCKET_LABEL);
-        await startListener(newServer(), { path });
-      } catch (err) {
-        throw socketRefusal(err, path);
-      }
-      socketPaths.add(path);
+      await listenUnixSocket(path);
+    },
+
+    async listenTrustedSocket(
+      path: string,
+      consumer: string,
+      secrets: readonly string[],
+    ): Promise<void> {
+      await listenUnixSocket(path, { consumer, secrets: [...secrets] });
     },
 
     async close(): Promise<void> {

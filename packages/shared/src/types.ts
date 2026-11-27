@@ -372,15 +372,15 @@ export interface VaultApiToken {
 }
 
 /**
- * Access interface a token-authenticated request arrived through — the
+ * Access interface a caller's request arrived through — the
  * "through which interface" dimension of the audit trail (thesis §4.3.4).
  * Forensic attribution only; never consulted by policy matching. `cli` marks
  * the token-scoped CLI path (`secret use --token`); a tokenless CLI call
  * remains the trusted local path and carries no interface at all. `proxy`
  * marks a request brokered by the egress credential proxy (deployment model
- * B, 2026-11-06), over its loopback TCP listener or a consumer's socket;
- * `ssh_agent` a request on a consumer's ssh-agent socket (deployment model B,
- * M5), which carries no token.
+ * B, 2026-11-06), over its loopback TCP listener or a consumer's socket, on a
+ * trusted socket without a token; `ssh_agent` a request on a consumer's
+ * ssh-agent socket (deployment model B, M5), which carries no token.
  */
 export type AccessInterface = "rest" | "mcp" | "mcp-http" | "cli" | "proxy" | "ssh_agent";
 
@@ -397,12 +397,13 @@ export interface CallerContext {
   /** Token project claim; derives an additional (project, <claim>) principal. */
   project?: string;
   /**
-   * Token secret-name patterns (thesis §4.7), set by callerFromToken only
-   * when the claim is non-empty — `["*"]` included. Consulted by governance,
-   * which refuses a caller carrying it as it refuses a project claim (S3,
-   * 2026-10-20), and by the engine's sftp render for each slot handle of a
-   * template (`tokenScopeRefusal`); the name scope of the handle a call names
-   * stays the interfaces' check.
+   * Secret-name patterns (thesis §4.7): a token's, set by callerFromToken only
+   * when the claim is non-empty — `["*"]` included —, or a trusted proxy
+   * socket's, set by proxySocketCaller from the administrator's opt-in.
+   * Consulted by governance, which refuses a caller carrying it as it refuses
+   * a project claim (S3, 2026-10-20), and by the engine's sftp render for each
+   * slot handle of a template (`tokenScopeRefusal`); the name scope of the
+   * handle a call names stays the interfaces' check.
    */
   secrets?: string[];
   /** Interface the request arrived through; audit attribution only. */
@@ -422,6 +423,8 @@ export interface CallerContext {
    * enumeration filter.
    */
   admin_scope?: true;
+  /** Set only by proxySocketCaller: the request is served without a token. */
+  tokenless?: true;
 }
 
 /**

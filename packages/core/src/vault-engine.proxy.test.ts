@@ -175,6 +175,44 @@ describe("resolveForProxy — the lease", () => {
     });
   });
 
+  it("complete({ status, error, sanitized: false }) — a body cut after its head — writes one failed row with the status and the code, no sanitized key; a second complete writes nothing", async () => {
+    const lease = await engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET);
+    lease.complete({ status: 200, error: ErrorCode.PROXY_UPSTREAM_FAILED, sanitized: false });
+    lease.complete({ status: 200, sanitized: false });
+
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail).toEqual({
+      context: "proxy",
+      method: "GET",
+      origin: "https://api.github.com",
+      path: "/user",
+      status: 200,
+      error: "PROXY_UPSTREAM_FAILED",
+      interface: "proxy",
+    });
+  });
+
+  it("complete({ status, error, sanitized: true }) carries the sanitized key on the failed row", async () => {
+    const lease = await engine.resolveForProxy(HANDLE, proxyCaller("alice"), TARGET);
+    lease.complete({ status: 200, error: ErrorCode.PROXY_UPSTREAM_FAILED, sanitized: true });
+
+    const rows = useRows(secretId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.success).toBe(false);
+    expect(rows[0]?.detail).toEqual({
+      context: "proxy",
+      method: "GET",
+      origin: "https://api.github.com",
+      path: "/user",
+      status: 200,
+      error: "PROXY_UPSTREAM_FAILED",
+      sanitized: true,
+      interface: "proxy",
+    });
+  });
+
   it("a target whose origin changes between reads is judged and leased from one read", async () => {
     let reads = 0;
     const target = Object.defineProperty({ method: "GET", path: "/user" }, "origin", {

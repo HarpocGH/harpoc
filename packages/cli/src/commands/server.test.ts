@@ -86,6 +86,7 @@ const {
   mockEgressProxy: {
     listenTcp: vi.fn(async (port: number) => ({ port })),
     listenSocket: vi.fn().mockResolvedValue(undefined),
+    listenTrustedSocket: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
   },
   mockAgentSocketServer: {
@@ -214,6 +215,7 @@ vi.mock("../utils/runtime-dir.js", async (importOriginal) => {
     assertRuntimeDir: vi.fn(actual.assertRuntimeDir),
     consumerSocketPaths: vi.fn(actual.consumerSocketPaths),
     consumerDirs: vi.fn(actual.consumerDirs),
+    trustedProxySockets: vi.fn(actual.trustedProxySockets),
   };
 });
 
@@ -229,7 +231,12 @@ import {
 import { registerServerCommand } from "./server.js";
 import { buildCli, spyCli, type CliSpies } from "../__fixtures__/cli-harness.js";
 import { icacls } from "../__fixtures__/icacls.js";
-import { assertRuntimeDir, consumerDirs, consumerSocketPaths } from "../utils/runtime-dir.js";
+import {
+  assertRuntimeDir,
+  consumerDirs,
+  consumerSocketPaths,
+  trustedProxySockets,
+} from "../utils/runtime-dir.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
 const run = buildCli(registerServerCommand, ["server", "start"]);
@@ -1408,6 +1415,425 @@ describe("server start", () => {
         onSpy.mockRestore();
       }
     });
+
+    describe("--proxy-trust-socket", () => {
+      const SPEC = "agent=agent1,secrets=api-key";
+      const PROXY_LINE =
+        "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 2 consumer sockets (<consumer>/proxy.sock)";
+
+      afterEach(() => {
+        vi.mocked(assertRuntimeDir).mockReset();
+        vi.mocked(consumerSocketPaths).mockReset();
+      });
+
+      /**
+       * The ladder of the runtime and consumer directories stubbed for one start, so a row runs on
+       * every platform (the real ladder's rows are the POSIX rows above and runtime-dir.test.ts's):
+       * the runtime directory passes and `proxy.sock` is listed for each consumer, by name. Each
+       * consumer's directory is made, since the trusted sockets are matched against the listing.
+       */
+      function stubConsumers(...names: string[]): void {
+        for (const name of names) mkdirSync(join(dir, name));
+        vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+        vi.mocked(consumerSocketPaths).mockImplementation((_runtimeDir, socketName) =>
+          names.map((name) => join(dir, name, socketName)),
+        );
+      }
+
+      function start(...specs: string[]): Promise<void> {
+        return run([
+          "--session",
+          "memory",
+          "--proxy",
+          "--runtime-dir",
+          dir,
+          ...specs.flatMap((spec) => ["--proxy-trust-socket", spec]),
+        ]);
+      }
+
+      it("serves <consumer>/proxy-trusted.sock for its spec after every proxy.sock: listenTrustedSocket once with the path, the consumer and the patterns, matched before the vault opens; the start line counts it", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+        stubConsumers("agent1", "agent2");
+
+        await start(SPEC);
+
+        expect(vi.mocked(trustedProxySockets).mock.calls).toEqual([
+          [{ path: dir, source: "--runtime-dir" }, [{ agent: "agent1", secrets: ["api-key"] }]],
+        ]);
+        const [matched] = vi.mocked(trustedProxySockets).mock.invocationCallOrder;
+        const [loaded] = vi.mocked(loadUnlockedEngine).mock.invocationCallOrder;
+        expect(matched as number).toBeLessThan(loaded as number);
+        expect(mockEgressProxy.listenTrustedSocket.mock.calls).toEqual([
+          [join(dir, "agent1", "proxy-trusted.sock"), "agent1", ["api-key"]],
+        ]);
+        const sockets = mockEgressProxy.listenSocket.mock.invocationCallOrder;
+        const [trusted] = mockEgressProxy.listenTrustedSocket.mock.invocationCallOrder;
+        expect(sockets).toHaveLength(2);
+        expect(sockets[1] as number).toBeLessThan(trusted as number);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          [`${PROXY_LINE} and 1 trusted socket (<consumer>/proxy-trusted.sock)`],
+        ]);
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      });
+
+      it("two specs serve two trusted sockets in the specs' order; the plural line", async () => {
+        stubConsumers("agent1", "agent2");
+
+        await start("agent=agent2,secrets=db-*+api-*", SPEC);
+
+        expect(mockEgressProxy.listenTrustedSocket.mock.calls).toEqual([
+          [join(dir, "agent2", "proxy-trusted.sock"), "agent2", ["db-*", "api-*"]],
+          [join(dir, "agent1", "proxy-trusted.sock"), "agent1", ["api-key"]],
+        ]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          [`${PROXY_LINE} and 2 trusted sockets (<consumer>/proxy-trusted.sock)`],
+        ]);
+      });
+
+      // Model B opt-in flag by flag: without the option nothing changes.
+      it("without the option no trusted socket: listenTrustedSocket not called, no directory matched, the start line unchanged", async () => {
+        stubConsumers("agent1", "agent2");
+
+        await start();
+
+        expect(mockEgressProxy.listenSocket).toHaveBeenCalledTimes(2);
+        expect(mockEgressProxy.listenTrustedSocket).not.toHaveBeenCalled();
+        expect(trustedProxySockets).not.toHaveBeenCalled();
+        expect(spies.errorSpy.mock.calls).toEqual([[MEMORY_SESSION], [PROXY_LINE]]);
+      });
+
+      it.each([
+        {
+          label: "without --proxy",
+          platform: "linux" as const,
+          argv: (): string[] => ["--session", "memory", "--rest", "--proxy-trust-socket", SPEC],
+          line: "Error: [INVALID_INPUT] --proxy-trust-socket requires --proxy",
+        },
+        {
+          label: "without a runtime directory",
+          platform: "linux" as const,
+          argv: (): string[] => ["--session", "memory", "--proxy", "--proxy-trust-socket", SPEC],
+          line: "Error: [INVALID_INPUT] --proxy-trust-socket requires --runtime-dir (or systemd's $RUNTIME_DIRECTORY): the trusted socket is <consumer>/proxy-trusted.sock",
+        },
+        {
+          label: "on Windows (the platform stubbed), a runtime directory given",
+          platform: "win32" as const,
+          argv: (): string[] => [
+            "--session",
+            "memory",
+            "--proxy",
+            "--runtime-dir",
+            dir,
+            "--proxy-trust-socket",
+            SPEC,
+          ],
+          line: "Error: [INVALID_INPUT] --proxy-trust-socket: not supported on Windows (the egress proxy serves no Unix socket there)",
+        },
+      ])(
+        "refuses the option $label INVALID_INPUT before the directory is read and the vault opens",
+        async ({ platform, argv, line }) => {
+          const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+          const { createEgressProxy } = await import("@harpoc/egress-proxy");
+          vi.stubEnv("RUNTIME_DIRECTORY", undefined);
+          stubPlatform(platform);
+
+          await expect(run(argv())).rejects.toThrow("process.exit");
+          expect(spies.exitSpy).toHaveBeenCalledWith(1);
+          expect(spies.errorSpy.mock.calls).toEqual([[line]]);
+          expect(assertRuntimeDir).not.toHaveBeenCalled();
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+          expect(createEgressProxy).not.toHaveBeenCalled();
+        },
+      );
+
+      it("a spec the parser refuses is reported before the directory is read and the vault opens", async () => {
+        const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+        await expect(start("agent=agent1,secrets=")).rejects.toThrow("process.exit");
+        expect(spies.exitSpy).toHaveBeenCalledWith(1);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          ["Error: [INVALID_INPUT] --proxy-trust-socket: secrets is empty"],
+        ]);
+        expect(assertRuntimeDir).not.toHaveBeenCalled();
+        expect(loadUnlockedEngine).not.toHaveBeenCalled();
+      });
+
+      it.each(["Agent1", "agent3"])(
+        "refuses agent %s, no consumer directory of that exact name beside agent1, before the vault opens",
+        async (agent) => {
+          const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+          const { createEgressProxy } = await import("@harpoc/egress-proxy");
+          stubConsumers("agent1");
+
+          await expect(start(`agent=${agent},secrets=api-key`)).rejects.toThrow("process.exit");
+          expect(spies.exitSpy).toHaveBeenCalledWith(1);
+          expect(spies.errorSpy.mock.calls).toEqual([
+            [
+              `Error: [INVALID_INPUT] --proxy-trust-socket: agent "${agent}" has no consumer directory under ${dir}`,
+            ],
+          ]);
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+          expect(createEgressProxy).not.toHaveBeenCalled();
+        },
+      );
+
+      it("SIGTERM: the proxy's row, then one tokenless server.stop row naming the consumer of each trusted socket, before the proxy's close(); destroy last", async () => {
+        const onSpy = vi.spyOn(process, "on");
+        spies.exitSpy.mockImplementation(() => undefined as never);
+        stubConsumers("agent1", "agent2");
+
+        await start(SPEC);
+        const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+        (sigtermCall?.[1] as () => void)();
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [
+            {
+              transport: "proxy",
+              tokenless: false,
+              port: 3128,
+              uptimeMs: expect.any(Number),
+              trigger: "SIGTERM",
+            },
+          ],
+          [
+            {
+              transport: "proxy",
+              tokenless: true,
+              consumer: "agent1",
+              uptimeMs: expect.any(Number),
+              trigger: "SIGTERM",
+            },
+          ],
+        ]);
+        const [, trustedRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+        const close = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+        const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+        expect(trustedRow as number).toBeLessThan(close);
+        expect(close).toBeLessThan(destroy);
+
+        onSpy.mockRestore();
+      });
+
+      it("a trusted socket refused after the first: the proxy's and the first trusted socket's start_failed rows before the close, none for the refused one; the refusal alone, exit 1", async () => {
+        stubConsumers("agent1", "agent2");
+        const refused = join(dir, "agent2", "proxy-trusted.sock");
+        mockEgressProxy.listenTrustedSocket
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(
+            VaultError.invalidInput(`Egress proxy socket: ${refused} exists and is not a socket`),
+          );
+
+        await expect(start(SPEC, "agent=agent2,secrets=db-*")).rejects.toThrow("process.exit");
+        expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+        expect(spies.errorSpy.mock.calls).toEqual([
+          [MEMORY_SESSION],
+          [`Error: [INVALID_INPUT] Egress proxy socket: ${refused} exists and is not a socket`],
+        ]);
+        expect(mockEgressProxy.listenTrustedSocket).toHaveBeenCalledTimes(2);
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [
+            {
+              transport: "proxy",
+              tokenless: false,
+              port: 3128,
+              uptimeMs: expect.any(Number),
+              trigger: "start_failed",
+            },
+          ],
+          [
+            {
+              transport: "proxy",
+              tokenless: true,
+              consumer: "agent1",
+              uptimeMs: expect.any(Number),
+              trigger: "start_failed",
+            },
+          ],
+        ]);
+        expect(mockEgressProxy.close).toHaveBeenCalledTimes(1);
+        expect(mockEngine.destroy).toHaveBeenCalledTimes(1);
+        const [, trustedRow] = mockEngine.auditServerStop.mock.invocationCallOrder as number[];
+        const close = mockEgressProxy.close.mock.invocationCallOrder[0] as number;
+        const destroy = mockEngine.destroy.mock.invocationCallOrder[0] as number;
+        expect(trustedRow as number).toBeLessThan(close);
+        expect(close).toBeLessThan(destroy);
+      });
+
+      it("SIGTERM while a trusted socket's start is pending writes no row for it: the proxy's row alone", async () => {
+        const onSpy = vi.spyOn(process, "on");
+        spies.exitSpy.mockImplementation(() => undefined as never);
+        stubConsumers("agent1");
+        let release: () => void = () => undefined;
+        mockEgressProxy.listenTrustedSocket.mockReturnValueOnce(
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        );
+
+        const started = start(SPEC);
+        await vi.waitFor(() =>
+          expect(mockEgressProxy.listenTrustedSocket).toHaveBeenCalledTimes(1),
+        );
+        const sigtermCall = onSpy.mock.calls.find((call) => call[0] === "SIGTERM");
+        (sigtermCall?.[1] as () => void)();
+        await vi.waitFor(() => expect(spies.exitSpy).toHaveBeenCalledWith(0));
+        release();
+        await started;
+
+        expect(mockEngine.auditServerStop.mock.calls).toEqual([
+          [
+            {
+              transport: "proxy",
+              tokenless: false,
+              port: 3128,
+              uptimeMs: expect.any(Number),
+              trigger: "SIGTERM",
+            },
+          ],
+        ]);
+
+        onSpy.mockRestore();
+      });
+    });
+
+    describe("--proxy-head-timeout and --proxy-idle-timeout", () => {
+      const HANDED = {
+        engine: mockEngine,
+        onListenerError: expect.any(Function),
+        onError: expect.any(Function),
+      };
+
+      it("--proxy-head-timeout 600 --proxy-idle-timeout 300 hand the proxy both limits in milliseconds", async () => {
+        const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+        await run([
+          "--session",
+          "memory",
+          "--proxy",
+          "--proxy-head-timeout",
+          "600",
+          "--proxy-idle-timeout",
+          "300",
+        ]);
+
+        expect(createEgressProxy).toHaveBeenCalledWith({
+          ...HANDED,
+          timeoutMs: 600_000,
+          bodyIdleTimeoutMs: 300_000,
+        });
+        expect(spies.exitSpy).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        { flag: "--proxy-head-timeout", value: "600", key: "timeoutMs", ms: 600_000 },
+        { flag: "--proxy-head-timeout", value: "1", key: "timeoutMs", ms: 1_000 },
+        { flag: "--proxy-head-timeout", value: "3600", key: "timeoutMs", ms: 3_600_000 },
+        { flag: "--proxy-idle-timeout", value: "300", key: "bodyIdleTimeoutMs", ms: 300_000 },
+        { flag: "--proxy-idle-timeout", value: "1", key: "bodyIdleTimeoutMs", ms: 1_000 },
+        { flag: "--proxy-idle-timeout", value: "3600", key: "bodyIdleTimeoutMs", ms: 3_600_000 },
+      ])(
+        "$flag $value alone is accepted: the proxy gets $key $ms and no other limit",
+        async ({ flag, value, key, ms }) => {
+          const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+          await run(["--session", "memory", "--proxy", flag, value]);
+
+          expect(createEgressProxy).toHaveBeenCalledWith({ ...HANDED, [key]: ms });
+          expect(spies.exitSpy).not.toHaveBeenCalled();
+        },
+      );
+
+      const BOUNDS = [
+        {
+          flag: "--proxy-head-timeout",
+          value: "0",
+          line: 'Invalid proxy head timeout "0". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-head-timeout",
+          value: "3601",
+          line: 'Invalid proxy head timeout "3601". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-head-timeout",
+          value: "30s",
+          line: 'Invalid proxy head timeout "30s". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-head-timeout",
+          value: "1.5",
+          line: 'Invalid proxy head timeout "1.5". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-head-timeout",
+          value: "",
+          line: 'Invalid proxy head timeout "". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-idle-timeout",
+          value: "0",
+          line: 'Invalid proxy idle timeout "0". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-idle-timeout",
+          value: "3601",
+          line: 'Invalid proxy idle timeout "3601". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-idle-timeout",
+          value: "30s",
+          line: 'Invalid proxy idle timeout "30s". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-idle-timeout",
+          value: "1.5",
+          line: 'Invalid proxy idle timeout "1.5". Must be 1-3600.',
+        },
+        {
+          flag: "--proxy-idle-timeout",
+          value: "",
+          line: 'Invalid proxy idle timeout "". Must be 1-3600.',
+        },
+      ];
+
+      it.each(BOUNDS)(
+        "$flag $value beside --proxy is refused INVALID_INPUT naming the range, before the vault opens",
+        async ({ flag, value, line }) => {
+          const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+          const { createEgressProxy } = await import("@harpoc/egress-proxy");
+
+          await expect(run(["--session", "memory", "--proxy", flag, value])).rejects.toThrow(
+            "process.exit",
+          );
+          expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+          expect(spies.errorSpy.mock.calls).toEqual([[`Error: [INVALID_INPUT] ${line}`]]);
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+          expect(createEgressProxy).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        ...BOUNDS,
+        { flag: "--proxy-head-timeout", value: "60" },
+        { flag: "--proxy-idle-timeout", value: "60" },
+      ])(
+        "$flag $value without --proxy is refused INVALID_INPUT: $flag requires --proxy",
+        async ({ flag, value }) => {
+          const { loadUnlockedEngine } = await import("../utils/vault-loader.js");
+
+          await expect(run(["--rest", flag, value])).rejects.toThrow("process.exit");
+          expect(spies.exitSpy.mock.calls).toEqual([[1]]);
+          expect(spies.errorSpy.mock.calls).toEqual([
+            [`Error: [INVALID_INPUT] ${flag} requires --proxy`],
+          ]);
+          expect(loadUnlockedEngine).not.toHaveBeenCalled();
+        },
+      );
+    });
   });
 
   // ── --proxy with the Harpoc CA (B8) ─────────────────────────────
@@ -1500,6 +1926,36 @@ describe("server start", () => {
       expect(spies.errorSpy.mock.calls).toContainEqual([
         "[harpoc] egress proxy listening on http://127.0.0.1:3128 (TCP only: no --runtime-dir) — CONNECT for 2 host(s), certificates unconstrained (Harpoc CA SHA-256 AB:CD:EF:01:23:45:67:89…, until 2036-11-06T10:33:14.000Z)",
       ]);
+    });
+
+    it("with a trusted socket the line names the consumer sockets, then the trusted socket, then CONNECT (the ladder stubbed, every platform)", async () => {
+      mkdirSync(join(dir, "alice"));
+      vi.mocked(assertRuntimeDir).mockImplementation(() => undefined);
+      vi.mocked(consumerSocketPaths).mockImplementation((_runtimeDir, socketName) => [
+        join(dir, "alice", socketName),
+      ]);
+      try {
+        await run([
+          "--session",
+          "memory",
+          "--proxy",
+          "--runtime-dir",
+          dir,
+          "--proxy-trust-socket",
+          "agent=alice,secrets=api-key",
+        ]);
+      } finally {
+        vi.mocked(consumerSocketPaths).mockReset();
+        vi.mocked(assertRuntimeDir).mockReset();
+      }
+
+      expect(mockEgressProxy.listenTrustedSocket.mock.calls).toEqual([
+        [join(dir, "alice", "proxy-trusted.sock"), "alice", ["api-key"]],
+      ]);
+      expect(spies.errorSpy.mock.calls).toContainEqual([
+        "[harpoc] egress proxy listening on http://127.0.0.1:3128 and 1 consumer socket (<consumer>/proxy.sock) and 1 trusted socket (<consumer>/proxy-trusted.sock) — CONNECT for 2 host(s) (Harpoc CA SHA-256 AB:CD:EF:01:23:45:67:89…)",
+      ]);
+      expect(spies.exitSpy).not.toHaveBeenCalled();
     });
 
     it.skipIf(process.platform === "win32")(

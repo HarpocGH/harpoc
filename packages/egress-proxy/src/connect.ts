@@ -115,13 +115,13 @@ export interface TunnelHost {
  * framing and the request parser are node's own. ALPN offers `http/1.1`
  * alone — the handler is HTTP/1.1; a client that offers only `h2` fails the
  * handshake with `no_application_protocol`. A tunnel that carries no byte
- * for `timeoutMs` in a gap — before its first request, between requests, a
- * stalled partial head — is destroyed; the deadline is suspended while a
- * request is in flight, whose upstream budgets bound it instead.
+ * for `tunnelTimeoutMs` in a gap — before its first request, between
+ * requests, a stalled partial head — is destroyed; the deadline is suspended
+ * while a request is in flight, whose upstream budgets bound it instead.
  */
 export function createTunnelHost(
   handler: (req: IncomingMessage, res: ServerResponse) => void,
-  timeoutMs: number,
+  tunnelTimeoutMs: number,
 ): TunnelHost {
   const tunnels = new WeakMap<Socket, Tunnel>();
   const raws = new WeakMap<Socket, { raw: Socket; inFlight: number }>();
@@ -133,7 +133,7 @@ export function createTunnelHost(
       held.inFlight += 1;
       res.once("close", () => {
         held.inFlight -= 1;
-        if (held.inFlight === 0 && !held.raw.destroyed) held.raw.setTimeout(timeoutMs);
+        if (held.inFlight === 0 && !held.raw.destroyed) held.raw.setTimeout(tunnelTimeoutMs);
       });
     }
     handler(req, res);
@@ -148,7 +148,7 @@ export function createTunnelHost(
       }
       open.add(socket);
       socket.once("close", () => open.delete(socket));
-      socket.setTimeout(timeoutMs);
+      socket.setTimeout(tunnelTimeoutMs);
       socket.on("timeout", () => socket.destroy());
       if (head.length > 0) socket.unshift(head);
       socket.write(CONNECT_ESTABLISHED);

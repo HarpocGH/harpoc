@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
-import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
+import type {
+  IncomingHttpHeaders,
+  IncomingMessage,
+  OutgoingHttpHeaders,
+  ServerResponse,
+} from "node:http";
 import { createServer } from "node:https";
 import type { AddressInfo } from "node:net";
 import * as tls from "node:tls";
@@ -83,6 +88,42 @@ export async function startUpstream(): Promise<UpstreamFixture> {
         server.close(() => resolve());
         server.closeAllConnections();
       }),
+  };
+}
+
+/** The open response {@link holdResponse} hands the test. */
+export interface HeldResponse {
+  /** Writes one more body chunk; dropped once the response has ended or closed. */
+  write(chunk: string): void;
+  /** Ends the response; nothing once it has ended or closed. */
+  end(): void;
+}
+
+/**
+ * Scripts the upstream to answer `200` with `headers` and the body chunk
+ * `first(req)`, then hold the response open: every further chunk is the
+ * test's, so a stream can be stepped chunk by chunk.
+ */
+export function holdResponse(
+  upstream: UpstreamFixture,
+  headers: OutgoingHttpHeaders,
+  first: (req: IncomingMessage) => string,
+): HeldResponse {
+  let held: ServerResponse | undefined;
+  const open = (): ServerResponse | undefined =>
+    held === undefined || held.writableEnded || held.destroyed ? undefined : held;
+  upstream.script((req, res) => {
+    res.writeHead(200, headers);
+    res.write(first(req));
+    held = res;
+  });
+  return {
+    write(chunk) {
+      open()?.write(chunk);
+    },
+    end() {
+      open()?.end();
+    },
   };
 }
 

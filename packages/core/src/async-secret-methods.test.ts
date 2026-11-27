@@ -78,6 +78,7 @@ const OTHER_METHODS = {
     "auditGovernanceRefusal",
     "auditScopeRefusal",
     "auditProxyRefusal",
+    "assertProxyConsumer",
     "registerAgent",
     "getAgent",
     "listAgents",

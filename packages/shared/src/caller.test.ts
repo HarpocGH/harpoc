@@ -5,6 +5,7 @@ import {
   callerFromToken,
   checkTokenScope,
   isAdminUserCaller,
+  proxySocketCaller,
   TOKENLESS_STDIO_PRINCIPAL,
   tokenlessStdioCaller,
   tokenScopeRefusal,
@@ -290,6 +291,53 @@ describe("agentSocketCaller (B3)", () => {
     const caller = agentSocketCaller("ci-bot");
     expect("admin_scope" in caller).toBe(false);
     expect(isAdminUserCaller(caller)).toBe(false);
+  });
+});
+
+describe("proxySocketCaller", () => {
+  it("is the consumer as an agent-type principal on the proxy interface, holding the patterns, marked tokenless", () => {
+    const caller = proxySocketCaller("agent1", ["a", "b-*"]);
+    expect(caller).toEqual({
+      principal_type: TokenPrincipalType.AGENT,
+      principal_id: "agent1",
+      secrets: ["a", "b-*"],
+      interface: "proxy",
+      tokenless: true,
+    });
+    expect(Object.keys(caller).sort()).toEqual([
+      "interface",
+      "principal_id",
+      "principal_type",
+      "secrets",
+      "tokenless",
+    ]);
+    expect("admin_scope" in caller).toBe(false);
+  });
+
+  it("returns a copy of the patterns it was given", () => {
+    const patterns = ["a", "b-*"];
+    const caller = proxySocketCaller("agent1", patterns);
+    expect(Object.is(caller.secrets, patterns)).toBe(false);
+    patterns.push("c");
+    expect(caller.secrets).toEqual(["a", "b-*"]);
+  });
+});
+
+describe("tokenless", () => {
+  it("callerFromToken, tokenlessStdioCaller and agentSocketCaller carry no tokenless key", () => {
+    const tokenCallers = [
+      callerFromToken(baseToken()),
+      callerFromToken(baseToken(), "proxy", "10.0.0.7"),
+      callerFromToken(
+        baseToken({ scope: ["admin"], principal_type: "user", project: "p", secrets: ["*"] }),
+        "proxy",
+      ),
+    ];
+    for (const caller of tokenCallers) {
+      expect("tokenless" in caller).toBe(false);
+    }
+    expect("tokenless" in tokenlessStdioCaller("mcp")).toBe(false);
+    expect("tokenless" in agentSocketCaller("ci-bot")).toBe(false);
   });
 });
 

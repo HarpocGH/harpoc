@@ -65,7 +65,7 @@ beforeEach(async () => {
   await engine.initVault("password");
   engine.registerAgent({ name: "agent-a" });
   resolveForProxy = vi.fn<ProxyEngine["resolveForProxy"]>();
-  // The real engine behind the five members; resolveForProxy is the engine
+  // The real engine behind the six members; resolveForProxy is the engine
   // lane's, so these rows reach it only to prove they never do.
   proxyEngine = {
     verifyToken: (token) => engine.verifyToken(token),
@@ -74,6 +74,7 @@ beforeEach(async () => {
     auditProxyRefusal: (caller, operation, code) =>
       engine.auditProxyRefusal(caller, operation, code),
     auditServerStart: (options) => engine.auditServerStart(options),
+    assertProxyConsumer: (caller) => engine.assertProxyConsumer(caller),
     resolveForProxy,
   };
   proxy = createEgressProxy({ engine: proxyEngine });

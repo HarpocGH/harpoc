@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CallerContext } from "@harpoc/shared";
+import type { CallerContext, VaultApiToken } from "@harpoc/shared";
+import { callerFromToken, proxySocketCaller } from "@harpoc/shared";
 import {
   attributionFromCaller,
   callerColumns,
@@ -125,6 +126,52 @@ describe("remote_address → ip_address (E75i)", () => {
     const base: AuditLogOptions = { eventType: "secret.use" };
     expect(withAttribution(base, { remote_address: "10.0.0.7" }).ipAddress).toBe("10.0.0.7");
     expect("ipAddress" in withAttribution(base, { principal_id: "alice" })).toBe(false);
+  });
+});
+
+describe("tokenless", () => {
+  const proxyUse = (): AuditLogOptions => ({
+    eventType: "secret.use",
+    detail: { context: "proxy" },
+  });
+  const proxyToken: VaultApiToken = {
+    sub: "agent1",
+    vault_id: "vault-1",
+    scope: ["use"],
+    iat: 0,
+    exp: 2_000_000_000,
+    jti: "jti-1",
+    principal_type: "agent",
+  };
+
+  it("the detail built for a proxySocketCaller holds interface proxy and tokenless true", () => {
+    const caller = proxySocketCaller("agent1", ["a", "b-*"]);
+    const attribution = attributionFromCaller(caller, "sess-1");
+    expect(attribution).toEqual({
+      principal_type: "agent",
+      principal_id: "agent1",
+      interface: "proxy",
+      tokenless: true,
+      session_id: "sess-1",
+    });
+    expect(withAttribution(proxyUse(), attribution).detail).toEqual({
+      context: "proxy",
+      interface: "proxy",
+      tokenless: true,
+    });
+    expect(callerInterfaceDetail(caller)).toEqual({ interface: "proxy", tokenless: true });
+  });
+
+  it('the detail built for a callerFromToken(…, "proxy") caller holds no tokenless key', () => {
+    const caller = callerFromToken(proxyToken, "proxy");
+    const attribution = attributionFromCaller(caller, "sess-1");
+    expect("tokenless" in (attribution as object)).toBe(false);
+    const detail = withAttribution(proxyUse(), attribution).detail;
+    expect(detail).toEqual({ context: "proxy", interface: "proxy" });
+    expect("tokenless" in (detail as object)).toBe(false);
+    const engineDetail = callerInterfaceDetail(caller);
+    expect(engineDetail).toEqual({ interface: "proxy" });
+    expect("tokenless" in engineDetail).toBe(false);
   });
 });
 

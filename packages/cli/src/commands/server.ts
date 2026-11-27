@@ -21,9 +21,11 @@ import {
   MAX_BACKUP_INTERVAL_MINUTES,
   MAX_BACKUP_KEEP,
   MAX_PORT,
+  MAX_PROXY_TIMEOUT_SECONDS,
   MIN_BACKUP_INTERVAL_MINUTES,
   MIN_BACKUP_KEEP,
   MIN_PORT,
+  MIN_PROXY_TIMEOUT_SECONDS,
 } from "../utils/option-bounds.js";
 import {
   agentSocketPipeName,
@@ -31,8 +33,10 @@ import {
   consumerDirs,
   consumerSocketPaths,
   resolveRuntimeDir,
+  trustedProxySockets,
 } from "../utils/runtime-dir.js";
 import { assertIssueTokenFile, parseIssueTokenSpecs } from "../utils/issue-token-spec.js";
+import { parseProxyTrustSpecs } from "../utils/proxy-trust-spec.js";
 import {
   connectSummary,
   loadProxyCaWiring,
@@ -103,6 +107,20 @@ export function registerServerCommand(program: Command): void {
     )
     .option("--proxy-port <port>", "Egress proxy port (loopback)", String(DEFAULT_PROXY_PORT))
     .option(
+      "--proxy-head-timeout <seconds>",
+      "Egress proxy: the time an upstream gets to connect and, again, to send its response headers (1-3600 seconds, default 30; requires --proxy)",
+    )
+    .option(
+      "--proxy-idle-timeout <seconds>",
+      "Egress proxy: the longest silence between two chunks of an upstream's response body (1-3600 seconds, default 30; requires --proxy)",
+    )
+    .option(
+      "--proxy-trust-socket <spec>",
+      "Serve <consumer>/proxy-trusted.sock, on which a request without a token is brokered as that consumer for use alone (repeatable; requires --proxy and a consumer directory; not on Windows): agent=<name>,secrets=<pattern>[+<pattern>…]",
+      collect,
+      [],
+    )
+    .option(
       "--ssh-agent",
       "Serve one ssh-agent.sock per consumer directory under --runtime-dir (default $RUNTIME_DIRECTORY): signatures with the keys each consumer is granted, host-bound by session-bind",
     )
@@ -164,6 +182,9 @@ export function registerServerCommand(program: Command): void {
           runtimeDir?: string;
           proxy?: boolean;
           proxyPort: string;
+          proxyHeadTimeout?: string;
+          proxyIdleTimeout?: string;
+          proxyTrustSocket: string[];
           sshAgent?: boolean;
           unlockKeyFile?: string;
           unlockCredential?: string;
@@ -284,6 +305,7 @@ export function registerServerCommand(program: Command): void {
             );
           }
           const rotationSpecs = parseIssueTokenSpecs(opts.issueToken);
+          const trustSpecs = parseProxyTrustSpecs(opts.proxyTrustSocket);
           const win32 = process.platform === "win32";
           // An ambient $RUNTIME_DIRECTORY is the default only for a
           // per-consumer feature (--proxy's and --ssh-agent's sockets): a unit's
@@ -353,6 +375,25 @@ export function registerServerCommand(program: Command): void {
           if (cmd.getOptionValueSource("backupKeep") === "cli" && opts.backupDir === undefined) {
             throw VaultError.invalidInput("--backup-keep requires --backup-dir");
           }
+          if (cmd.getOptionValueSource("proxyHeadTimeout") === "cli" && !opts.proxy) {
+            throw VaultError.invalidInput("--proxy-head-timeout requires --proxy");
+          }
+          if (cmd.getOptionValueSource("proxyIdleTimeout") === "cli" && !opts.proxy) {
+            throw VaultError.invalidInput("--proxy-idle-timeout requires --proxy");
+          }
+          if (trustSpecs.length > 0) {
+            if (!opts.proxy) throw VaultError.invalidInput("--proxy-trust-socket requires --proxy");
+            if (win32) {
+              throw VaultError.invalidInput(
+                "--proxy-trust-socket: not supported on Windows (the egress proxy serves no Unix socket there)",
+              );
+            }
+            if (runtimeDir === undefined) {
+              throw VaultError.invalidInput(
+                "--proxy-trust-socket requires --runtime-dir (or systemd's $RUNTIME_DIRECTORY): the trusted socket is <consumer>/proxy-trusted.sock",
+              );
+            }
+          }
 
           // The agent socket has no TCP half: it is served in the consumer directories only.
           if (opts.sshAgent && runtimeDir === undefined) {
@@ -371,6 +412,30 @@ export function registerServerCommand(program: Command): void {
             MAX_PORT,
           );
           const proxyPort = parseIntOption(opts.proxyPort, "proxy port", MIN_PORT, MAX_PORT);
+          const proxyLimits = {
+            ...(cmd.getOptionValueSource("proxyHeadTimeout") === "cli"
+              ? {
+                  timeoutMs:
+                    parseIntOption(
+                      opts.proxyHeadTimeout as string,
+                      "proxy head timeout",
+                      MIN_PROXY_TIMEOUT_SECONDS,
+                      MAX_PROXY_TIMEOUT_SECONDS,
+                    ) * 1_000,
+                }
+              : {}),
+            ...(cmd.getOptionValueSource("proxyIdleTimeout") === "cli"
+              ? {
+                  bodyIdleTimeoutMs:
+                    parseIntOption(
+                      opts.proxyIdleTimeout as string,
+                      "proxy idle timeout",
+                      MIN_PROXY_TIMEOUT_SECONDS,
+                      MAX_PROXY_TIMEOUT_SECONDS,
+                    ) * 1_000,
+                }
+              : {}),
+          };
           const backupIntervalMinutes = parseIntOption(
             opts.backupInterval,
             "backup interval",
@@ -484,6 +549,10 @@ export function registerServerCommand(program: Command): void {
             opts.proxy && runtimeDir !== undefined && !win32
               ? consumerSocketPaths(runtimeDir, "proxy.sock")
               : [];
+          const trustedSockets =
+            trustSpecs.length > 0 && runtimeDir !== undefined
+              ? trustedProxySockets(runtimeDir, trustSpecs)
+              : [];
           // One ssh-agent.sock per consumer directory (win32: one pipe, granting the consumer's
           // account); a --ssh-agent that serves no consumer refuses the start (a consumer
           // directory named as the runtime directory lists none).
@@ -591,6 +660,7 @@ export function registerServerCommand(program: Command): void {
           let backupScheduler: { stop(): Promise<void> } | undefined;
           let egressProxy: { close(): Promise<void> } | undefined;
           let proxyBoundPort: number | undefined;
+          const trustedConsumers: string[] = [];
           const agentSockets: { readonly consumer: string; stop(): Promise<void> }[] = [];
 
           const startedAt = Date.now();
@@ -652,6 +722,9 @@ export function registerServerCommand(program: Command): void {
               }
               if (egressProxy) {
                 auditStop("proxy", false, proxyBoundPort, trigger);
+                for (const consumer of trustedConsumers) {
+                  auditStop("proxy", true, undefined, trigger, consumer);
+                }
                 await settle(() => egressProxy?.close());
               }
               for (const agentSocket of agentSockets) {
@@ -841,11 +914,13 @@ export function registerServerCommand(program: Command): void {
             // the bytes: they are zero-filled here, whether the creation succeeds or throws.
             let proxy: ReturnType<typeof createEgressProxy>;
             try {
-              proxy = createEgressProxy(
-                proxyCa === undefined
-                  ? { engine, onListenerError: failStop, onError }
-                  : { engine, ca: proxyCa.options, onListenerError: failStop, onError },
-              );
+              proxy = createEgressProxy({
+                engine,
+                ...(proxyCa === undefined ? {} : { ca: proxyCa.options }),
+                onListenerError: failStop,
+                onError,
+                ...proxyLimits,
+              });
             } finally {
               proxyCa?.options.keyPem.fill(0);
             }
@@ -853,6 +928,10 @@ export function registerServerCommand(program: Command): void {
             egressProxy = proxy;
             proxyBoundPort = boundPort;
             for (const socketPath of proxySockets) await proxy.listenSocket(socketPath);
+            for (const { socketPath, consumer, secrets } of trustedSockets) {
+              await proxy.listenTrustedSocket(socketPath, consumer, secrets);
+              trustedConsumers.push(consumer);
+            }
             const sockets =
               runtimeDir === undefined
                 ? " (TCP only: no --runtime-dir)"
@@ -861,9 +940,13 @@ export function registerServerCommand(program: Command): void {
                   : proxySockets.length === 0
                     ? ` (TCP only: no consumer directory under ${runtimeDir.path})`
                     : ` and ${String(proxySockets.length)} consumer socket${proxySockets.length === 1 ? "" : "s"} (<consumer>/proxy.sock)`;
+            const trusted =
+              trustedSockets.length === 0
+                ? ""
+                : ` and ${String(trustedSockets.length)} trusted socket${trustedSockets.length === 1 ? "" : "s"} (<consumer>/proxy-trusted.sock)`;
             const connect = proxyCa === undefined ? "" : connectSummary(proxyCa);
             console.error(
-              `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}${connect}`,
+              `[harpoc] egress proxy listening on http://127.0.0.1:${String(boundPort)}${sockets}${trusted}${connect}`,
             );
           }
 

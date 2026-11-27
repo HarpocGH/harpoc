@@ -23,6 +23,8 @@ export interface AuditAttribution {
   interface?: AccessInterface;
   /** The caller's socket peer, landing in `ip_address` (E75i). */
   remote_address?: string;
+  /** Carried from a tokenless caller (`proxySocketCaller`) into the encrypted detail. */
+  tokenless?: true;
   use?: UseMark;
 }
 
@@ -42,6 +44,7 @@ export function attributionFromCaller(
     attribution.principal_id = caller.principal_id;
     if (caller.interface) attribution.interface = caller.interface;
     if (caller.remote_address) attribution.remote_address = caller.remote_address;
+    if (caller.tokenless) attribution.tokenless = true;
   }
   if (sessionId) attribution.session_id = sessionId;
   return attribution;
@@ -50,10 +53,13 @@ export function attributionFromCaller(
 /**
  * Interface tag for the encrypted detail of a caller-attributed engine row —
  * the engine's own audit sites stamp the principal columns directly and add
- * only this to their detail ("through which interface", ch4 §4.3.4).
+ * only this to their detail ("through which interface", ch4 §4.3.4), with
+ * `tokenless: true` where the caller carries it.
  */
 export function callerInterfaceDetail(caller: CallerContext | undefined): Record<string, unknown> {
-  return caller?.interface ? { interface: caller.interface } : {};
+  const detail: Record<string, unknown> = caller?.interface ? { interface: caller.interface } : {};
+  if (caller?.tokenless) detail.tokenless = true;
+  return detail;
 }
 
 /**
@@ -76,8 +82,9 @@ export function callerColumns(
 
 /**
  * Merge an attribution into an audit entry: principal, session and peer land
- * in the plaintext columns (covered by the row-chain HMAC), the interface in
- * the encrypted detail — ch4 §4.3.4 keeps the plaintext envelope minimal.
+ * in the plaintext columns (covered by the row-chain HMAC), the interface and
+ * the tokenless mark in the encrypted detail — ch4 §4.3.4 keeps the plaintext
+ * envelope minimal.
  */
 export function withAttribution(
   options: AuditLogOptions,
@@ -96,6 +103,7 @@ export function withAttribution(
       interface: attribution.interface,
     };
   }
+  if (attribution.tokenless) merged.detail = { ...(merged.detail ?? {}), tokenless: true };
   return merged;
 }
 

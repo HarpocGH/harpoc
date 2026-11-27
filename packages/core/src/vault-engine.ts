@@ -314,8 +314,11 @@ export interface ProxyTarget {
   plainOrigin?: string;
 }
 
-/** How a brokered request ended: the upstream status and whether the redaction changed the response, or the code that ended it. */
-export type ProxyOutcome = { status: number; sanitized: boolean } | { error: ErrorCode };
+/** How a brokered request ended: the upstream status and whether the redaction changed the response, the code that ended it, or both with the code beside the status — a response whose body the upstream cut after its head was relayed. */
+export type ProxyOutcome =
+  | { status: number; sanitized: boolean }
+  | { error: ErrorCode }
+  | { status: number; error: ErrorCode; sanitized: boolean };
 
 /**
  * The credential `resolveForProxy` hands the egress proxy for one request: a
@@ -728,6 +731,25 @@ function isAgentSocketCaller(caller: CallerContext | undefined): caller is Calle
     caller !== undefined &&
     caller.principal_type === PrincipalType.AGENT &&
     caller.interface === "ssh_agent" &&
+    caller.project === undefined &&
+    caller.admin_scope === undefined
+  );
+}
+
+/**
+ * A trusted proxy socket's caller (`proxySocketCaller`): an agent-type
+ * principal on the `proxy` interface, marked tokenless, holding at least one
+ * secret-name pattern — an empty list restricts no name — and carrying
+ * nothing that widens it: no project, no admin flag.
+ */
+function isProxySocketCaller(caller: CallerContext | undefined): caller is CallerContext {
+  return (
+    caller !== undefined &&
+    caller.principal_type === PrincipalType.AGENT &&
+    caller.interface === "proxy" &&
+    caller.tokenless === true &&
+    Array.isArray(caller.secrets) &&
+    caller.secrets.length > 0 &&
     caller.project === undefined &&
     caller.admin_scope === undefined
   );
@@ -2647,6 +2669,21 @@ export class VaultEngine {
   }
 
   /**
+   * Admit a request on a consumer's trusted proxy socket: a caller that is no
+   * trusted socket's (`proxySocketCaller`) is refused `INVALID_INPUT`, a
+   * sealed vault `VAULT_LOCKED`, an agent the registry does not hold
+   * `AGENT_NOT_FOUND` and one that is not active `AGENT_INACTIVE`. It writes
+   * no row: its caller records the refusal.
+   */
+  assertProxyConsumer(caller: CallerContext): void {
+    if (!isProxySocketCaller(caller)) {
+      throw VaultError.invalidInput("assertProxyConsumer needs a trusted socket's caller");
+    }
+    const s = this.assertUnlocked();
+    s.agentRegistry.assertActive(caller.principal_id);
+  }
+
+  /**
    * Resolve one egress-proxy placeholder for one brokered request (design
    * M4). `use_secret`'s ladder for a token caller — resolve the handle, the
    * caller's `use` grant, the secret's status, each refusal the failed
@@ -2667,15 +2704,19 @@ export class VaultEngine {
    * The request's one success or failure row is `complete`'s, written after
    * the upstream exchange as the HTTP injector writes its row after the
    * response; a lease still open when the vault seals is recorded then,
-   * `VAULT_LOCKED`, by `wipeKeys`.
+   * `VAULT_LOCKED`, by `wipeKeys`. A caller marked `tokenless` must be a
+   * trusted socket's (`INVALID_INPUT` without a row) and its agent registered
+   * and active, checked before the handle is resolved: `AGENT_NOT_FOUND` or
+   * `AGENT_INACTIVE` with one failed `secret.use` row and no secret id.
    */
   async resolveForProxy(
     handle: string,
     caller: CallerContext,
     target: ProxyTarget,
   ): Promise<ProxyLease> {
-    // The proxy always holds a token (design § 8 decision 5): a caller-less
-    // call would read as the trusted local path and skip the grant check.
+    // The proxy hands every request a caller — its token's, or a trusted
+    // socket's consumer: a caller-less call would read as the trusted local
+    // path and skip the grant check.
     if (!caller) {
       throw VaultError.invalidInput("resolveForProxy needs the token caller of the request");
     }
@@ -2689,10 +2730,24 @@ export class VaultEngine {
       );
     }
     const s = this.assertUnlocked();
+    const tokenless = caller.tokenless !== undefined;
+    if (tokenless && !isProxySocketCaller(caller)) {
+      throw VaultError.invalidInput("resolveForProxy needs a trusted socket's caller");
+    }
     let request: Record<string, unknown> = { context: "proxy", method, origin, path };
     let secret: Secret | undefined;
     try {
       let denied = { handle, ...request };
+      if (tokenless) {
+        try {
+          s.agentRegistry.assertActive(caller.principal_id);
+        } catch (err) {
+          if (err instanceof VaultError) {
+            this.auditDenied(s, AuditEventType.SECRET_USE, err, denied, undefined, caller);
+          }
+          throw err;
+        }
+      }
       try {
         secret = await s.secretManager.resolveHandle(handle);
       } catch (err) {
@@ -2866,14 +2921,15 @@ export class VaultEngine {
       if (!this.openProxyLeases.delete(close)) return false;
       wipeBuffer(value);
       const detail =
-        "error" in outcome
-          ? { ...request, error: outcome.error, ...pinned }
-          : {
+        "status" in outcome
+          ? {
               ...request,
               status: outcome.status,
+              ...("error" in outcome ? { error: outcome.error } : {}),
               ...pinned,
               ...(outcome.sanitized ? { sanitized: true } : {}),
-            };
+            }
+          : { ...request, error: outcome.error, ...pinned };
       (this.auditLogger as AuditLogger).log(
         withAttribution(
           {

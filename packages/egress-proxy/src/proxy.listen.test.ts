@@ -313,6 +313,20 @@ describe.runIf(process.platform === "win32")("listenSocket on Windows", () => {
     );
     expect(double.auditServerStart).not.toHaveBeenCalled();
   });
+
+  it("listenTrustedSocket is refused INVALID_INPUT with listenSocket's text and writes no row", async () => {
+    const err = await expectVaultError(
+      () =>
+        proxy.listenTrustedSocket("C:\\harpoc\\run\\agent1\\proxy-trusted.sock", "agent1", [
+          "api-key",
+        ]),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe(
+      "Egress proxy socket: not supported on Windows (no socket directory mode to rely on): C:\\harpoc\\run\\agent1\\proxy-trusted.sock",
+    );
+    expect(double.auditServerStart).not.toHaveBeenCalled();
+  });
 });
 
 // The Unix-socket listener exists on POSIX only: Windows has no Unix socket
@@ -344,7 +358,7 @@ describe.skipIf(process.platform === "win32")("listenSocket (POSIX)", () => {
 
     expect(lstatSync(path).isSocket()).toBe(true);
     expect(statSync(path).mode & 0o777).toBe(0o660);
-    // The sockets ride the TCP listener's server.start / server.stop pair (RA-4).
+    // A proxy.sock rides the TCP listener's server.start / server.stop pair (RA-4).
     expect(double.auditServerStart).not.toHaveBeenCalled();
 
     upstream.script((req, res) => {

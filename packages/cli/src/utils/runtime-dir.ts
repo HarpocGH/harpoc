@@ -3,6 +3,10 @@ import { basename, join, win32 } from "node:path";
 import { isLinkPath, listWindowsAclSync } from "@harpoc/core";
 import type { WindowsAclListing } from "@harpoc/core";
 import { agentNameSchema, maxUnixSocketPathBytes, VaultError } from "@harpoc/shared";
+import type { ProxyTrustSpec } from "./proxy-trust-spec.js";
+
+/** A consumer's trusted proxy socket, beside its `proxy.sock`. */
+export const PROXY_TRUSTED_SOCKET = "proxy-trusted.sock";
 
 /** Where the runtime directory came from — the label its refusals name. */
 export type RuntimeDirSource = "--runtime-dir" | "$RUNTIME_DIRECTORY" | "%ProgramData%";
@@ -216,6 +220,37 @@ export function consumerSocketPaths(
     }
     assertConsumerDir(dir);
     return path;
+  });
+}
+
+/**
+ * `<runtime-dir>/<agent>/proxy-trusted.sock` for each `--proxy-trust-socket` spec, in the specs'
+ * order, with the spec's patterns. The agent must equal, byte for byte, the name of a consumer
+ * directory the runtime directory lists — never found by a `stat`, which a case-insensitive
+ * filesystem would answer for `Agent1` beside `agent1` — and only an opted-in consumer's socket
+ * path is held to the Unix socket bound (`maxUnixSocketPathBytes`). The directories themselves
+ * are judged by `consumerSocketPaths`. Every refusal is `INVALID_INPUT`.
+ */
+export function trustedProxySockets(
+  runtimeDir: RuntimeDir,
+  specs: readonly ProxyTrustSpec[],
+): { consumer: string; socketPath: string; secrets: string[] }[] {
+  const listed = new Set(consumerNames(runtimeDir));
+  const max = maxUnixSocketPathBytes(process.platform);
+  return specs.map(({ agent, secrets }) => {
+    if (!listed.has(agent)) {
+      throw VaultError.invalidInput(
+        `--proxy-trust-socket: agent ${JSON.stringify(agent)} has no consumer directory under ${runtimeDir.path}`,
+      );
+    }
+    const socketPath = join(consumerDir(runtimeDir.path, agent), PROXY_TRUSTED_SOCKET);
+    const bytes = Buffer.byteLength(socketPath);
+    if (bytes > max) {
+      throw VaultError.invalidInput(
+        `--proxy-trust-socket: consumer ${JSON.stringify(agent)}: the socket path is ${String(bytes)} bytes, over the ${String(max)} a Unix socket path holds: ${socketPath}`,
+      );
+    }
+    return { consumer: agent, socketPath, secrets: [...secrets] };
   });
 }
 

@@ -13,8 +13,7 @@ export interface TunnelOpen {
   body?: string;
 }
 
-export interface TunnelCall {
-  port: number;
+export type TunnelCall = {
   /** The CONNECT target, `<host>:<port>`. */
   authority: string;
   /** The raw CONNECT fields after the request line (each `Name: value`); `Host` is added. */
@@ -23,7 +22,10 @@ export interface TunnelCall {
   ca: string;
   /** The ALPN protocols the client offers; none by default. */
   alpn?: string[];
-}
+} & (
+  | { port: number }
+  | { /** The proxy's Unix socket, in place of its TCP port. */ socketPath: string }
+);
 
 function readHead(socket: Socket): Promise<{ head: string; rest: Buffer }> {
   return new Promise((resolve, reject) => {
@@ -47,7 +49,7 @@ function readHead(socket: Socket): Promise<{ head: string; rest: Buffer }> {
 
 /** A CONNECT written by hand, then TLS over the tunnel when the proxy answers 200. */
 export async function openTunnel(call: TunnelCall): Promise<TunnelOpen> {
-  const raw = connect(call.port, "127.0.0.1");
+  const raw = "socketPath" in call ? connect(call.socketPath) : connect(call.port, "127.0.0.1");
   raw.setTimeout(PROXY_CLIENT_TIMEOUT_MS, () => raw.destroy(new Error("CONNECT timed out")));
   raw.write(
     [`CONNECT ${call.authority} HTTP/1.1`, `Host: ${call.authority}`, ...call.fields, "", ""].join(

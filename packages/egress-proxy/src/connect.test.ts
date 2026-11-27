@@ -719,9 +719,9 @@ describe("CONNECT — the TLS side and the lifecycle", () => {
     expect(tunnel.socket?.destroyed).toBe(true);
   });
 
-  it("a tunnel that stays silent after the handshake is destroyed once the proxy's timeoutMs passes", async () => {
+  it("a tunnel that stays silent after the handshake is destroyed once its own deadline, tunnelTimeoutMs, passes", async () => {
     await proxy.close();
-    await startProxy({ timeoutMs: 200 });
+    await startProxy({ tunnelTimeoutMs: 200 });
     const tunnel = await openTunnel({
       port,
       authority: `127.0.0.1:${upstream.port}`,
@@ -741,6 +741,23 @@ describe("CONNECT — the TLS side and the lifecycle", () => {
 
     expect(closed).toBe(true);
     expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("the upstream budget is no tunnel's deadline: with timeoutMs 200 and no tunnelTimeoutMs a silent tunnel is still open after 600 ms and serves its next request", async () => {
+    await proxy.close();
+    await startProxy({ timeoutMs: 200 });
+    const socket = await tunnelToUpstream();
+    let closed = false;
+    socket.once("close", () => {
+      closed = true;
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 600));
+
+    expect(closed).toBe(false);
+    const answer = await exchangeInTunnel(socket, line("/after-silence", true));
+    expect(answer.startsWith("HTTP/1.1 200 ")).toBe(true);
+    expect(upstream.seen).toHaveLength(1);
   });
 
   it("a tunnelled request whose upstream holds its head past timeoutMs gets the upstream budget's 502, not a cut tunnel", async () => {

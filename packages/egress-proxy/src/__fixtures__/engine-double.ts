@@ -75,6 +75,7 @@ export interface EngineDouble {
   auditScopeRefusal: Mock<ProxyEngine["auditScopeRefusal"]>;
   auditProxyRefusal: Mock<ProxyEngine["auditProxyRefusal"]>;
   auditServerStart: Mock<ProxyEngine["auditServerStart"]>;
+  assertProxyConsumer: Mock<ProxyEngine["assertProxyConsumer"]>;
   resolveForProxy: Mock<ProxyEngine["resolveForProxy"]>;
   /** Every lease the default `resolveForProxy` handed out, in order. */
   leases: RecordingLease[];
@@ -88,6 +89,7 @@ export function engineDouble(): EngineDouble {
     auditScopeRefusal: vi.fn<ProxyEngine["auditScopeRefusal"]>(),
     auditProxyRefusal: vi.fn<ProxyEngine["auditProxyRefusal"]>(),
     auditServerStart: vi.fn<ProxyEngine["auditServerStart"]>(),
+    assertProxyConsumer: vi.fn<ProxyEngine["assertProxyConsumer"]>(),
     resolveForProxy: vi.fn<ProxyEngine["resolveForProxy"]>(async () => {
       const lease = recordingLease();
       leases.push(lease);
@@ -101,6 +103,7 @@ export function engineDouble(): EngineDouble {
     auditScopeRefusal: double.auditScopeRefusal,
     auditProxyRefusal: double.auditProxyRefusal,
     auditServerStart: double.auditServerStart,
+    assertProxyConsumer: double.assertProxyConsumer,
     resolveForProxy: double.resolveForProxy,
   };
   return double;
