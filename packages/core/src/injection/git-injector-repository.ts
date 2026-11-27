@@ -4,7 +4,7 @@ import type { Stats } from "node:fs";
 import { lstat, open, realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { VaultError } from "@harpoc/shared";
+import { VaultError, vaultText } from "@harpoc/shared";
 import { isHeldPath, othersMayWrite } from "../session/path-trust.js";
 import { gitDirectoryShape, hasGitDirectoryShape } from "./local-path-git.js";
 import { holdsNameNotWrittenAsStored, holdsNameWin32ReadsDifferently } from "./local-path.js";
@@ -23,10 +23,10 @@ export interface ServedRepository {
   commonDir: string | null;
 }
 
-export const NOT_A_SERVED_REPOSITORY = "working_directory is not in a repository the vault serves";
+export const NOT_A_SERVED_REPOSITORY = vaultText`working_directory is not in a repository the vault serves`;
 
-const REPOSITORY_OF_ANOTHER_ACCOUNT = "working_directory's repository belongs to another account";
-const REPOSITORY_CHANGEABLE = "working_directory's repository can be changed by another account";
+const REPOSITORY_OF_ANOTHER_ACCOUNT = vaultText`working_directory's repository belongs to another account`;
+const REPOSITORY_CHANGEABLE = vaultText`working_directory's repository can be changed by another account`;
 
 const MAX_GIT_FILE_BYTES = 1_048_576;
 const GITFILE_PREFIX = "gitdir: ";

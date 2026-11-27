@@ -1,5 +1,11 @@
 import type { ConnectionConfig, InjectionPolicy, SshAction, SshResult } from "@harpoc/shared";
-import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import {
+  DEFAULT_SSH_TIMEOUT_MS,
+  ErrorCode,
+  VaultError,
+  echoField,
+  vaultText,
+} from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
@@ -44,20 +50,20 @@ export class SshInjector {
     // user reach ssh's argv, so a leading dash must never parse as an option.
     if (startsWithDash(action.host) || startsWithDash(action.user)) {
       this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false, attribution);
-      throw VaultError.invalidSshConfig("host and user must not start with '-'");
+      throw VaultError.invalidSshConfig(vaultText`host and user must not start with '-'`);
     }
 
     if (!isSshName(action.host) || !isSshName(action.user)) {
       this.audit(action, secretId, { error: "INVALID_SSH_CONFIG" }, false, attribution);
       throw VaultError.invalidSshConfig(
-        "host and user must be names of letters, digits, '.', '_' and '-'",
+        vaultText`host and user must be names of letters, digits, '.', '_' and '-'`,
       );
     }
 
     // Host target allowlist — deny-by-default (an empty list refuses).
     if (!matchesHostAllowlist(action.host, policy.host_allowlist)) {
       this.audit(action, secretId, { error: "HOST_NOT_ALLOWED" }, false, attribution);
-      throw VaultError.hostNotAllowed(action.host);
+      throw VaultError.hostNotAllowed(echoField(action, "host"));
     }
 
     // Pinned host keys are required — no trust-on-first-use.
@@ -67,18 +73,24 @@ export class SshInjector {
       throw VaultError.sshNotConfigured();
     }
 
+    const keyPem = Buffer.from(secretValue).toString("utf8");
+
     // Resolve + allowlist the ssh binary (fail-safe deny, absolute-path pinned).
     let sshPath: string;
     try {
-      sshPath = resolveAndMatchCommand("ssh", policy.command_allowlist, controlledPathDirs());
-      assertNativeWin32SshClient(sshPath);
+      sshPath = resolveAndMatchCommand(
+        "ssh",
+        policy.command_allowlist,
+        controlledPathDirs(),
+        vaultText`ssh`,
+      );
+      assertNativeWin32SshClient(sshPath, [keyPem]);
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { error: err.code }, false, attribution);
       throw err;
     }
 
-    const keyPem = Buffer.from(secretValue).toString("utf8");
     const timeoutMs = action.timeout_ms ?? DEFAULT_SSH_TIMEOUT_MS;
     const kh = writeKnownHosts(knownHosts);
 
@@ -146,7 +158,7 @@ export class SshInjector {
           false,
           attribution,
         );
-        throw VaultError.sshHostKeyMismatch(action.host);
+        throw VaultError.sshHostKeyMismatch(echoField(action, "host"));
       }
 
       const error = r.spawn_failed

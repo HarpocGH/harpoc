@@ -2,6 +2,7 @@ import { connect as netConnect, isIP } from "node:net";
 import type { Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { ConnectionOptions, TLSSocket } from "node:tls";
+import type { TextPart, VaultText } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 import { identityCheckerFor } from "../db-adapters.js";
 
@@ -22,6 +23,10 @@ export type SmtpAuth =
 export interface SmtpSendOptions {
   host: string;
   port: number;
+  /** The target a refusal names, as the caller sent it; absent, `host:port`. */
+  origin?: TextPart | VaultText;
+  /** The host the STARTTLS refusal names, as the caller sent it; absent, `host`. */
+  sentHost?: TextPart;
   /** SSRF-pinned address to dial; TLS identity is verified against `host`. */
   address: string;
   security: "tls" | "starttls";
@@ -41,6 +46,8 @@ const MAX_SESSION_BYTES = 1024 * 1024;
 // A fixed, non-identifying HELO/EHLO name — the client's own identity leaks
 // nothing about the host it runs on.
 const CLIENT_NAME = "harpoc.local";
+
+type Origin = string | TextPart | VaultText;
 
 interface SmtpResponse {
   code: number;
@@ -79,7 +86,7 @@ class SmtpChannel {
   };
 
   constructor(
-    private readonly origin: string,
+    private readonly origin: Origin,
     private readonly timeoutMs: number,
   ) {}
 
@@ -241,7 +248,7 @@ function awaitEvent(
   socket: Socket | TLSSocket,
   event: string,
   timeoutMs: number,
-  origin: string,
+  origin: Origin,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     socket.setTimeout(timeoutMs);
@@ -272,7 +279,7 @@ function awaitEvent(
 async function expectCode(
   channel: SmtpChannel,
   code: number,
-  origin: string,
+  origin: Origin,
 ): Promise<SmtpResponse> {
   const response = await channel.readResponse();
   if (response.code !== code) {
@@ -281,7 +288,7 @@ async function expectCode(
   return response;
 }
 
-async function ehlo(channel: SmtpChannel, origin: string): Promise<Capabilities> {
+async function ehlo(channel: SmtpChannel, origin: Origin): Promise<Capabilities> {
   channel.write(`EHLO ${CLIENT_NAME}\r\n`);
   const response = await channel.readResponse();
   if (response.code !== 250) {
@@ -308,7 +315,7 @@ async function authenticate(
   channel: SmtpChannel,
   opts: SmtpSendOptions,
   caps: Capabilities,
-  origin: string,
+  origin: Origin,
   allowPlaintext: boolean,
 ): Promise<void> {
   // The invariant, enforced fail-closed: a credential byte is written only over
@@ -386,7 +393,7 @@ function dotStuff(message: string): string {
 export async function sendSmtp(
   opts: SmtpSendOptions,
 ): Promise<{ accepted: number; messageId: null }> {
-  const origin = `${opts.host}:${opts.port}`;
+  const origin: Origin = opts.origin ?? `${opts.host}:${opts.port}`;
   const allowPlaintext = opts.security === "tls" && opts.tls === false;
   const channel = new SmtpChannel(origin, opts.timeoutMs);
   let rawSocket: Socket | null = null;
@@ -409,7 +416,7 @@ export async function sendSmtp(
     if (opts.security === "starttls" && !channel.isSecure) {
       if (!caps.starttls) {
         // Refused BEFORE any credential byte is written.
-        throw VaultError.smtpStarttlsUnavailable(opts.host);
+        throw VaultError.smtpStarttlsUnavailable(opts.sentHost ?? opts.host);
       }
       channel.write("STARTTLS\r\n");
       await expectCode(channel, 220, origin);

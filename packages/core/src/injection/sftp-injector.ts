@@ -1,5 +1,18 @@
-import type { ConnectionConfig, InjectionPolicy, SftpAction, SftpResult } from "@harpoc/shared";
-import { DEFAULT_SSH_TIMEOUT_MS, ErrorCode, VaultError } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  InjectionPolicy,
+  SftpAction,
+  SftpResult,
+  TextPart,
+} from "@harpoc/shared";
+import {
+  DEFAULT_SSH_TIMEOUT_MS,
+  ErrorCode,
+  VaultError,
+  echoField,
+  token,
+  vaultText,
+} from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import type { DaemonPaths } from "./local-path.js";
@@ -104,6 +117,8 @@ export function buildSftpAuditDetails(
 /** sftp's line buffer (`char cmd[2048]`, read with `fgets`): a longer line is cut in two. */
 const MAX_BATCH_COMMAND_BYTES = 2047;
 
+const LOCAL_FILE_OPERATIONS: readonly string[] = ["upload", "download"];
+
 /**
  * Write the single scripted sftp command to a 0600 batch file in a 0700 temp
  * directory (design §6.4) — sftp's own argv carries no path at all beyond the
@@ -154,19 +169,21 @@ function hasBatchControlCharacters(value: string): boolean {
 function quotePath(path: unknown): string {
   if (typeof path !== "string" || path.startsWith("-")) {
     throw VaultError.invalidInput(
-      "sftp path must not start with '-' (would be parsed as an sftp option)",
+      vaultText`sftp path must not start with '-' (would be parsed as an sftp option)`,
     );
   }
   if (path.endsWith("\\")) {
     throw VaultError.invalidInput(
-      "sftp path must not end with '\\' (would merge with the closing quote)",
+      vaultText`sftp path must not end with '\\' (would merge with the closing quote)`,
     );
   }
   if (path.includes('"')) {
-    throw VaultError.invalidInput("sftp path must not contain a double-quote character");
+    throw VaultError.invalidInput(vaultText`sftp path must not contain a double-quote character`);
   }
   if (hasBatchControlCharacters(path)) {
-    throw VaultError.invalidInput("sftp path must not contain control characters or newlines");
+    throw VaultError.invalidInput(
+      vaultText`sftp path must not contain control characters or newlines`,
+    );
   }
   return `"${path}"`;
 }
@@ -178,7 +195,9 @@ function quotePath(path: unknown): string {
  */
 function requireLocalPath(action: SftpAction): string {
   if (!action.local_path) {
-    throw VaultError.invalidInput(`local_path is required for ${action.operation}`);
+    throw VaultError.invalidInput(
+      vaultText`local_path is required for ${token(action.operation, LOCAL_FILE_OPERATIONS)}`,
+    );
   }
   return action.local_path;
 }
@@ -194,7 +213,7 @@ function buildBatchCommand(action: SftpAction, resolvedLocal: string | null): st
     (action.operation === "upload" || action.operation === "download") &&
     action.remote_path.includes("\\")
   ) {
-    throw VaultError.invalidInput("sftp remote path must not contain a backslash");
+    throw VaultError.invalidInput(vaultText`sftp remote path must not contain a backslash`);
   }
   switch (action.operation) {
     case "upload":
@@ -214,7 +233,7 @@ function buildBatchCommand(action: SftpAction, resolvedLocal: string | null): st
  * the sftp client itself — sftp's batch mode aborts and reports failure on
  * the first failed scripted command, so a non-zero exit is always the
  * vault's own signal that the operation did not complete. */
-function toSftpResult(r: SpawnCapturedResult, host: string): SftpResult {
+function toSftpResult(r: SpawnCapturedResult, host: TextPart): SftpResult {
   if (isHostKeyFailure(r.stderr)) {
     throw VaultError.sshHostKeyMismatch(host);
   }
@@ -277,18 +296,18 @@ export async function executeSftpAction(
   // SSH context): host and user reach argv, so a leading dash must never
   // parse as an option.
   if (startsWithDash(action.host) || startsWithDash(action.user)) {
-    throw VaultError.invalidSshConfig("host and user must not start with '-'");
+    throw VaultError.invalidSshConfig(vaultText`host and user must not start with '-'`);
   }
 
   if (!isSshName(action.host) || !isSshName(action.user)) {
     throw VaultError.invalidSshConfig(
-      "host and user must be names of letters, digits, '.', '_' and '-'",
+      vaultText`host and user must be names of letters, digits, '.', '_' and '-'`,
     );
   }
 
   // Host target allowlist — deny-by-default (an empty list refuses).
   if (!matchesHostAllowlist(action.host, policy.host_allowlist)) {
-    throw VaultError.hostNotAllowed(action.host);
+    throw VaultError.hostNotAllowed(echoField(action, "host"));
   }
 
   // Pinned host keys are required — no trust-on-first-use. SFTP reuses the
@@ -298,9 +317,16 @@ export async function executeSftpAction(
     throw VaultError.sshNotConfigured();
   }
 
+  const keyPem = Buffer.from(secretValue).toString("utf8");
+
   // Resolve + allowlist the sftp binary (fail-safe deny, absolute-path pinned).
-  const sftpPath = resolveAndMatchCommand("sftp", policy.command_allowlist, controlledPathDirs());
-  assertNativeWin32SshClient(sftpPath);
+  const sftpPath = resolveAndMatchCommand(
+    "sftp",
+    policy.command_allowlist,
+    controlledPathDirs(),
+    vaultText`sftp`,
+  );
+  assertNativeWin32SshClient(sftpPath, [keyPem]);
 
   const resolvedLocal =
     action.operation === "upload" || action.operation === "download"
@@ -317,10 +343,9 @@ export async function executeSftpAction(
   // temp resource is created, so a refused path never leaves a file behind.
   const batchCommand = buildBatchCommand(action, resolvedLocal);
   if (Buffer.byteLength(batchCommand) > MAX_BATCH_COMMAND_BYTES) {
-    throw VaultError.invalidInput("sftp paths are too long for one batch command");
+    throw VaultError.invalidInput(vaultText`sftp paths are too long for one batch command`);
   }
 
-  const keyPem = Buffer.from(secretValue).toString("utf8");
   const timeoutMs = action.timeout_ms ?? DEFAULT_SSH_TIMEOUT_MS;
   const kh = writeKnownHosts(knownHosts);
 
@@ -361,7 +386,7 @@ export async function executeSftpAction(
     });
 
     return {
-      result: toSftpResult(r, action.host),
+      result: toSftpResult(r, echoField(action, "host")),
       sanitized: r.redacted,
       ...(r.descendant_sweep ? { descendantSweep: r.descendant_sweep } : {}),
       ...(r.tree_kill ? { treeKill: r.tree_kill } : {}),

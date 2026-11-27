@@ -1,4 +1,5 @@
 import type { UseSecretResponse } from "@harpoc/shared";
+import { vaultText } from "@harpoc/shared";
 import { assertNever } from "../assert-never.js";
 import type { InjectionGuard } from "./injection-guard.js";
 import { mapStringLeaves } from "./output-sanitizer.js";
@@ -76,6 +77,6 @@ export function sanitizeUseSecretResult(result: UseSecretResponse, guard: Inject
     }
 
     default:
-      return assertNever(result, "result type");
+      return assertNever(result, vaultText`result type`);
   }
 }

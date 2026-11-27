@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { AES_KEY_LENGTH } from "@harpoc/shared";
+import { AES_KEY_LENGTH, recordOf } from "@harpoc/shared";
 import { decrypt, encrypt } from "./aes-gcm.js";
 
 const validKey = new Uint8Array(randomBytes(AES_KEY_LENGTH));
@@ -32,6 +32,18 @@ describe("encrypt", () => {
     const plaintext = new Uint8Array(Buffer.from("data"));
 
     expect(() => encrypt(shortKey, plaintext, aad)).toThrow("AES key must be 32 bytes");
+  });
+
+  it("refuses a key of the wrong length in the vault's words and numbers", () => {
+    let thrown: unknown;
+    try {
+      encrypt(new Uint8Array(16), new Uint8Array(Buffer.from("data")), aad);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as Error).message).toBe("AES key must be 32 bytes, got 16");
+    expect(recordOf(thrown)).toBeDefined();
   });
 
   it("handles empty plaintext", () => {
@@ -108,6 +120,39 @@ describe("decrypt", () => {
     expect(() =>
       decrypt(validKey, new Uint8Array(10), new Uint8Array(12), new Uint8Array(8), aad),
     ).toThrow("Auth tag must be 16 bytes");
+  });
+
+  it.each([
+    {
+      what: "a key of the wrong length",
+      args: [new Uint8Array(16), new Uint8Array(10), new Uint8Array(12), new Uint8Array(16)],
+      text: "AES key must be 32 bytes, got 16",
+    },
+    {
+      what: "an IV of the wrong length",
+      args: [validKey, new Uint8Array(10), new Uint8Array(8), new Uint8Array(16)],
+      text: "IV must be 12 bytes, got 8",
+    },
+    {
+      what: "a tag of the wrong length",
+      args: [validKey, new Uint8Array(10), new Uint8Array(12), new Uint8Array(8)],
+      text: "Auth tag must be 16 bytes, got 8",
+    },
+    {
+      what: "a tag that does not verify",
+      args: [validKey, new Uint8Array(10), new Uint8Array(12), new Uint8Array(16)],
+      text: "Encryption error: AES-GCM decryption failed (auth tag mismatch or corrupted)",
+    },
+  ] as const)("refuses $what in the vault's words and numbers", ({ args, text }) => {
+    let thrown: unknown;
+    try {
+      decrypt(args[0], args[1], args[2], args[3], aad);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as Error).message).toBe(text);
+    expect(recordOf(thrown)).toBeDefined();
   });
 });
 

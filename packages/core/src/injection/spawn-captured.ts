@@ -8,7 +8,7 @@ import type { DescendantSweepResult } from "./descendant-sweep.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { requireIsolation } from "./isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
-import { redactSecretEncodings } from "./output-sanitizer.js";
+import { redactValues } from "./output-sanitizer.js";
 import { isJobWrapperFailure, wrapInJob } from "./win32-job-wrapper.js";
 import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 
@@ -198,11 +198,7 @@ function killTree(child: ChildProcess, treeKill: TreeKillMechanism | undefined):
 
 /** Strips every non-empty string of `secrets`, with its common encodings, from captured output. */
 export function redactCaptured(text: string, secrets: readonly string[] | undefined): string {
-  let out = text;
-  for (const s of secrets ?? []) {
-    if (s.length > 0) out = redactSecretEncodings(out, s);
-  }
-  return out;
+  return redactValues(text, secrets ?? []);
 }
 
 /**

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, vaultText } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
@@ -346,7 +346,7 @@ describe("spawnDuplex — the two-way pipe beside spawnCaptured", () => {
   });
 
   it("isolation that cannot be delivered rejects before any spawn", async () => {
-    forceFsIsolationUnavailableForTests("test");
+    forceFsIsolationUnavailableForTests(vaultText`test`);
     await expectVaultError(
       () => spawnDuplex(NODE, ECHO, { env: ENV, timeoutMs: 10_000, fsIsolation: true }),
       ErrorCode.FS_ISOLATION_UNAVAILABLE,

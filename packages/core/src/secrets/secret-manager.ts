@@ -5,8 +5,10 @@ import {
   SecretStatus,
   SecretType,
   VaultError,
+  echoHandle,
   formatHandle,
   parseHandle,
+  vaultText,
 } from "@harpoc/shared";
 import {
   computeNameHmac,
@@ -542,19 +544,22 @@ export class SecretManager {
         });
         this.onLazyExpire(secret.id, handle);
       });
-      throw VaultError.secretExpired(handle);
+      throw VaultError.secretExpired(echoHandle(handle));
     }
 
     if (secret.status === SecretStatus.EXPIRED) {
-      throw VaultError.secretExpired(handle);
+      throw VaultError.secretExpired(echoHandle(handle));
     }
     if (secret.status === SecretStatus.REVOKED) {
-      throw VaultError.secretRevoked(handle);
+      throw VaultError.secretRevoked(echoHandle(handle));
     }
     if (secret.status === SecretStatus.PENDING) {
       throw (
         opts?.pending?.() ??
-        new VaultError(ErrorCode.SECRET_VALUE_REQUIRED, `Secret ${handle} has no value set`)
+        new VaultError(
+          ErrorCode.SECRET_VALUE_REQUIRED,
+          vaultText`Secret ${echoHandle(handle)} has no value set`,
+        )
       );
     }
   }

@@ -6,6 +6,7 @@ import { ErrorCode, injectionPolicyInputSchema } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
 
 const PIN = vi.hoisted(() => ({ host: "fixture.example.com", address: "127.0.0.1" }));
+const SMTP_VALUE = "smtpuser:smtppass";
 
 vi.mock("./url-validator.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./url-validator.js")>();
@@ -57,13 +58,23 @@ describe("SMTP DNS-rebinding pinning", () => {
 
     const { result } = await new SmtpInjector().run(
       action,
-      "smtpuser:smtppass",
+      SMTP_VALUE,
       injectionPolicyInputSchema.parse({ host_allowlist: [PIN.host] }),
       { tls: { ca: getFixtureCaPem() } },
       undefined,
     );
 
-    expect(validateHostPort).toHaveBeenCalledWith(PIN.host, server.port);
+    const call = vi.mocked(validateHostPort).mock.calls.find(([host]) => host === PIN.host);
+    expect(call?.length).toBe(3);
+    expect(call?.[1]).toBe(server.port);
+    expect(call?.[2]?.parts).toMatchObject({
+      kind: "echo",
+      source: "action",
+      path: ["host"],
+      shown: PIN.host,
+    });
+    expect(call?.[2]?.values.length).toBe(3);
+    expect(call?.[2]?.values.includes(SMTP_VALUE)).toBe(true);
     expect(tlsConnect).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ host: PIN.address, port: server.port, servername: PIN.host }),
     );

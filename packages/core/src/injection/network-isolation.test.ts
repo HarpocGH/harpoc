@@ -1,4 +1,5 @@
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, recordOf, vaultText } from "@harpoc/shared";
+import { expectVaultError } from "@harpoc/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BWRAP_NETWORK_PREFIX_ARGS } from "./bwrap.js";
 import {
@@ -315,7 +316,7 @@ describe("requireNetworkIsolation", () => {
       probeBinary: () => true,
       runProbe: vi.fn().mockResolvedValue(true),
     };
-    forceNetworkIsolationUnavailableForTests("forced by test");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced by test`);
     await expect(requireNetworkIsolation("/usr/bin/tool", [], seams)).rejects.toSatisfy(
       (err: unknown) => {
         expectIsolationUnavailable(err, "forced by test");
@@ -325,5 +326,80 @@ describe("requireNetworkIsolation", () => {
     forceNetworkIsolationUnavailableForTests(null);
     const wrap = await requireNetworkIsolation("/usr/bin/tool", [], seams);
     expect(wrap.mechanism).toBe("unshare");
+  });
+});
+
+describe("a refusal is assembled from parts, its text unchanged", () => {
+  beforeEach(() => resetNetworkIsolationProbeForTests());
+  afterEach(() => {
+    forceNetworkIsolationUnavailableForTests(null);
+    resetNetworkIsolationProbeForTests();
+  });
+
+  it.each([
+    {
+      what: "no probe payload",
+      seams: { platform: "linux", probeBinary: (p: string) => p.endsWith("/unshare") },
+      reason: "no /usr/bin/true or /bin/true available for the capability probe",
+    },
+    {
+      what: "neither linux tier",
+      seams: { platform: "linux", probeBinary: () => false },
+      reason: "unshare not found in /usr/bin or /bin; bwrap not found in /usr/bin or /bin",
+    },
+    {
+      what: "both linux probes failing",
+      seams: { platform: "linux", probeBinary: () => true, runProbe: () => Promise.resolve(false) },
+      reason:
+        "unprivileged user namespaces unavailable (unshare -rn probe failed); bwrap --unshare-net probe failed (bubblewrap needs the same unprivileged user-namespace grant as unshare)",
+    },
+    {
+      what: "no sandbox-exec",
+      seams: { platform: "darwin", probeBinary: () => false },
+      reason: "sandbox-exec not found at /usr/bin/sandbox-exec",
+    },
+    {
+      what: "a failing sandbox-exec probe",
+      seams: {
+        platform: "darwin",
+        probeBinary: () => true,
+        runProbe: () => Promise.resolve(false),
+      },
+      reason: "sandbox-exec deny-network probe failed",
+    },
+    {
+      what: "win32",
+      seams: { platform: "win32" },
+      reason: "unsupported platform: win32",
+    },
+    {
+      what: "a platform node does not name",
+      seams: { platform: "plan9" },
+      reason: "unsupported platform: unknown",
+    },
+  ])("$what", async ({ seams, reason }) => {
+    const err = await expectVaultError(
+      () =>
+        requireNetworkIsolation("/usr/bin/tool", [], {
+          ...seams,
+          platform: seams.platform as NodeJS.Platform,
+        }),
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    );
+
+    expect(err.message).toBe(VaultError.networkIsolationUnavailable(reason).message);
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("the forced refusal", async () => {
+    forceNetworkIsolationUnavailableForTests(vaultText`forced by test`);
+
+    const err = await expectVaultError(
+      () => requireNetworkIsolation("/usr/bin/tool", []),
+      ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
+    );
+
+    expect(err.message).toBe(VaultError.networkIsolationUnavailable("forced by test").message);
+    expect(recordOf(err)).toBeDefined();
   });
 });

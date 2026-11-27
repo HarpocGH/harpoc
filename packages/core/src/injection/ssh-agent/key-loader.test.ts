@@ -2,11 +2,11 @@ import { generateKeyPairSync, verify as cryptoVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, recordOf } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it } from "vitest";
 import { loadPrivateKey } from "./key-loader.js";
-import { SshReader } from "./ssh-wire.js";
+import { SshReader, writeMpint, writeString, writeUint32 } from "./ssh-wire.js";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__", "ssh");
 const readFixture = (name: string): string => readFileSync(join(FIXTURES, name), "utf8");
@@ -134,11 +134,167 @@ describe("loadPrivateKey — rejections (no secret material in messages)", () =>
     await expectVaultError(() => loadPrivateKey("not a key"), ErrorCode.SSH_AGENT_FAILED);
   });
 
-  it("rejects a truncated OpenSSH container", () => {
-    const truncated = `-----BEGIN OPENSSH PRIVATE KEY-----\n${Buffer.from("openssh-key-v1\0").toString("base64")}\n-----END OPENSSH PRIVATE KEY-----`;
-    // The container reads sit outside the loader's VaultError wrap: the wire reader's plain
-    // Error surfaces here, and EphemeralSshAgent.start maps it to SSH_AGENT_FAILED.
-    expect(() => loadPrivateKey(truncated)).toThrow(/^ssh-wire: truncated/);
+  it("a key node cannot read names no reader's error", async () => {
+    const err = await expectVaultError(
+      () => loadPrivateKey("not a key"),
+      ErrorCode.SSH_AGENT_FAILED,
+    );
+
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported or malformed private key");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("a truncated container is a malformed key", async () => {
+    const truncated = armor(Buffer.from("openssh-key-v1\0", "binary"));
+
+    const err = await expectVaultError(() => loadPrivateKey(truncated), ErrorCode.SSH_AGENT_FAILED);
+
+    expect(err.message).toBe("Ephemeral ssh-agent failed: malformed OpenSSH private key");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("the reader's message is not passed through", async () => {
+    const one = Buffer.from([1]);
+    const pem = container(
+      writeString("ssh-rsa"),
+      writeMpint(Buffer.from("c3a1", "hex")),
+      writeMpint(Buffer.from("010001", "hex")),
+      writeMpint(Buffer.from("5b", "hex")),
+      writeMpint(one),
+      writeMpint(one),
+      writeMpint(Buffer.from("0b", "hex")),
+    );
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expect(err.message).not.toContain("Division");
+    expect(err.message).toBe("Ephemeral ssh-agent failed: malformed OpenSSH private key");
+    expect(recordOf(err)).toBeDefined();
+  });
+});
+
+const KEY_FIELD_FIXTURE = "harpoc-key-field-c41d";
+const CERT_BLOB_FIXTURE = "harpoc-cert-blob-9e27";
+const NISTP256_POINT = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 7)]);
+
+function armor(body: Buffer): string {
+  return `-----BEGIN OPENSSH PRIVATE KEY-----\n${body.toString("base64")}\n-----END OPENSSH PRIVATE KEY-----`;
+}
+
+/** An unencrypted one-key `openssh-key-v1` container whose private section holds `fields` after its check pair. */
+function container(...fields: Buffer[]): string {
+  const priv = Buffer.concat([writeUint32(7), writeUint32(7), ...fields, writeString("comment")]);
+  return armor(
+    Buffer.concat([
+      Buffer.from("openssh-key-v1\0", "binary"),
+      writeString("none"),
+      writeString("none"),
+      writeString(""),
+      writeUint32(1),
+      writeString(Buffer.alloc(0)),
+      writeString(priv),
+    ]),
+  );
+}
+
+const PEM_ENCODING = {
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+} as const;
+
+describe("loadPrivateKey — a type or a curve it does not take is named only from its lists", () => {
+  it("a known type the loader does not take is named", async () => {
+    const pem = container(
+      writeString("ssh-dss"),
+      writeMpint(Buffer.from("d1", "hex")),
+      writeMpint(Buffer.from("b3", "hex")),
+    );
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported key type: ssh-dss");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("an unknown type is not named", async () => {
+    const pem = container(writeString(KEY_FIELD_FIXTURE));
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expectAbsent(err.message, KEY_FIELD_FIXTURE);
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported key type");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("a known curve the loader does not take is named (secp256k1, through node)", async () => {
+    const pem = generateKeyPairSync("ec", { namedCurve: "secp256k1", ...PEM_ENCODING }).privateKey;
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported ECDSA curve: secp256k1");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("an unknown curve is not named", async () => {
+    const pem = container(
+      writeString("ecdsa-sha2-nistp256"),
+      writeString(KEY_FIELD_FIXTURE),
+      writeString(NISTP256_POINT),
+      writeMpint(Buffer.from("2a", "hex")),
+    );
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expectAbsent(err.message, KEY_FIELD_FIXTURE);
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported ECDSA curve");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it("a certificate's ECDSA key ends without its blob", async () => {
+    const certificate = Buffer.concat([
+      writeString("ecdsa-sha2-nistp256-cert-v01@openssh.com"),
+      writeString(CERT_BLOB_FIXTURE),
+      writeString(NISTP256_POINT),
+    ]);
+    const pem = container(
+      writeString("ecdsa-sha2-nistp256-cert-v01@openssh.com"),
+      writeString(certificate),
+      writeMpint(Buffer.from("2a", "hex")),
+    );
+
+    const err = await expectVaultError(() => loadPrivateKey(pem), ErrorCode.SSH_AGENT_FAILED);
+
+    expectAbsent(err.message, CERT_BLOB_FIXTURE);
+    expect(err.message).toBe("Ephemeral ssh-agent failed: unsupported ECDSA curve");
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it.each([
+    {
+      what: "a type node names that is on the list (ed448)",
+      pem: () => generateKeyPairSync("ed448", PEM_ENCODING).privateKey,
+      text: "Ephemeral ssh-agent failed: unsupported key type: ed448",
+    },
+    {
+      what: "a type node reads and cannot export, off the list (dsa)",
+      pem: () =>
+        generateKeyPairSync("dsa", { modulusLength: 1024, divisorLength: 160, ...PEM_ENCODING })
+          .privateKey,
+      text: "Ephemeral ssh-agent failed: unsupported key type",
+    },
+    {
+      what: "a curve node reads and cannot export, off the list (brainpoolP256r1)",
+      pem: () =>
+        generateKeyPairSync("ec", { namedCurve: "brainpoolP256r1", ...PEM_ENCODING }).privateKey,
+      text: "Ephemeral ssh-agent failed: unsupported ECDSA curve",
+    },
+  ])("$what: a fixed text, no raw error", async ({ pem, text }) => {
+    const key = pem();
+
+    const err = await expectVaultError(() => loadPrivateKey(key), ErrorCode.SSH_AGENT_FAILED);
+
+    expect(err.message).toBe(text);
+    expect(recordOf(err)).toBeDefined();
   });
 });
 

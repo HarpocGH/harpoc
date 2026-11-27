@@ -3,17 +3,21 @@ import type {
   DatabaseAction,
   DatabaseResult,
   InjectionPolicy,
+  VaultText,
 } from "@harpoc/shared";
 import {
   databaseActionSchema,
   DatabaseEngine,
   DEFAULT_DB_TIMEOUT_MS,
+  echoField,
   ErrorCode,
   isDecimalInteger,
   MAX_DB_RESULT_BYTES,
   MAX_DB_ROWS,
   MIN_REDACTABLE_FRAGMENT,
+  num,
   VaultError,
+  vaultText,
 } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
@@ -28,7 +32,8 @@ import type {
   DbTlsOptions,
 } from "./db-adapters.js";
 import { defaultDbAdapters, defaultDbCommandAdapters, defaultDbPort } from "./db-adapters.js";
-import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
+import { passError } from "./error-pass.js";
+import { mapStringLeavesTracked, outside, redactValues } from "./output-sanitizer.js";
 import { validateHostPort } from "./url-validator.js";
 
 /** The adapter an action dispatches through, tagged so each arm narrows without a cast. */
@@ -84,7 +89,9 @@ export class DatabaseInjector {
       }
     }
     this.audit(action, secretId, { error: "UNSUPPORTED_DB_ENGINE" }, false, attribution);
-    throw VaultError.unsupportedDbEngine(typeof engine === "string" ? engine : "(not a string)");
+    throw VaultError.unsupportedDbEngine(
+      typeof engine === "string" ? echoField(action, "engine") : vaultText`(not a string)`,
+    );
   }
 
   async executeWithSecret(
@@ -96,105 +103,177 @@ export class DatabaseInjector {
     attribution?: AuditAttribution,
     signal?: AbortSignal,
   ): Promise<DatabaseResult> {
-    const resolved = this.resolveAdapter(action, secretId, attribution);
-
-    let target: { host: string; port: number };
+    const valueStr = Buffer.from(secretValue).toString("utf8");
+    const splitValues = credentialParts(valueStr);
+    const thrownValues = [valueStr, ...splitValues];
     try {
-      const refusal = databaseInputRefusal(action);
-      if (refusal !== undefined) throw VaultError.invalidDatabaseConfig(refusal);
-      const hostField: unknown = action.host;
-      if (typeof hostField !== "string") {
-        throw VaultError.invalidDatabaseConfig("host must be a string");
+      const resolved = this.resolveAdapter(action, secretId, attribution);
+
+      let target: { host: string; port: number; embedsPort: boolean };
+      try {
+        const refusal = databaseInputRefusal(action);
+        if (refusal !== undefined) throw VaultError.invalidDatabaseConfig(refusal);
+        const hostField: unknown = action.host;
+        if (typeof hostField !== "string") {
+          throw VaultError.invalidDatabaseConfig(vaultText`host must be a string`);
+        }
+        target = parseHostPort(hostField, action.port, defaultDbPort(action.engine));
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(action, secretId, { error: err.code }, false, attribution);
+        }
+        throw err;
       }
-      target = parseHostPort(hostField, action.port, defaultDbPort(action.engine));
-    } catch (err) {
-      if (err instanceof VaultError) {
-        this.audit(action, secretId, { error: err.code }, false, attribution);
+      const { host, port } = target;
+
+      // Target allowlist — deny-by-default; an unlisted or redirected host:port is refused before connecting.
+      if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
+        this.audit(action, secretId, { host, port, error: "HOST_NOT_ALLOWED" }, false, attribution);
+        throw VaultError.hostNotAllowed(targetText(action, target.embedsPort, port));
       }
-      throw err;
-    }
-    const { host, port } = target;
 
-    // Target allowlist — deny-by-default; an unlisted or redirected host:port is refused before connecting.
-    if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
-      this.audit(action, secretId, { host, port, error: "HOST_NOT_ALLOWED" }, false, attribution);
-      throw VaultError.hostNotAllowed(`${host}:${port}`);
-    }
-
-    // SSRF: reject private/internal targets (mandatory floor). The connection
-    // is then pinned to the address validated here — the driver dials the IP
-    // and never re-resolves the hostname, closing the DNS-rebinding TOCTOU
-    // window (parity with the HTTP injector's pinned lookup).
-    let pinnedAddress: string;
-    try {
-      const validated = await validateHostPort(host, port);
-      if (signal?.aborted) throw VaultError.vaultLocked();
-      pinnedAddress = validated.resolvedAddress;
-    } catch (err) {
-      if (err instanceof VaultError) {
-        this.audit(action, secretId, { host, port, error: err.code }, false, attribution);
+      // SSRF: reject private/internal targets (mandatory floor). The connection
+      // is then pinned to the address validated here — the driver dials the IP
+      // and never re-resolves the hostname, closing the DNS-rebinding TOCTOU
+      // window (parity with the HTTP injector's pinned lookup).
+      let pinnedAddress: string;
+      try {
+        const validated = await validateHostPort(host, port, {
+          parts: echoField(action, "host"),
+          values: thrownValues,
+        });
+        if (signal?.aborted) throw VaultError.vaultLocked();
+        pinnedAddress = validated.resolvedAddress;
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(action, secretId, { host, port, error: err.code }, false, attribution);
+        }
+        throw err;
       }
-      throw err;
-    }
 
-    // TLS policy: required by default; `disable` is the audited opt-out.
-    const dbConfig = config?.database;
-    const tlsMode = dbConfig?.tls_mode ?? "require";
-    const tls: DbTlsOptions = tlsMode === "disable" ? false : { ca: dbConfig?.ca_pem };
-    // The opt-out is stamped on every row written past this point: the config
-    // records the operator's choice, the use row records that the credential
-    // actually crossed a plaintext leg. The pre-connect refusals above are
-    // deliberately excluded — they resolve no connection config (D13).
-    const tlsOptOut = tlsMode === "disable" ? { tls_opt_out: true } : {};
+      // TLS policy: required by default; `disable` is the audited opt-out.
+      const dbConfig = config?.database;
+      const tlsMode = dbConfig?.tls_mode ?? "require";
+      const tls: DbTlsOptions = tlsMode === "disable" ? false : { ca: dbConfig?.ca_pem };
+      // The opt-out is stamped on every row written past this point: the config
+      // records the operator's choice, the use row records that the credential
+      // actually crossed a plaintext leg. The pre-connect refusals above are
+      // deliberately excluded — they resolve no connection config (D13).
+      const tlsOptOut = tlsMode === "disable" ? { tls_opt_out: true } : {};
 
-    let credential: { user: string; password: string };
-    try {
-      credential = parseUserPassword(secretValue);
-    } catch (err) {
-      if (err instanceof VaultError) {
+      let credential: { user: string; password: string };
+      try {
+        credential = parseUserPassword(secretValue);
+      } catch (err) {
+        if (err instanceof VaultError) {
+          this.audit(
+            action,
+            secretId,
+            { host, port, error: err.code, ...tlsOptOut },
+            false,
+            attribution,
+          );
+        }
+        throw err;
+      }
+      const { user, password } = credential;
+      const timeoutMs = action.timeout_ms ?? DEFAULT_DB_TIMEOUT_MS;
+      const redactCredential = (s: string): string => redactValues(s, splitValues);
+
+      const connectOpts = {
+        host,
+        servername: dbConfig?.servername,
+        port,
+        address: pinnedAddress,
+        user,
+        password,
+        database: action.database,
+        tls,
+        timeoutMs,
+        ...(signal === undefined ? {} : { signal }),
+      };
+
+      if (resolved.kind === "command") {
+        // Command-style engines (redis, mongodb) have no separate connect/query
+        // split — `execute` owns its own connection lifecycle end to end — so a
+        // failure anywhere inside it (connect or command) surfaces as one
+        // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to;
+        // a VAULT_LOCKED keeps its own code.
+        try {
+          const res = await resolved.adapter.execute(connectOpts, action.command);
+          const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
+          this.audit(
+            action,
+            secretId,
+            {
+              host,
+              port,
+              row_count: result.row_count,
+              truncated,
+              ...tlsOptOut,
+              ...(sanitized ? { sanitized: true } : {}),
+            },
+            true,
+            attribution,
+          );
+          return result;
+        } catch (err) {
+          if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
+            this.audit(
+              action,
+              secretId,
+              { host, port, error: err.code, ...tlsOptOut },
+              false,
+              attribution,
+            );
+            throw err;
+          }
+          const detail = outside(errMessage(err), thrownValues);
+          this.audit(
+            action,
+            secretId,
+            { host, port, error: "DB_QUERY_FAILED", ...tlsOptOut },
+            false,
+            attribution,
+          );
+          throw VaultError.dbQueryFailed(detail);
+        }
+      }
+
+      // Narrowed by the command arm above, which returns or throws on every path.
+      const sqlAdapter = resolved.adapter;
+      let connection;
+      try {
+        connection = await sqlAdapter.connect(connectOpts);
+      } catch (err) {
+        if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
+          this.audit(
+            action,
+            secretId,
+            { host, port, error: err.code, ...tlsOptOut },
+            false,
+            attribution,
+          );
+          throw err;
+        }
+        const detail = outside(errMessage(err), thrownValues);
         this.audit(
           action,
           secretId,
-          { host, port, error: err.code, ...tlsOptOut },
+          { host, port, error: "DB_CONNECTION_FAILED", ...tlsOptOut },
           false,
           attribution,
         );
+        throw VaultError.dbConnectionFailed(detail);
       }
-      throw err;
-    }
-    const { user, password } = credential;
-    const timeoutMs = action.timeout_ms ?? DEFAULT_DB_TIMEOUT_MS;
 
-    // The username half of the credential is redacted alongside the password,
-    // down to the shared floor (MIN_REDACTABLE_FRAGMENT).
-    const redactCredential = (s: string): string => {
-      const redacted = redactSecretEncodings(s, password);
-      return user.length >= MIN_REDACTABLE_FRAGMENT
-        ? redactSecretEncodings(redacted, user)
-        : redacted;
-    };
-
-    const connectOpts = {
-      host,
-      servername: dbConfig?.servername,
-      port,
-      address: pinnedAddress,
-      user,
-      password,
-      database: action.database,
-      tls,
-      timeoutMs,
-      ...(signal === undefined ? {} : { signal }),
-    };
-
-    if (resolved.kind === "command") {
-      // Command-style engines (redis, mongodb) have no separate connect/query
-      // split — `execute` owns its own connection lifecycle end to end — so a
-      // failure anywhere inside it (connect or command) surfaces as one
-      // DB_QUERY_FAILED, the same code an equivalent SQL query error maps to;
-      // a VAULT_LOCKED keeps its own code.
       try {
-        const res = await resolved.adapter.execute(connectOpts, action.command);
+        // The schema's superRefine guarantees `query` for every SQL engine.
+        const query = action.query as string;
+        const res = await connection.query(query, action.params);
+        // Column names and the command tag are endpoint-authored too: an alias
+        // (`SELECT 1 AS "<credential>"`) put the value in a position no redactor
+        // saw, while the same string in a row value was redacted (L1).
         const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
         this.audit(
           action,
@@ -212,17 +291,7 @@ export class DatabaseInjector {
         );
         return result;
       } catch (err) {
-        if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
-          this.audit(
-            action,
-            secretId,
-            { host, port, error: err.code, ...tlsOptOut },
-            false,
-            attribution,
-          );
-          throw err;
-        }
-        const detail = redactCredential(errMessage(err));
+        const detail = outside(errMessage(err), thrownValues);
         this.audit(
           action,
           secretId,
@@ -231,75 +300,15 @@ export class DatabaseInjector {
           attribution,
         );
         throw VaultError.dbQueryFailed(detail);
+      } finally {
+        try {
+          await connection.end();
+        } catch {
+          // best-effort close
+        }
       }
-    }
-
-    // Narrowed by the command arm above, which returns or throws on every path.
-    const sqlAdapter = resolved.adapter;
-    let connection;
-    try {
-      connection = await sqlAdapter.connect(connectOpts);
     } catch (err) {
-      if (err instanceof VaultError && err.code === ErrorCode.VAULT_LOCKED) {
-        this.audit(
-          action,
-          secretId,
-          { host, port, error: err.code, ...tlsOptOut },
-          false,
-          attribution,
-        );
-        throw err;
-      }
-      const detail = redactCredential(errMessage(err));
-      this.audit(
-        action,
-        secretId,
-        { host, port, error: "DB_CONNECTION_FAILED", ...tlsOptOut },
-        false,
-        attribution,
-      );
-      throw VaultError.dbConnectionFailed(detail);
-    }
-
-    try {
-      // The schema's superRefine guarantees `query` for every SQL engine.
-      const query = action.query as string;
-      const res = await connection.query(query, action.params);
-      // Column names and the command tag are endpoint-authored too: an alias
-      // (`SELECT 1 AS "<credential>"`) put the value in a position no redactor
-      // saw, while the same string in a row value was redacted (L1).
-      const { result, truncated, sanitized } = this.toDatabaseResult(res, redactCredential);
-      this.audit(
-        action,
-        secretId,
-        {
-          host,
-          port,
-          row_count: result.row_count,
-          truncated,
-          ...tlsOptOut,
-          ...(sanitized ? { sanitized: true } : {}),
-        },
-        true,
-        attribution,
-      );
-      return result;
-    } catch (err) {
-      const detail = redactCredential(errMessage(err));
-      this.audit(
-        action,
-        secretId,
-        { host, port, error: "DB_QUERY_FAILED", ...tlsOptOut },
-        false,
-        attribution,
-      );
-      throw VaultError.dbQueryFailed(detail);
-    } finally {
-      try {
-        await connection.end();
-      } catch {
-        // best-effort close
-      }
+      throw passError(err, thrownValues);
     }
   }
 
@@ -377,26 +386,26 @@ function isDocument(value: unknown): value is Record<string, unknown> {
 
 const FIELD = databaseActionSchema.shape;
 
-function databaseInputRefusal(action: DatabaseAction): string | undefined {
+function databaseInputRefusal(action: DatabaseAction): VaultText | undefined {
   const sql = action.engine === DatabaseEngine.POSTGRESQL || action.engine === DatabaseEngine.MYSQL;
   if (action.engine === DatabaseEngine.MONGODB && !isDocument(action.command)) {
-    return "command must be a document for mongodb";
+    return vaultText`command must be a document for mongodb`;
   }
   if (action.engine === DatabaseEngine.REDIS && !isStringArray(action.command)) {
-    return "command must be a string array for redis";
+    return vaultText`command must be a string array for redis`;
   }
   if (sql && (typeof action.query !== "string" || action.query.length === 0)) {
-    return "query is required for this engine";
+    return vaultText`query is required for this engine`;
   }
   if (sql && !FIELD.params.safeParse(action.params).success) {
-    return "params must be an array of at most 1000 values";
+    return vaultText`params must be an array of at most 1000 values`;
   }
-  if (!FIELD.database.safeParse(action.database).success) return "Invalid database name";
+  if (!FIELD.database.safeParse(action.database).success) return vaultText`Invalid database name`;
   if (action.engine === DatabaseEngine.REDIS && !isDecimalInteger(action.database)) {
-    return "database must be a non-negative integer index for redis";
+    return vaultText`database must be a non-negative integer index for redis`;
   }
   if (!FIELD.timeout_ms.safeParse(action.timeout_ms).success) {
-    return "timeout_ms must be a positive integer up to 300000";
+    return vaultText`timeout_ms must be a positive integer up to 300000`;
   }
   return undefined;
 }
@@ -414,16 +423,24 @@ function parseHostPort(
   hostField: string,
   portField: number | undefined,
   fallback: number,
-): { host: string; port: number } {
+): { host: string; port: number; embedsPort: boolean } {
   const m = /^(.*):(\d+)$/.exec(hostField);
   if (m && m[1] !== undefined && m[2] !== undefined) {
     const embedded = parseInt(m[2], 10);
     if (embedded < 1 || embedded > 65_535) {
-      throw VaultError.invalidDatabaseConfig("embedded port out of range (1-65535)");
+      throw VaultError.invalidDatabaseConfig(vaultText`embedded port out of range (1-65535)`);
     }
-    return { host: m[1], port: portField ?? embedded };
+    return { host: m[1], port: portField ?? embedded, embedsPort: true };
   }
-  return { host: hostField, port: portField ?? fallback };
+  return { host: hostField, port: portField ?? fallback, embedsPort: false };
+}
+
+/** The target as the action named it: the host field as sent, and the port unless the field embeds one and the action sent none. */
+function targetText(action: DatabaseAction, embedsPort: boolean, port: number): VaultText {
+  const sent: unknown = action.port;
+  const host = echoField(action, "host");
+  if (embedsPort && (sent === undefined || sent === null)) return vaultText`${host}`;
+  return vaultText`${host}:${typeof sent === "string" ? echoField(action, "port") : num(port)}`;
 }
 
 /** Split the secret value into username and password on the first colon. */
@@ -431,9 +448,20 @@ function parseUserPassword(value: Uint8Array): { user: string; password: string 
   const s = Buffer.from(value).toString("utf8");
   const i = s.indexOf(":");
   if (i < 0) {
-    throw VaultError.invalidDatabaseConfig("database secret must be in 'username:password' form");
+    throw VaultError.invalidDatabaseConfig(
+      vaultText`database secret must be in 'username:password' form`,
+    );
   }
   return { user: s.slice(0, i), password: s.slice(i + 1) };
+}
+
+/** The parts a `username:password` value is redacted of beside the whole: the password, and the user down to the shared floor (MIN_REDACTABLE_FRAGMENT). */
+function credentialParts(value: string): string[] {
+  const i = value.indexOf(":");
+  if (i < 0) return [];
+  const user = value.slice(0, i);
+  const password = value.slice(i + 1);
+  return user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
 }
 
 /** Cap the result set by row count and serialized size. */

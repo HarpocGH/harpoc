@@ -1,7 +1,7 @@
 // packages/core/src/injection/escape-tolerant.ts
 
 /**
- * Redact a needle from text that may carry it under ANY valid JSON string
+ * Find a needle in text that may carry it under ANY valid JSON string
  * escaping, not just the one V8 emits.
  *
  * `JSON.stringify(s).slice(1, -1)` reproduces exactly one convention: V8's,
@@ -15,13 +15,12 @@
  * simple escape, or as `\uXXXX` in either hex case, and the conventions may be
  * mixed within one value.
  *
- * Matching is biased toward over-redaction, not toward preserving structure: a
- * failed match attempt advances the scan by one character rather than skipping
- * the whole escape unit it began to read, so a match may start inside an
- * unrelated `\uXXXX` (or other) escape and the surrounding JSON can be left
- * malformed. That is accepted on purpose — skipping whole escape units on
- * failure would also skip a needle that appears literally in non-JSON output
- * (this function also sanitizes process stdout/stderr and MCP results, where
+ * Matching is biased toward over-redaction, not toward preserving structure:
+ * every start is tried, a start inside an unrelated `\uXXXX` (or other) escape
+ * included, so a match may begin inside an escape and the surrounding JSON can
+ * be left malformed once it is redacted. That is accepted on purpose — skipping
+ * whole escape units would also skip a needle that appears literally in non-JSON
+ * output (process stdout/stderr and MCP results are scanned too, where
  * `\uXXXX`-shaped text is just characters), turning a would-be match into a
  * miss. A missed redaction — the credential reaching the model — is the one
  * failure this best-effort layer must not have; a malformed downstream JSON
@@ -34,27 +33,24 @@
  * exponential, and this is a best-effort layer atop structural opacity — not the
  * property the vault's guarantee rests on.
  *
- * Residual, deliberate: nesting depth is now bounded, not unbounded. This
- * function still matches only one escape layer of the text it is given, and
- * does not itself parse or descend into JSON structure. Since 2026-08-15,
- * `redactSecretEncodings` (`output-sanitizer.ts`) wraps it in a structural
- * pass that parses the surrounding JSON document and descends into string
- * leaves that are themselves JSON, to at most `MAX_JSON_PARSES` (4) levels of
- * parse depth — not four `JSON.parse` calls in total; a document with many
- * sibling leaves at one level costs one parse per leaf, so the actual call
- * count scales with the document's shape, not a fixed budget. Four levels is
- * enough to reach a credential in a document wrapped inside as many as four
- * further envelopes (five JSON documents nested in total). A credential
- * wrapped a fifth envelope deeper — six documents in total — is still not
- * matched, nor is one inside a body over the descent's size guard. That is
- * characterized, not claimed blocked — the same residual family as the
- * partial-echo and chunking classes — and the
- * e2e harness deliberately parses to a greater depth still (six `JSON.parse`
- * calls, `MAX_PARSE_DEPTH` in `packages/e2e/src/assert/scan.ts`), so the
- * measurement can still observe the band the vault does not cover (review
- * 2026-08-14, F1 whole-branch follow-up; nested-JSON redaction plan,
- * decision D2).
+ * Residual, deliberate: this matches only one escape layer of the text it is
+ * given, and does not itself parse or descend into JSON structure.
+ * `redactValues` (`output-sanitizer.ts`) runs it on every string value it
+ * decodes from a JSON document, to at most `MAX_JSON_PARSES` (4) levels of parse
+ * depth. Four levels is enough to reach a credential in a document wrapped
+ * inside as many as four further envelopes (five JSON documents nested in
+ * total). A credential wrapped a fifth envelope deeper — six documents in total
+ * — is still not matched, nor is one inside a body over the descent's size
+ * guard. That is characterized, not claimed blocked — the same residual family
+ * as the partial-echo and chunking classes — and the e2e harness deliberately
+ * parses to a greater depth still (six `JSON.parse` calls, `MAX_PARSE_DEPTH` in
+ * `packages/e2e/src/assert/scan.ts`), so the measurement can still observe the
+ * band the vault does not cover (review 2026-08-14, F1 whole-branch follow-up;
+ * nested-JSON redaction plan, decision D2).
  */
+
+/** Spans of a text as `[start, end, start, end, …]`, each `[start, end)`, ascending by start. */
+export type Spans = number[];
 
 const SIMPLE_ESCAPES: Record<string, string> = {
   '"': '"',
@@ -110,28 +106,27 @@ function matchAt(text: string, start: number, needle: string): number {
   return at;
 }
 
-export function redactEscapeTolerant(text: string, needle: string, replacement: string): string {
-  if (text.length === 0 || needle.length === 0) return text;
+/**
+ * Appends to `out`, and returns it, every match of `needle` in `text` whose
+ * characters hold a backslash, overlapping ones included. A match without a
+ * backslash is a literal occurrence of the needle, which the literal scan
+ * reports; and every needle character before the first backslash of a match
+ * consumed one character, so only the `needle.length` starts up to each
+ * backslash are tried.
+ */
+export function findEscapeTolerant(text: string, needle: string, out: Spans = []): Spans {
+  if (text.length === 0 || needle.length === 0) return out;
 
   const first = needle[0] as string;
-  let out = "";
-  let cursor = 0;
-  let i = 0;
-
-  while (i < text.length) {
-    // Cheap prefilter: a match can only begin at a literal first character or at
-    // a backslash introducing an escape. Without it this is O(n*m) on every byte.
-    if (text[i] === first || text[i] === "\\") {
-      const end = matchAt(text, i, needle);
-      if (end !== -1) {
-        out += text.slice(cursor, i) + replacement;
-        cursor = end;
-        i = end;
-        continue;
+  let from = 0;
+  for (let b = text.indexOf("\\"); b !== -1; b = text.indexOf("\\", b + 1)) {
+    for (let i = Math.max(from, b - needle.length + 1); i <= b; i++) {
+      if (i === b || text[i] === first) {
+        const end = matchAt(text, i, needle);
+        if (end !== -1) out.push(i, end);
       }
     }
-    i++;
+    from = b + 1;
   }
-
-  return cursor === 0 ? text : out + text.slice(cursor);
+  return out;
 }

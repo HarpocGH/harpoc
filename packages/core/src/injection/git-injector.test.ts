@@ -1003,7 +1003,7 @@ describeGit("GitInjector target enforcement (git resolvable)", () => {
   it.each([
     ["git@github.com:org/repo.git", "github.com"],
     ["user.name@host.example:path", "host.example"],
-  ])("still reads %s as SSH and judges the host %s (E-20 controls)", async (repository, host) => {
+  ])("still reads %s as SSH and judges the host %s (E-20 controls)", async (repository) => {
     const err = await expectVaultError(
       () =>
         injector.executeWithSecret(
@@ -1014,7 +1014,7 @@ describeGit("GitInjector target enforcement (git resolvable)", () => {
         ),
       ErrorCode.HOST_NOT_ALLOWED,
     );
-    expect(err.message).toBe(`Host not in secret allowlist: ${host}`);
+    expect(err.message).toBe(`Host not in secret allowlist: ${repository}`);
   });
 
   it("requires pinned host keys for an allowlisted SSH remote", async () => {

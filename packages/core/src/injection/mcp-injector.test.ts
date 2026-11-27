@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
-import { ErrorCode, MAX_MCP_RESULT_BYTES } from "@harpoc/shared";
+import { ErrorCode, MAX_MCP_RESULT_BYTES, recordOf } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { POLICY, SECRET, STDIO_CONFIG, mcpAction } from "./__fixtures__/mcp-downstream.js";
 import { McpInjector } from "./mcp-injector.js";
 import { McpConnectionRegistry } from "./mcp-registry.js";
-import { expectAbsent } from "@harpoc/test-utils";
+import { StdioChildTransport } from "./mcp-stdio-transport.js";
+import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 
 let registry: McpConnectionRegistry;
 let injector: McpInjector;
@@ -340,6 +341,55 @@ describe("McpInjector — lifecycle (thesis §4.5.4)", () => {
     // The failed connect did not poison the registry: a good config works.
     const result = await run(mcpAction("echo"));
     expect(result.type).toBe("mcp");
+  });
+});
+
+describe("McpInjector — a failed spawn names its code and no file", () => {
+  it.each([
+    {
+      what: "node's spawn error",
+      thrown: {
+        code: "ENOENT",
+        syscall: "spawn C:\\wrapper.exe",
+        text: "spawn C:\\wrapper.exe ENOENT",
+      },
+      word: "ENOENT",
+    },
+    {
+      what: "win32's synchronous spawn error",
+      thrown: { code: "EINVAL", syscall: "spawn", text: "spawn EINVAL" },
+      word: "EINVAL",
+    },
+    {
+      what: "a code no errno names",
+      thrown: {
+        code: "EBOGUS",
+        syscall: "spawn C:\\wrapper.exe",
+        text: "spawn C:\\wrapper.exe EBOGUS",
+      },
+      word: "unknown error",
+    },
+  ])("$what", async ({ thrown, word }) => {
+    const start = vi
+      .spyOn(StdioChildTransport.prototype, "start")
+      .mockRejectedValue(
+        Object.assign(new Error(thrown.text), { code: thrown.code, syscall: thrown.syscall }),
+      );
+    try {
+      const err = await expectVaultError(
+        () =>
+          run(mcpAction("echo", { server: "S" }), {
+            config: { ...STDIO_CONFIG, server_name: "S" },
+          }),
+        ErrorCode.MCP_CONNECT_FAILED,
+      );
+
+      expect(err.message.includes("wrapper")).toBe(false);
+      expect(err.message).toBe(`Failed to connect to MCP server 'S': spawn failed (${word})`);
+      expect(recordOf(err)).toBeDefined();
+    } finally {
+      start.mockRestore();
+    }
   });
 });
 

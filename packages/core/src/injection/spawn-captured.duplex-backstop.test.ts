@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { vaultText } from "@harpoc/shared";
 import { spawnDuplex } from "./spawn-captured.js";
 import { forceJobWrapperUnavailableForTests } from "./win32-job-wrapper.js";
 
@@ -39,7 +40,7 @@ function stuckChild(
 beforeEach(() => {
   // The win32 wrapper's probe would spawn through the mock; the taskkill tier's kill of a
   // pid-less child is the direct kill, as on POSIX.
-  forceJobWrapperUnavailableForTests("test: a fake child");
+  forceJobWrapperUnavailableForTests(vaultText`test: a fake child`);
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 });
 

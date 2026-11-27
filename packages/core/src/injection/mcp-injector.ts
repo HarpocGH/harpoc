@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Client, FetchLike } from "@modelcontextprotocol/client";
-import type { InjectionPolicy, McpAction, McpResult, McpServerConfig } from "@harpoc/shared";
+import type {
+  InjectionPolicy,
+  McpAction,
+  McpResult,
+  McpServerConfig,
+  TextPart,
+  VaultText,
+} from "@harpoc/shared";
 import {
   DEFAULT_MCP_TIMEOUT_MS,
   ErrorCode,
@@ -10,6 +17,10 @@ import {
   McpTransport,
   HARPOC_VERSION,
   VaultError,
+  echoField,
+  num,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { RequestInit as UndiciRequestInit } from "undici";
@@ -18,6 +29,7 @@ import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, matchesUrlAllowlist, resolveAndMatchCommand } from "./allowlist.js";
 import { buildCleanEnv } from "./clean-env.js";
+import { SIGNAL_WORDS, errnoToken } from "./error-words.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import { createPinnedLookup } from "./http-injector.js";
 import type { IsolationDimensions } from "./isolation.js";
@@ -26,13 +38,16 @@ import type { McpConnectionEntry, McpConnectionRegistry } from "./mcp-registry.j
 import { sanitizeDownstreamStderr } from "./mcp-registry.js";
 import { StdioChildTransport } from "./mcp-stdio-transport.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
-import { mapStringLeavesTracked, redactSecretEncodings } from "./output-sanitizer.js";
+import { mapStringLeavesTracked, outside, redactSecretEncodings } from "./output-sanitizer.js";
+import type { ValidationSubject } from "./url-validator.js";
 import { validateUrl } from "./url-validator.js";
 import type { TreeKillMechanism } from "./win32-job-wrapper.js";
 import { wrapInJob } from "./win32-job-wrapper.js";
 
 /** Hard ceiling on a per-invocation timeout override (parity with http/process). */
 const MAX_TIMEOUT_MS = 300_000;
+
+const PROTOCOL_WORDS: readonly string[] = Object.values(McpProtocolRevision);
 
 type McpSdkClientModule = typeof import("@modelcontextprotocol/client");
 
@@ -126,8 +141,11 @@ export class McpInjector {
     attribution?: AuditAttribution,
     signal?: AbortSignal,
   ): Promise<McpResult> {
+    const valueStr = Buffer.from(secretValue).toString("utf8");
+    const server = outside(config.server_name, [valueStr]);
+
     if (action.server !== config.server_name) {
-      const err = VaultError.mcpServerMismatch(action.server, config.server_name);
+      const err = VaultError.mcpServerMismatch(echoField(action, "server"), server);
       this.audit(action, secretId, config, { error: err.code }, false, attribution);
       throw err;
     }
@@ -141,13 +159,14 @@ export class McpInjector {
           config.command as string,
           policy.command_allowlist,
           controlledPathDirs(),
+          outside(config.command as string, [valueStr]),
         );
       } else {
         const url = config.url as string;
         if (!matchesUrlAllowlist(url, policy.url_allowlist)) {
-          throw VaultError.urlNotAllowed(url);
+          throw VaultError.urlNotAllowed(outside(url, [valueStr]));
         }
-        await validateUrl(url);
+        await validateUrl(url, undefined, endpointSubject(url, valueStr));
       }
     } catch (err) {
       if (err instanceof VaultError) {
@@ -169,7 +188,6 @@ export class McpInjector {
     }
 
     const sdk = await loadMcpSdk();
-    const valueStr = Buffer.from(secretValue).toString("utf8");
     const credentialFingerprint = sha256Hex(secretValue);
     const configFingerprint = sha256Hex(Buffer.from(JSON.stringify(config), "utf8"));
 
@@ -223,15 +241,13 @@ export class McpInjector {
       }
       if (err instanceof sdk.SdkError && err.code === sdk.SdkErrorCode.EraNegotiationFailed) {
         const vaultErr = VaultError.mcpConnectFailed(
-          config.server_name,
-          `protocol ${config.protocol} is not offered by the downstream server`,
+          server,
+          vaultText`protocol ${token(config.protocol, PROTOCOL_WORDS)} is not offered by the downstream server`,
         );
         this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
         throw vaultErr;
       }
-      const detail =
-        err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
-      const vaultErr = VaultError.mcpConnectFailed(config.server_name, detail);
+      const vaultErr = VaultError.mcpConnectFailed(server, connectFailure(err, valueStr));
       this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
       throw vaultErr;
     }
@@ -244,7 +260,7 @@ export class McpInjector {
         { timeout },
       )) as { content?: unknown; structuredContent?: unknown; isError?: unknown };
     } catch (err) {
-      const vaultErr = this.mapCallError(sdk, err, entry, config.server_name, valueStr);
+      const vaultErr = this.mapCallError(sdk, err, entry, server, valueStr);
       this.audit(action, secretId, config, { error: vaultErr.code }, false, attribution);
       throw vaultErr;
     }
@@ -321,14 +337,14 @@ export class McpInjector {
       const wrapperFailure = stdioTransport?.exitInfo?.wrapper_failure;
       throw wrapperFailure !== undefined
         ? VaultError.mcpConnectFailed(
-            config.server_name,
+            outside(config.server_name, [valueStr]),
             // The line is downstream stderr: a payload faking the marker pair
             // chooses it. Bounded where it is built (the transport) and given
             // the crash row's own treatment here — exact-value redaction plus
             // the guard's pattern pass — because this message reaches the model
             // as tool-result text and the REST client as an error body (I4; I1,
             // 2026-09-10).
-            `spawn failed: ${sanitizeDownstreamStderr(wrapperFailure, valueStr)}`,
+            wrapperFailureDetail(wrapperFailure, valueStr),
           )
         : err;
     }
@@ -575,7 +591,11 @@ export class McpInjector {
     signal: AbortSignal | undefined,
   ): FetchLike {
     return async (url, init) => {
-      const validated = await validateUrl(String(url));
+      const validated = await validateUrl(
+        String(url),
+        undefined,
+        endpointSubject(String(url), valueStr),
+      );
       if (signal?.aborted) throw VaultError.vaultLocked();
       if (validated.resolvedAddresses) {
         pins.set(validated.url.hostname.toLowerCase(), validated.resolvedAddresses);
@@ -592,7 +612,7 @@ export class McpInjector {
         await response.body?.cancel().catch(() => undefined);
         throw new VaultError(
           ErrorCode.REDIRECT_POLICY_VIOLATION,
-          `Downstream MCP server redirected (${response.status}); redirects are refused — configure the final endpoint URL`,
+          vaultText`Downstream MCP server redirected (${num(response.status)}); redirects are refused — configure the final endpoint URL`,
         );
       }
       return response as unknown as Response;
@@ -604,7 +624,7 @@ export class McpInjector {
     sdk: McpSdk,
     err: unknown,
     entry: McpConnectionEntry,
-    server: string,
+    server: TextPart,
     valueStr: string,
   ): VaultError {
     if (err instanceof sdk.SdkError) {
@@ -615,23 +635,28 @@ export class McpInjector {
             // Bounded at the transport, then the crash row's treatment (I1).
             return VaultError.mcpConnectFailed(
               server,
-              `spawn failed: ${sanitizeDownstreamStderr(exit.wrapper_failure, valueStr)}`,
+              wrapperFailureDetail(exit.wrapper_failure, valueStr),
             );
-          return VaultError.mcpServerCrashed(server, exit?.code ?? null, exit?.signal ?? null);
+          const signal = exit?.signal ?? null;
+          return VaultError.mcpServerCrashed(
+            server,
+            exit?.code ?? null,
+            signal === null ? null : token(signal, SIGNAL_WORDS),
+          );
         }
-        return VaultError.mcpConnectFailed(server, "connection closed");
+        return VaultError.mcpConnectFailed(server, vaultText`connection closed`);
       }
       if (err.code === sdk.SdkErrorCode.RequestTimeout) {
         // A slow tool is not a crash: the server stays alive and the agent may retry.
         return VaultError.mcpTimeout(server);
       }
-      return VaultError.mcpProtocolError(server, redactSecretEncodings(err.message, valueStr));
+      return VaultError.mcpProtocolError(server, outside(err.message, [valueStr]));
     }
     if (err instanceof sdk.ProtocolError) {
-      return VaultError.mcpProtocolError(server, redactSecretEncodings(err.message, valueStr));
+      return VaultError.mcpProtocolError(server, outside(err.message, [valueStr]));
     }
     if (err instanceof VaultError) return err;
-    const detail = err instanceof Error ? redactSecretEncodings(err.message, valueStr) : undefined;
+    const detail = err instanceof Error ? outside(err.message, [valueStr]) : undefined;
     return VaultError.mcpProtocolError(server, detail);
   }
 
@@ -703,6 +728,26 @@ export class McpInjector {
       ),
     );
   }
+}
+
+/** The validator's subject for the stored endpoint: the host its refusals quote, as outside text. */
+function endpointSubject(url: string, valueStr: string): ValidationSubject {
+  const quoted = URL.canParse(url) ? new URL(url).hostname : url;
+  return { parts: outside(quoted, [valueStr]), values: [valueStr] };
+}
+
+/** node's spawn error names the file it could not start: it is read by its code alone. */
+function connectFailure(err: unknown, valueStr: string): VaultText | TextPart | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const { code, syscall } = err as NodeJS.ErrnoException;
+  if (typeof code === "string" && typeof syscall === "string" && syscall.startsWith("spawn")) {
+    return vaultText`spawn failed (${errnoToken(code)})`;
+  }
+  return outside(err.message, [valueStr]);
+}
+
+function wrapperFailureDetail(line: string, valueStr: string): VaultText {
+  return vaultText`spawn failed: ${outside(sanitizeDownstreamStderr(line, valueStr), [valueStr])}`;
 }
 
 function sha256Hex(data: Uint8Array): string {

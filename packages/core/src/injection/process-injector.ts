@@ -1,11 +1,15 @@
 import { statSync } from "node:fs";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
 import {
+  DEDICATED_CONTEXT_BINARIES,
   DEFAULT_PROCESS_TIMEOUT_MS,
   ErrorCode,
   VaultError,
   dedicatedContextForBinary,
+  echoField,
   normalizeBinaryBasename,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
@@ -14,6 +18,9 @@ import { controlledPathDirs, resolveAndMatchCommandPaths } from "./allowlist.js"
 import { buildCleanEnv } from "./clean-env.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import type { TreeKillMechanism } from "./win32-job-wrapper.js";
+
+const DEDICATED_BINARY_WORDS: readonly string[] = [...DEDICATED_CONTEXT_BINARIES.keys()];
+const DEDICATED_CONTEXT_WORDS: readonly string[] = [...DEDICATED_CONTEXT_BINARIES.values()];
 
 /**
  * Executes a subprocess with an injected credential (process-mediated injection,
@@ -51,7 +58,12 @@ export class ProcessInjector {
     let resolvedPath: string;
     let env: Record<string, string>;
     try {
-      const match = resolveAndMatchCommandPaths(action.command, policy.command_allowlist, pathDirs);
+      const match = resolveAndMatchCommandPaths(
+        action.command,
+        policy.command_allowlist,
+        pathDirs,
+        echoField(action, "command"),
+      );
       resolvedPath = match.resolved;
       // A binary with its own injection context is only in the allowlist so that
       // context can spawn it under vault-authored arguments; running it here,
@@ -62,7 +74,10 @@ export class ProcessInjector {
       for (const path of [match.found, match.resolved, ...match.matchedEntries]) {
         const dedicated = dedicatedContextForBinary(path);
         if (dedicated !== null) {
-          throw VaultError.dedicatedContextRequired(normalizeBinaryBasename(path), dedicated);
+          throw VaultError.dedicatedContextRequired(
+            token(normalizeBinaryBasename(path), DEDICATED_BINARY_WORDS),
+            token(dedicated, DEDICATED_CONTEXT_WORDS),
+          );
         }
       }
       if (action.working_directory !== undefined) {
@@ -202,11 +217,11 @@ export class ProcessInjector {
   private assertDirectory(dir: string): void {
     try {
       if (!statSync(dir).isDirectory()) {
-        throw VaultError.invalidProcessConfig("working_directory is not a directory");
+        throw VaultError.invalidProcessConfig(vaultText`working_directory is not a directory`);
       }
     } catch (err) {
       if (err instanceof VaultError) throw err;
-      throw VaultError.invalidProcessConfig("working_directory does not exist");
+      throw VaultError.invalidProcessConfig(vaultText`working_directory does not exist`);
     }
   }
 

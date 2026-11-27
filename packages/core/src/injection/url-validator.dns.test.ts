@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, recordOf } from "@harpoc/shared";
 
 const lookupMock = vi.hoisted(() => vi.fn());
 
@@ -166,5 +166,62 @@ describe("validateHostPort DNS resolution", () => {
       port: 5432,
       resolvedAddress: "93.184.216.34",
     });
+  });
+});
+
+describe("a refusal without a subject is built from strings, as the proxy's and the OAuth leg's callers get it", () => {
+  beforeEach(() => {
+    lookupMock.mockReset();
+  });
+
+  it.each<[string, () => Promise<unknown>, ErrorCode]>([
+    [
+      "validateUrl, a lookup that answers no address",
+      () => {
+        lookupMock.mockResolvedValue([]);
+        return validateUrl("https://empty.example.com/");
+      },
+      ErrorCode.DNS_RESOLUTION_FAILED,
+    ],
+    [
+      "validateUrl, a private answer",
+      () => {
+        lookupMock.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+        return validateUrl("https://rebind.example.com/");
+      },
+      ErrorCode.SSRF_BLOCKED,
+    ],
+    [
+      "validateUrl, a failed lookup",
+      () => {
+        lookupMock.mockRejectedValue(
+          Object.assign(new Error("getaddrinfo"), { code: "ENOTFOUND" }),
+        );
+        return validateUrl("https://missing.example.com/");
+      },
+      ErrorCode.DNS_RESOLUTION_FAILED,
+    ],
+    [
+      "validateHostPort, a private answer",
+      () => {
+        lookupMock.mockResolvedValue({ address: "10.0.0.5", family: 4 });
+        return validateHostPort("db.example.test", 5432);
+      },
+      ErrorCode.SSRF_BLOCKED,
+    ],
+    [
+      "validateHostPort, a failed lookup",
+      () => {
+        lookupMock.mockRejectedValue(
+          Object.assign(new Error("getaddrinfo"), { code: "ENOTFOUND" }),
+        );
+        return validateHostPort("db.example.test", 5432);
+      },
+      ErrorCode.DNS_RESOLUTION_FAILED,
+    ],
+  ])("%s: no record", async (_case, call, code) => {
+    const err = await expectVaultError(call, code);
+
+    expect(recordOf(err)).toBeUndefined();
   });
 });

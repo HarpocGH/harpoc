@@ -5,6 +5,8 @@ import {
   AES_TAG_LENGTH,
   ErrorCode,
   VaultError,
+  num,
+  vaultText,
 } from "@harpoc/shared";
 
 export interface EncryptResult {
@@ -20,7 +22,7 @@ export function encrypt(key: Uint8Array, plaintext: Uint8Array, aad: string): En
   if (key.length !== AES_KEY_LENGTH) {
     throw new VaultError(
       ErrorCode.ENCRYPTION_ERROR,
-      `AES key must be ${AES_KEY_LENGTH} bytes, got ${key.length}`,
+      vaultText`AES key must be ${num(AES_KEY_LENGTH)} bytes, got ${num(key.length)}`,
     );
   }
 
@@ -53,19 +55,19 @@ export function decrypt(
   if (key.length !== AES_KEY_LENGTH) {
     throw new VaultError(
       ErrorCode.ENCRYPTION_ERROR,
-      `AES key must be ${AES_KEY_LENGTH} bytes, got ${key.length}`,
+      vaultText`AES key must be ${num(AES_KEY_LENGTH)} bytes, got ${num(key.length)}`,
     );
   }
   if (iv.length !== AES_IV_LENGTH) {
     throw new VaultError(
       ErrorCode.ENCRYPTION_ERROR,
-      `IV must be ${AES_IV_LENGTH} bytes, got ${iv.length}`,
+      vaultText`IV must be ${num(AES_IV_LENGTH)} bytes, got ${num(iv.length)}`,
     );
   }
   if (tag.length !== AES_TAG_LENGTH) {
     throw new VaultError(
       ErrorCode.ENCRYPTION_ERROR,
-      `Auth tag must be ${AES_TAG_LENGTH} bytes, got ${tag.length}`,
+      vaultText`Auth tag must be ${num(AES_TAG_LENGTH)} bytes, got ${num(tag.length)}`,
     );
   }
 
@@ -79,6 +81,8 @@ export function decrypt(
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return new Uint8Array(decrypted);
   } catch {
-    throw VaultError.encryptionError("AES-GCM decryption failed (auth tag mismatch or corrupted)");
+    throw VaultError.encryptionError(
+      vaultText`AES-GCM decryption failed (auth tag mismatch or corrupted)`,
+    );
   }
 }

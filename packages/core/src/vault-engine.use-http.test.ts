@@ -62,6 +62,21 @@ interface EchoArrival {
 const echoArrivals: EchoArrival[] = [];
 const BEARER_TOKEN = "my-bearer-token";
 
+/** The `validateUrl` call for `url`, read field by field so a red prints no value: the URL, the default schemes and a subject that names the action's `url`. */
+function expectValidatedWithSubject(url: string): void {
+  const call = vi.mocked(validateUrl).mock.calls.find(([called]) => called === url);
+  expect(call?.length).toBe(3);
+  expect(call?.[0]).toBe(url);
+  expect(call?.[1]).toBeUndefined();
+  expect(call?.[2]?.parts).toMatchObject({
+    kind: "echo",
+    source: "action",
+    path: ["url"],
+    shown: url,
+  });
+  expect(call?.[2]?.values.length).toBe(1);
+}
+
 beforeAll(async () => {
   server = createServer((req, res) => {
     requestCount++;
@@ -509,7 +524,7 @@ describe("audit trail for failed useSecret", () => {
       injection: { type: "bearer" },
     });
 
-    expect(validateUrl).toHaveBeenCalledWith(UNRESOLVED.url);
+    expectValidatedWithSubject(UNRESOLVED.url);
     expect(response).toMatchObject({ status: null, error: ErrorCode.DNS_RESOLUTION_FAILED });
     const events = engine.queryAudit({ eventType: AuditEventType.SECRET_USE, secretId });
     expect(events).toHaveLength(1);
@@ -876,7 +891,7 @@ describe("HTTP bodies, request headers, the response cap and the scheme floor (M
       ErrorCode.URL_HTTPS_REQUIRED,
     );
 
-    expect(validateUrl).toHaveBeenCalledWith("http://192.0.2.1/api");
+    expectValidatedWithSubject("http://192.0.2.1/api");
     expect(requestCount).toBe(before);
     expect(failedRow()).toMatchObject({
       context: "http",

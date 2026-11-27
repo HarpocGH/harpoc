@@ -57,6 +57,7 @@ import type {
   UseSecretAction,
   UseSecretResponse,
   VaultApiToken,
+  VaultText,
 } from "@harpoc/shared";
 import {
   AAD_CERT_ACME_ACCOUNT,
@@ -80,6 +81,8 @@ import {
   DEFAULT_SESSION_TTL_MS,
   DEFAULT_SSH_TIMEOUT_MS,
   distinctRenderSlots,
+  echoField,
+  echoHandle,
   ErrorCode,
   formatHandle,
   injectionPolicyInputSchema,
@@ -118,6 +121,7 @@ import {
   RENDER_MIXED_VALUE_REGEX,
   RENDER_SLOT_LIMIT_PER_MINUTE,
   renderSchemaIssues,
+  ResponseMode,
   SecretStatus,
   SecretType,
   SESSION_CLEANUP_INTERVAL_MS,
@@ -127,11 +131,13 @@ import {
   SSH_HOST_KEY_TYPES,
   SSH_INSTALL_KEY_TYPES,
   TOKEN_LABEL_MAX_LENGTH,
+  token,
   tokenScopeRefusal,
   VaultError,
   VaultState,
   VAULT_VERSION,
   VAULT_VERSION_FLOOR,
+  vaultText,
 } from "@harpoc/shared";
 import { AgentRegistry } from "./access/agent-registry.js";
 import { PolicyEngine } from "./access/policy-engine.js";
@@ -185,6 +191,8 @@ import {
   buildDockerAuditDetails,
   executeDockerRegistryAction,
 } from "./injection/docker/docker-injector.js";
+import { leaveError, leaveFixed } from "./injection/error-pass.js";
+import { REMOTE_ERROR_CODES } from "./injection/error-words.js";
 import { GitInjector } from "./injection/git-injector.js";
 import { HttpInjector } from "./injection/http-injector.js";
 import type { ImapExecution, ImapOAuth } from "./injection/imap-injector.js";
@@ -192,7 +200,7 @@ import { buildImapAuditDetails, ImapInjector } from "./injection/imap-injector.j
 import type { DaemonPaths } from "./injection/local-path.js";
 import { McpInjector } from "./injection/mcp-injector.js";
 import { McpConnectionRegistry } from "./injection/mcp-registry.js";
-import { redactErrorMessage } from "./injection/output-sanitizer.js";
+import { outside } from "./injection/output-sanitizer.js";
 import { ProcessInjector } from "./injection/process-injector.js";
 import type { RenderEntryDetail } from "./injection/render-entry-digest.js";
 import { renderEntryDetail, renderEntryDigest } from "./injection/render-entry-digest.js";
@@ -579,6 +587,15 @@ function computeOAuthRefreshStatus(row: OAuthTokenRow): OAuthTokenStatus["refres
   return "ok";
 }
 
+/** A token-endpoint POST that `fetch` failed: its timeout, or the code node's fetch puts on the error's `cause`. */
+function unreachedTokenEndpoint(err: unknown): VaultText {
+  const failure = err as { name?: unknown; cause?: { code?: unknown } | null } | null | undefined;
+  if (failure?.name === "TimeoutError") {
+    return vaultText`the token endpoint could not be reached (timeout)`;
+  }
+  return vaultText`the token endpoint could not be reached (${token(failure?.cause?.code, REMOTE_ERROR_CODES, "unknown error")})`;
+}
+
 /**
  * The attachments an SMTP action asked for, with unknown sizes. A failed
  * `secret.use` row is built from these: the injector returns its resolved
@@ -609,7 +626,7 @@ function attemptedAttachments(action: SmtpAction): SmtpResolvedAttachment[] {
 function mapSmtpThrow(err: unknown): VaultError {
   if (err instanceof VaultError) return err;
   if (typeof (err as { code?: unknown } | null | undefined)?.code === "string") {
-    return new VaultError(ErrorCode.FILE_IO_ERROR, "an attachment could not be read");
+    return new VaultError(ErrorCode.FILE_IO_ERROR, vaultText`an attachment could not be read`);
   }
   return toVaultError(err);
 }
@@ -626,12 +643,31 @@ function mapSmtpThrow(err: unknown): VaultError {
  */
 function toVaultError(err: unknown): VaultError {
   if (err instanceof VaultError) return err;
-  return VaultError.internalError("the injection context failed unexpectedly");
+  return VaultError.internalError(vaultText`the injection context failed unexpectedly`);
 }
 
 function toUseError(err: unknown): VaultError {
   if (err instanceof VaultError) return err;
-  return VaultError.internalError("the use failed unexpectedly");
+  return VaultError.internalError(vaultText`the use failed unexpectedly`);
+}
+
+/**
+ * A stored configuration that does not parse: its secret's id and the issue paths are outside
+ * text, stripped of the value the call decrypted.
+ */
+function configCorrupted(
+  config: VaultText,
+  secretId: string,
+  value: Uint8Array | undefined,
+  paths?: readonly string[],
+): VaultError {
+  const values = value === undefined ? [] : [Buffer.from(value).toString("utf8")];
+  const id = outside(secretId, values);
+  return VaultError.vaultCorrupted(
+    paths === undefined
+      ? vaultText`${config} for secret ${id} is not JSON`
+      : vaultText`${config} for secret ${id} is malformed (${outside(paths.join(", "), values)})`,
+  );
 }
 
 /** RFC 9110 § 5.6.2 `token`: a method the audit row can record as it stands. */
@@ -740,8 +776,7 @@ function renderPolicyDetail(render: RenderPolicy): {
 
 const SSH_BOOTSTRAP_PASSWORD_MAX_BYTES = 1023;
 
-const SSH_PASSWORD_SHAPE_REFUSED =
-  "the stored value cannot be an ssh password: it is empty, is no UTF-8 text, holds a line break or a NUL byte, or is longer than 1023 bytes";
+const SSH_PASSWORD_SHAPE_REFUSED = vaultText`the stored value cannot be an ssh password: it is empty, is no UTF-8 text, holds a line break or a NUL byte, or is longer than 1023 bytes`;
 
 /** Whether a stored value can be the bootstrap's password: one line of UTF-8 text without a NUL byte, 1 to 1023 bytes. */
 function isSshPassword(value: Uint8Array): boolean {
@@ -783,24 +818,25 @@ interface OpenUse extends UseMark {
   sealed: boolean;
 }
 
-const SPAWN_AUDIT_KEYS = [
-  "exit_code",
-  "timed_out",
-  "truncated",
-  "network_isolation",
-  "isolation_mechanism",
-  "fs_isolation",
-  "fs_isolation_mechanism",
-  "sanitized",
-  "descendant_sweep",
-  "tree_kill",
-  "strict_tree_exit",
-] as const satisfies readonly (keyof SpawnAuditFields)[];
+const SPAWN_AUDIT_KEYS: Record<keyof SpawnAuditFields, true> = {
+  exit_code: true,
+  timed_out: true,
+  truncated: true,
+  network_isolation: true,
+  isolation_mechanism: true,
+  fs_isolation: true,
+  fs_isolation_mechanism: true,
+  descendant_sweep: true,
+  tree_kill: true,
+  strict_tree_exit: true,
+};
+
+export type SpawnAuditKeyRecord = typeof SPAWN_AUDIT_KEYS;
 
 function spawnAuditDetail(spawn: BootstrapOutcome["spawn"]): Record<string, unknown> {
   const given: Partial<SpawnAuditFields> = spawn ?? {};
   const picked: Record<string, unknown> = {};
-  for (const key of SPAWN_AUDIT_KEYS) {
+  for (const key of Object.keys(SPAWN_AUDIT_KEYS) as (keyof SpawnAuditKeyRecord)[]) {
     if (given[key] !== undefined) picked[key] = given[key];
   }
   return picked;
@@ -865,19 +901,23 @@ interface RenderRecord {
   slotError?: (slotId: string) => ErrorCode | undefined;
 }
 
-const RENDER_SPAWN_AUDIT_KEYS = [
-  "sanitized",
-  "descendant_sweep",
-  "tree_kill",
-  "strict_tree_exit",
-  "isolation_mechanism",
-  "fs_isolation_mechanism",
-] as const satisfies readonly (keyof RenderSpawnFields)[];
+const RENDER_SPAWN_AUDIT_KEYS: Record<
+  Exclude<keyof RenderSpawnFields, "network_isolation" | "fs_isolation">,
+  true
+> = {
+  descendant_sweep: true,
+  tree_kill: true,
+  strict_tree_exit: true,
+  isolation_mechanism: true,
+  fs_isolation_mechanism: true,
+};
 
-/** The six result-derived fields of a render's spawn, taken by name. */
+export type RenderSpawnAuditKeyRecord = typeof RENDER_SPAWN_AUDIT_KEYS;
+
+/** The five result-derived fields of a render's spawn, taken by name. */
 function renderSpawnDetail(spawn: RenderSpawnFields): Record<string, unknown> {
   const picked: Record<string, unknown> = {};
-  for (const key of RENDER_SPAWN_AUDIT_KEYS) {
+  for (const key of Object.keys(RENDER_SPAWN_AUDIT_KEYS) as (keyof RenderSpawnAuditKeyRecord)[]) {
     if (spawn[key] !== undefined) picked[key] = spawn[key];
   }
   return picked;
@@ -2142,7 +2182,7 @@ export class VaultEngine {
           );
 
         case "mcp": {
-          const config = this.loadMcpServerConfig(s, secret.id);
+          const config = this.loadMcpServerConfig(s, secret.id, value);
           if (!config) {
             await s.mcpRegistry.terminate(secret.id, "config_removed", attribution);
             this.auditUse(
@@ -2152,7 +2192,7 @@ export class VaultEngine {
               false,
               attribution,
             );
-            throw VaultError.mcpServerNotConfigured(handle);
+            throw VaultError.mcpServerNotConfigured(echoHandle(handle));
           }
           return await s.mcpInjector.executeWithSecret(
             action,
@@ -2182,7 +2222,7 @@ export class VaultEngine {
               sessionId: this.sessionId ?? undefined,
               use,
             });
-            throw VaultError.urlNotAllowed(action.url);
+            throw VaultError.urlNotAllowed(echoField(action, "url"));
           }
 
           // Tighten-only response-mode override (thesis §4.5.2): a loosening
@@ -2206,11 +2246,14 @@ export class VaultEngine {
               sessionId: this.sessionId ?? undefined,
               use,
             });
-            throw VaultError.responseModeNotAllowed(action.response_mode, policyMode);
+            throw VaultError.responseModeNotAllowed(
+              echoField(action, "response_mode"),
+              token(policyMode, Object.values(ResponseMode)),
+            );
           }
           const responseMode = action.response_mode ?? policyMode;
 
-          const config = this.loadConnectionConfig(s, secret.id);
+          const config = this.loadConnectionConfig(s, secret.id, value);
           const response = await s.httpInjector.executeWithSecret(
             {
               method: action.method,
@@ -2235,7 +2278,7 @@ export class VaultEngine {
         }
 
         case "database": {
-          const config = this.loadConnectionConfig(s, secret.id);
+          const config = this.loadConnectionConfig(s, secret.id, value);
           return await s.databaseInjector.executeWithSecret(
             action,
             value,
@@ -2248,7 +2291,7 @@ export class VaultEngine {
         }
 
         case "ssh": {
-          const config = this.loadConnectionConfig(s, secret.id);
+          const config = this.loadConnectionConfig(s, secret.id, value);
           return await s.sshInjector.executeWithSecret(
             action as SshAction,
             value,
@@ -2261,7 +2304,7 @@ export class VaultEngine {
         }
 
         case "git": {
-          const config = this.loadConnectionConfig(s, secret.id);
+          const config = this.loadConnectionConfig(s, secret.id, value);
           return await s.gitInjector.executeWithSecret(
             action,
             value,
@@ -2278,7 +2321,7 @@ export class VaultEngine {
         }
 
         case "smtp": {
-          const mail = this.loadConnectionConfig(s, secret.id)?.mail;
+          const mail = this.loadConnectionConfig(s, secret.id, value)?.mail;
           // `tls: false` is the audited plaintext opt-out on the implicit-TLS
           // leg — the one mail case the vault honors, mirroring the database
           // `tls_mode: "disable"` opt-out (which is audited on the config-set
@@ -2438,7 +2481,7 @@ export class VaultEngine {
           if (action.operation === "render") {
             throw new Error("an sftp render returns before the decrypt and never reaches this arm");
           }
-          const config = this.loadConnectionConfig(s, secret.id);
+          const config = this.loadConnectionConfig(s, secret.id, value);
           // Every SftpAuditDetails field the builder writes is request- or
           // policy-derived (design §7.2: host, operation, remote/local paths; the
           // policy's two isolation flags — no result-derived counter to zero on a
@@ -2537,18 +2580,20 @@ export class VaultEngine {
         }
 
         default:
-          return assertNever(action, "action type");
+          return assertNever(action, vaultText`action type`, echoField(action, "type"));
       }
     } catch (err) {
       // The choke point (E69): every thrown error leaves this method as a
-      // VaultError with the credential stripped from message and details. The
-      // injector-authored arms audit the VaultErrors they throw; a raw throw
-      // provably had no row, so it gets the engine's (N16). An audit write that
-      // fails here is itself routed through the same throw — the failure to
-      // record replaces the original error, redacted (D1a-3). A bootstrap's
-      // error alone leaves as it stands: its text is the vault's own, with at
-      // most the handle the caller sent, and a password stripped from a text
-      // the reader knows shows where it occurs.
+      // VaultError, a recorded one written from its record and the action as
+      // copied at the door, any other with the credential stripped from
+      // message and details. The injector-authored arms audit the VaultErrors
+      // they throw; a raw throw provably had no row, so it gets the engine's
+      // (N16). An audit write that fails here is itself routed through the
+      // same throw — the failure to record replaces the original error,
+      // redacted (D1a-3). A bootstrap's error is never scanned: a recorded one
+      // leaves from its record, any other with its code and one fixed text,
+      // since a password stripped from a text the reader knows shows where it
+      // occurs.
       if (!(err instanceof VaultError)) {
         try {
           this.auditUse(
@@ -2562,14 +2607,14 @@ export class VaultEngine {
           const unrecorded =
             auditErr instanceof VaultError
               ? auditErr
-              : VaultError.internalError("the audit write failed unexpectedly");
-          if (plan !== undefined) throw unrecorded;
-          throw redactErrorMessage(unrecorded, [Buffer.from(value).toString("utf8")]);
+              : VaultError.internalError(vaultText`the audit write failed unexpectedly`);
+          if (plan !== undefined) throw leaveFixed(unrecorded, { action, handle });
+          throw leaveError(unrecorded, [Buffer.from(value).toString("utf8")], { action, handle });
         }
       }
       const thrown = toVaultError(err);
-      if (plan !== undefined) throw thrown;
-      throw redactErrorMessage(thrown, [Buffer.from(value).toString("utf8")]);
+      if (plan !== undefined) throw leaveFixed(thrown, { action, handle });
+      throw leaveError(thrown, [Buffer.from(value).toString("utf8")], { action, handle });
     } finally {
       wipeBuffer(value);
       if (use !== undefined) this.openUses.delete(use);
@@ -3599,9 +3644,10 @@ export class VaultEngine {
   }
 
   /**
-   * B7 for a judged bootstrap, from the dispatch, whose choke point wipes the value and throws a
-   * bootstrap's errors as they stand, so no `VaultError` thrown here may hold a byte of the host's
-   * or of the value:
+   * B7 for a judged bootstrap, from the dispatch, whose choke point wipes the value and writes a
+   * bootstrap's recorded error from its record and any other as its code and one fixed text, so
+   * every `VaultError` thrown here is assembled from parts and holds no byte of the host's or of
+   * the value:
    * the value's shape; the mark claimed with the row that began, in one transaction that reads
    * the secret's status again; the hold noted before the first wait; one call of the injector;
    * then, only with the keys the call began under, the outcome's transaction — its row, and
@@ -3657,7 +3703,7 @@ export class VaultEngine {
       return { kind: "refused", error, endsChild: true };
     });
     if (claimed.kind === "unusable") {
-      let refusal: unknown = VaultError.secretRevoked(handle);
+      let refusal: unknown = VaultError.secretRevoked(echoHandle(handle));
       try {
         if (claimed.current !== undefined) s.secretManager.assertUsable(claimed.current, handle);
       } catch (err) {
@@ -3957,12 +4003,12 @@ export class VaultEngine {
    * decrypted; the registration; the key's decrypt and each slot's, bound to the judged ids;
    * each value's shape and the content in one buffer; the one spawn; then `K` and every `S` in
    * one transaction. From the registration on exactly one of the call, the call's own seal and
-   * `wipeKeys`' seal writes those rows; after a seal every way out answers `VAULT_LOCKED`. The
-   * arm's own errors and the run's `not_spawned` one leave as they stand: their texts hold no
-   * value and no byte of the host, and a marker in one would show where a value is part of it.
-   * Only a `VaultError` thrown where the arm expects none is stripped of the key and the values.
-   * It is called before the generic decrypt and never reaches the dispatch's choke point: its
-   * rows, its wipes and its redaction are its own.
+   * `wipeKeys`' seal writes those rows; after a seal every way out answers `VAULT_LOCKED`. From
+   * the key's decrypt on, every way out is passed once: a recorded error leaves from its record,
+   * any other with its code and one fixed text, since a marker in a text the vault wrote would
+   * show where a value is part of it. The key's own decrypt failure alone leaves as it stands: no
+   * value of the call is in use at that point. It is called before the generic decrypt and
+   * never reaches the dispatch's choke point: its rows, its wipes and its error texts are its own.
    */
   private async runSftpRender(
     s: UnlockedState,
@@ -4072,23 +4118,26 @@ export class VaultEngine {
           // The wipe goes on: a failed write must not keep the keys in memory.
         }
       };
+      const exit = (err: VaultError): VaultError => {
+        answer = leaveFixed(err, { handle });
+        return answer;
+      };
       const record = (outcome: RenderRecord): boolean => {
         if (!close()) return false;
         try {
           writeRows(outcome);
         } catch (auditErr) {
-          answer =
+          throw exit(
             auditErr instanceof VaultError
               ? auditErr
-              : VaultError.internalError("the audit write failed unexpectedly");
-          throw answer;
+              : VaultError.internalError(vaultText`the audit write failed unexpectedly`),
+          );
         }
         return true;
       };
       const fail = (outcome: RenderRecord, err: VaultError): VaultError => {
         record(outcome);
-        answer = err;
-        return err;
+        return exit(err);
       };
       const afterWait = (): void => {
         if (!this.holdsCallKeys(s)) {
@@ -4122,7 +4171,8 @@ export class VaultEngine {
         } catch (err) {
           if (sealed) throw VaultError.vaultLocked();
           const refused = toUseError(err);
-          fail({ written: control.written, flags, error: refused.code }, refused);
+          record({ written: control.written, flags, error: refused.code });
+          answer = refused;
           await s.mcpRegistry.terminate(secret.id, "secret_unusable", attribution);
           throw refused;
         }
@@ -4191,14 +4241,11 @@ export class VaultEngine {
         } catch (err) {
           afterWait();
           if (err instanceof VaultError) {
-            throw fail(
-              { written: control.written, flags, error: err.code },
-              redactErrorMessage(err, redact) as VaultError,
-            );
+            throw fail({ written: control.written, flags, error: err.code }, err);
           }
           throw fail(
             { written: control.written, flags, error: ErrorCode.INTERNAL_ERROR },
-            VaultError.internalError("the injection context failed unexpectedly"),
+            VaultError.internalError(vaultText`the injection context failed unexpectedly`),
           );
         }
         afterWait();
@@ -4239,12 +4286,14 @@ export class VaultEngine {
         if (!record(outcome)) throw VaultError.vaultLocked();
         return { type: "sftp_render", status: "written" };
       } catch (err) {
-        if (sealed) throw VaultError.vaultLocked();
+        if (sealed) throw exit(VaultError.vaultLocked());
         if (err === answer) throw err;
         record({ written: control.written, flags, error: errorCodeOf(err) });
-        throw err instanceof VaultError
-          ? (redactErrorMessage(err, redact) as VaultError)
-          : VaultError.internalError("the injection context failed unexpectedly");
+        throw exit(
+          err instanceof VaultError
+            ? err
+            : VaultError.internalError(vaultText`the injection context failed unexpectedly`),
+        );
       }
     } finally {
       if (seal !== undefined) this.openRenders.delete(seal);
@@ -4713,8 +4762,12 @@ export class VaultEngine {
     return policy;
   }
 
-  /** Load a secret's downstream MCP server config, or undefined when unset. */
-  private loadMcpServerConfig(s: UnlockedState, secretId: string): McpServerConfig | undefined {
+  /** Load a secret's downstream MCP server config, or undefined when unset; `value` is the use's decrypted value, if any. */
+  private loadMcpServerConfig(
+    s: UnlockedState,
+    secretId: string,
+    value?: Uint8Array,
+  ): McpServerConfig | undefined {
     const row = s.store.getMcpServer(secretId);
     if (!row) return undefined;
     const bytes = decrypt(
@@ -4728,16 +4781,14 @@ export class VaultEngine {
     try {
       raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
     } catch {
-      throw VaultError.vaultCorrupted(`MCP server config for secret ${secretId} is not JSON`);
+      throw configCorrupted(vaultText`MCP server config`, secretId, value);
     }
     const parsed = mcpServerConfigSchema.safeParse(raw);
     if (!parsed.success) {
       const paths = parsed.error.issues.map(
         (issue) => issue.path.map(String).join(".") || "<root>",
       );
-      throw VaultError.vaultCorrupted(
-        `MCP server config for secret ${secretId} is malformed (${paths.join(", ")})`,
-      );
+      throw configCorrupted(vaultText`MCP server config`, secretId, value, paths);
     }
     return parsed.data;
   }
@@ -4912,8 +4963,12 @@ export class VaultEngine {
   // Connection config (database TLS, SSH host keys, mail TLS, the Git-HTTPS and HTTP CA pins)
   // ---------------------------------------------------------------------------
 
-  /** Load a secret's endpoint-authentication config, or undefined when unset. */
-  private loadConnectionConfig(s: UnlockedState, secretId: string): ConnectionConfig | undefined {
+  /** Load a secret's endpoint-authentication config, or undefined when unset; `value` is the use's decrypted value, if any. */
+  private loadConnectionConfig(
+    s: UnlockedState,
+    secretId: string,
+    value?: Uint8Array,
+  ): ConnectionConfig | undefined {
     const row = s.store.getConnectionConfig(secretId);
     if (!row) return undefined;
     const bytes = decrypt(
@@ -4927,16 +4982,14 @@ export class VaultEngine {
     try {
       raw = JSON.parse(Buffer.from(bytes).toString("utf8"));
     } catch {
-      throw VaultError.vaultCorrupted(`Connection config for secret ${secretId} is not JSON`);
+      throw configCorrupted(vaultText`Connection config`, secretId, value);
     }
     const parsed = connectionConfigSchema.safeParse(raw);
     if (!parsed.success) {
       const paths = parsed.error.issues.map(
         (issue) => issue.path.map(String).join(".") || "<root>",
       );
-      throw VaultError.vaultCorrupted(
-        `Connection config for secret ${secretId} is malformed (${paths.join(", ")})`,
-      );
+      throw configCorrupted(vaultText`Connection config`, secretId, value, paths);
     }
     return parsed.data;
   }
@@ -5565,7 +5618,7 @@ export class VaultEngine {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
-      throw VaultError.oauthRefreshFailed(err instanceof Error ? err.message : "Network error");
+      throw VaultError.oauthRefreshFailed(unreachedTokenEndpoint(err));
     }
 
     if (!response.ok) {

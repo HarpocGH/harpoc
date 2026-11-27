@@ -4,7 +4,7 @@ import {
   stat as nodeStat,
 } from "node:fs/promises";
 import { basename } from "node:path";
-import type { InjectionPolicy, SmtpAction, SmtpResult } from "@harpoc/shared";
+import type { InjectionPolicy, SmtpAction, SmtpResult, VaultText } from "@harpoc/shared";
 import {
   ActionType,
   DEFAULT_HTTP_TIMEOUT_MS,
@@ -15,16 +15,19 @@ import {
   MAX_SMTP_ATTACHMENTS,
   MIN_REDACTABLE_FRAGMENT,
   VaultError,
+  echoField,
   matchesRecipientPattern,
+  num,
+  vaultText,
 } from "@harpoc/shared";
 import { matchesHostPortAllowlist } from "./allowlist.js";
+import { passError } from "./error-pass.js";
 import type { DaemonPaths, LocalPathRefusal } from "./local-path.js";
 import { judgeLocalPath } from "./local-path.js";
 import type { MimeAttachment } from "./mail/mime.js";
 import { assembleMessage } from "./mail/mime.js";
 import type { SmtpAuth, SmtpSendOptions } from "./mail/smtp-client.js";
 import { sendSmtp as realSendSmtp } from "./mail/smtp-client.js";
-import { redactErrorMessage } from "./output-sanitizer.js";
 import { validateHostPort } from "./url-validator.js";
 
 /**
@@ -87,12 +90,12 @@ export interface SmtpInjectorDeps {
   daemon?: () => DaemonPaths | undefined;
 }
 
-const NOT_LISTED = "an attachment path is not inside a directory the secret's policy lists";
+const NOT_LISTED = vaultText`an attachment path is not inside a directory the secret's policy lists`;
 
-const ATTACHMENT_REFUSALS: Record<LocalPathRefusal, string> = {
+const ATTACHMENT_REFUSALS: Record<LocalPathRefusal, VaultText> = {
   not_absolute: NOT_LISTED,
-  device: "an attachment path names a device",
-  network_share: "an attachment path names a network share",
+  device: vaultText`an attachment path names a device`,
+  network_share: vaultText`an attachment path names a network share`,
   glob: NOT_LISTED,
   win32_name: NOT_LISTED,
   dot_segment: NOT_LISTED,
@@ -133,7 +136,7 @@ export function buildSmtpAuditDetails(
  * nothing but a regular file) and the size caps (checked via `realpath` and
  * `stat` BEFORE any byte is read — an over-policy send never reads a local
  * file), then SSRF pre-flight with address pinning. Every throw
- * leaves the injector with the credential stripped (`redactErrorMessage`), and
+ * leaves the injector with the credential stripped (`passError`), and
  * `assembleMessage`'s plain-`Error` reserved-header guard is translated to a
  * `VaultError` so no raw error escapes.
  *
@@ -170,9 +173,9 @@ export class SmtpInjector {
     // path (SMTP joins the HTTP rule: origin-only, credential stripped).
     const material = redactionMaterial(secretValue, oauth);
     try {
-      return await this.execute(action, secretValue, policy, connection, oauth, signal);
+      return await this.execute(action, secretValue, policy, connection, oauth, material, signal);
     } catch (err) {
-      throw redactThrown(err, material);
+      throw passError(err, material);
     }
   }
 
@@ -182,13 +185,14 @@ export class SmtpInjector {
     policy: InjectionPolicy,
     connection: MailTlsConfig | undefined,
     oauth: SmtpOAuth | undefined,
+    material: string[],
     signal: AbortSignal | undefined,
   ): Promise<SmtpExecution> {
-    const { host, port } = resolveHostPort(action);
+    const { host, port, target } = resolveHostPort(action);
 
     // 1. Host allowlist (deny-by-default, atop the mandatory SSRF floor).
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
-      throw VaultError.hostNotAllowed(`${host}:${port}`);
+      throw VaultError.hostNotAllowed(target);
     }
 
     // 2. Recipient rules (the exfiltration coupling — design §5.2).
@@ -204,8 +208,8 @@ export class SmtpInjector {
     // attachments); an empty allowlist leaves a body-only send unrestricted.
     if (allowlist.length > 0) {
       for (const recipient of recipients) {
-        if (!matchesRecipientPattern(recipient, allowlist)) {
-          throw VaultError.recipientNotAllowed(recipient);
+        if (!matchesRecipientPattern(recipient.address, allowlist)) {
+          throw VaultError.recipientNotAllowed(echoField(action, ...recipient.path));
         }
       }
     }
@@ -216,7 +220,9 @@ export class SmtpInjector {
     //    policy string; it never carries a path or content.
     const specs = action.attachments ?? [];
     if (specs.length > MAX_SMTP_ATTACHMENTS) {
-      throw VaultError.attachmentRejected(`too many attachments (max ${MAX_SMTP_ATTACHMENTS})`);
+      throw VaultError.attachmentRejected(
+        vaultText`too many attachments (max ${num(MAX_SMTP_ATTACHMENTS)})`,
+      );
     }
     const sources: { spec: (typeof specs)[number]; source: string }[] = [];
     for (const spec of specs) {
@@ -238,18 +244,18 @@ export class SmtpInjector {
     for (const { source } of sources) {
       const stats = await this.stat(source);
       if (!stats.isFile()) {
-        throw VaultError.attachmentRejected("an attachment path is not a regular file");
+        throw VaultError.attachmentRejected(vaultText`an attachment path is not a regular file`);
       }
       const size = stats.size;
       if (size > MAX_ATTACHMENT_BYTES) {
         throw VaultError.attachmentRejected(
-          `an attachment exceeds the ${MAX_ATTACHMENT_BYTES}-byte per-file limit`,
+          vaultText`an attachment exceeds the ${num(MAX_ATTACHMENT_BYTES)}-byte per-file limit`,
         );
       }
       total += size;
       if (total > MAX_ATTACHMENT_TOTAL_BYTES) {
         throw VaultError.attachmentRejected(
-          `attachments exceed the ${MAX_ATTACHMENT_TOTAL_BYTES}-byte per-message limit`,
+          vaultText`attachments exceed the ${num(MAX_ATTACHMENT_TOTAL_BYTES)}-byte per-message limit`,
         );
       }
     }
@@ -286,14 +292,18 @@ export class SmtpInjector {
     } catch (err) {
       if (err instanceof VaultError) throw err;
       throw VaultError.invalidInput(
-        "message assembly failed: a reserved or malformed header field was supplied",
+        vaultText`message assembly failed: a reserved or malformed header field was supplied`,
       );
     }
 
     // 6. SSRF pre-flight: reject private/internal targets and pin the dialed
     //    address so the socket cannot be re-resolved (TLS identity stays bound
     //    to the logical host — mirrors the database injector).
-    const validated = await validateHostPort(host, port);
+    const sentHost = echoField(action, "host");
+    const validated = await validateHostPort(host, port, {
+      parts: sentHost,
+      values: [secretValue, ...material],
+    });
     if (signal?.aborted) throw VaultError.vaultLocked();
     const pinnedAddress = validated.resolvedAddress;
 
@@ -306,13 +316,16 @@ export class SmtpInjector {
     // 9. Send. bcc is in the envelope recipients but was never written into the
     //    message headers (mime.ts has no bcc channel).
     const timeoutMs = action.timeout_ms ?? DEFAULT_HTTP_TIMEOUT_MS;
+    const envelope = recipients.map((recipient) => recipient.address);
     const { accepted } = await this.sendSmtp({
       host,
       port,
+      origin: target,
+      sentHost,
       address: pinnedAddress,
       security: action.security,
       auth,
-      envelope: { from: action.from, recipients },
+      envelope: { from: action.from, recipients: envelope },
       message: assembled.message,
       timeoutMs,
       tls,
@@ -320,7 +333,7 @@ export class SmtpInjector {
 
     return {
       result: { type: ActionType.SMTP, accepted, message_id: assembled.messageId },
-      auditDetails: { ...buildSmtpAuditDetails(action, resolved), recipients },
+      auditDetails: { ...buildSmtpAuditDetails(action, resolved), recipients: envelope },
     };
   }
 }
@@ -343,9 +356,29 @@ export async function executeSmtpAction(
   return result;
 }
 
+/** A recipient of the envelope and the field and index the action first sent it at. */
+interface Recipient {
+  address: string;
+  path: readonly ["to" | "cc" | "bcc", number];
+}
+
 /** The deduplicated to ∪ cc ∪ bcc recipient union, in envelope order. */
-function collectRecipients(action: SmtpAction): string[] {
-  return [...new Set([...action.to, ...(action.cc ?? []), ...(action.bcc ?? [])])];
+function collectRecipients(action: SmtpAction): Recipient[] {
+  const sent = [
+    ["to", [...action.to]],
+    ["cc", [...(action.cc ?? [])]],
+    ["bcc", [...(action.bcc ?? [])]],
+  ] as const;
+  const seen = new Set<string>();
+  const recipients: Recipient[] = [];
+  for (const [field, addresses] of sent) {
+    addresses.forEach((address, index) => {
+      if (seen.has(address)) return;
+      seen.add(address);
+      recipients.push({ address, path: [field, index] });
+    });
+  }
+  return recipients;
 }
 
 function auditRecipients(action: SmtpAction): string[] {
@@ -359,19 +392,31 @@ function auditRecipients(action: SmtpAction): string[] {
  * STARTTLS); a `host:port` embedded in the host field is honored unless an
  * explicit `port` overrides it (mirrors the database injector).
  */
-function resolveHostPort(action: SmtpAction): { host: string; port: number } {
+function resolveHostPort(action: SmtpAction): { host: string; port: number; target: VaultText } {
   const hostField: unknown = action.host;
-  if (typeof hostField !== "string") throw VaultError.invalidInput("host must be a string");
+  if (typeof hostField !== "string") {
+    throw VaultError.invalidInput(vaultText`host must be a string`);
+  }
   const fallback = action.security === "tls" ? DEFAULT_SMTP_TLS_PORT : DEFAULT_SMTP_STARTTLS_PORT;
   const match = /^(.*):(\d+)$/.exec(action.host);
   if (match && match[1] !== undefined && match[2] !== undefined) {
     const embedded = Number.parseInt(match[2], 10);
     if (embedded < 1 || embedded > 65_535) {
-      throw VaultError.invalidInput("embedded port out of range (1-65535)");
+      throw VaultError.invalidInput(vaultText`embedded port out of range (1-65535)`);
     }
-    return { host: match[1], port: action.port ?? embedded };
+    const port = action.port ?? embedded;
+    return { host: match[1], port, target: targetText(action, true, port) };
   }
-  return { host: action.host, port: action.port ?? fallback };
+  const port = action.port ?? fallback;
+  return { host: action.host, port, target: targetText(action, false, port) };
+}
+
+/** The target as the action named it: the host field as sent, and the port unless the field embeds one and the action sent none. */
+function targetText(action: SmtpAction, embedsPort: boolean, port: number): VaultText {
+  const sent: unknown = action.port;
+  const host = echoField(action, "host");
+  if (embedsPort && (sent === undefined || sent === null)) return vaultText`${host}`;
+  return vaultText`${host}:${typeof sent === "string" ? echoField(action, "port") : num(port)}`;
 }
 
 /** XOAUTH2 when an OAuth token is present, else the `username:password` arm. */
@@ -381,7 +426,7 @@ function buildAuth(secretValue: string, oauth: SmtpOAuth | undefined): SmtpAuth 
   }
   const i = secretValue.indexOf(":");
   if (i < 0) {
-    throw VaultError.invalidInput("SMTP secret must be in 'username:password' form");
+    throw VaultError.invalidInput(vaultText`SMTP secret must be in 'username:password' form`);
   }
   return {
     kind: "password",
@@ -403,13 +448,4 @@ function redactionMaterial(secretValue: string, oauth: SmtpOAuth | undefined): s
   const password = secretValue.slice(i + 1);
   const user = secretValue.slice(0, i);
   return user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
-}
-
-/** Strip every credential fragment from a thrown error, in turn. */
-function redactThrown(err: unknown, material: string[]): unknown {
-  let out = err;
-  for (const secret of material) {
-    if (secret.length > 0) out = redactErrorMessage(out, [secret]);
-  }
-  return out;
 }

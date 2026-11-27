@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, vaultText } from "@harpoc/shared";
 import { forceFsIsolationUnavailableForTests, requireFsIsolation } from "@harpoc/core";
 import type { FsIsolationMechanism } from "@harpoc/core";
 import { createTestVault, destroyTestVault } from "./helpers/engine-factory.js";
@@ -164,7 +164,7 @@ describe("filesystem isolation — fail-closed refusal", () => {
   // force-hook stands in (only unavailability can be forced — tightening).
   beforeEach(() => {
     if (process.platform !== "win32") {
-      forceFsIsolationUnavailableForTests("forced for integration test");
+      forceFsIsolationUnavailableForTests(vaultText`forced for integration test`);
     }
   });
 

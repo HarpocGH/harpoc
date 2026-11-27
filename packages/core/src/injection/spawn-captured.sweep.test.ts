@@ -3,6 +3,7 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { vaultText } from "@harpoc/shared";
 import { sweepDescendants } from "./descendant-sweep.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { forceJobWrapperUnavailableForTests } from "./win32-job-wrapper.js";
@@ -51,7 +52,7 @@ function replaceTaskkill(script: string): void {
 let leftAlive: number | undefined;
 
 beforeEach(() => {
-  forceJobWrapperUnavailableForTests("test: the taskkill tier");
+  forceJobWrapperUnavailableForTests(vaultText`test: the taskkill tier`);
   // mockReset() leaves an undefined-returning mock, and the production code
   // chains `.catch` on the call — give every test a resolving default.
   sweepMock.mockReset();

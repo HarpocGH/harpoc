@@ -11,7 +11,7 @@ import {
   sep,
   win32,
 } from "node:path";
-import { VaultError } from "@harpoc/shared";
+import { VaultError, vaultText } from "@harpoc/shared";
 import { isHeldPath } from "../session/path-trust.js";
 import { hasGitDirectoryShape, holdsDotGitName } from "./local-path-git.js";
 
@@ -486,17 +486,17 @@ export async function judgeLocalPath(
 }
 
 const SFTP_REFUSALS: Record<LocalPathRefusal, () => VaultError> = {
-  not_absolute: () => VaultError.invalidInput("sftp local path must be absolute"),
-  device: () => VaultError.invalidInput("sftp local path names a device"),
-  network_share: () => VaultError.invalidInput("sftp local path names a network share"),
-  glob: () => VaultError.invalidInput("sftp local path must not contain glob characters"),
+  not_absolute: () => VaultError.invalidInput(vaultText`sftp local path must be absolute`),
+  device: () => VaultError.invalidInput(vaultText`sftp local path names a device`),
+  network_share: () => VaultError.invalidInput(vaultText`sftp local path names a network share`),
+  glob: () => VaultError.invalidInput(vaultText`sftp local path must not contain glob characters`),
   win32_name: () =>
-    VaultError.invalidInput("sftp local path holds a name Windows reads differently"),
-  dot_segment: () => VaultError.invalidInput("sftp local path must not hold a .. segment"),
-  dot_git: () => VaultError.invalidInput("sftp local path must not hold a .git segment"),
+    VaultError.invalidInput(vaultText`sftp local path holds a name Windows reads differently`),
+  dot_segment: () => VaultError.invalidInput(vaultText`sftp local path must not hold a .. segment`),
+  dot_git: () => VaultError.invalidInput(vaultText`sftp local path must not hold a .git segment`),
   protected: () => VaultError.localPathNotAllowed(),
   not_allowed: () => VaultError.localPathNotAllowed(),
-  is_directory: () => VaultError.invalidInput("sftp download path must name a file"),
+  is_directory: () => VaultError.invalidInput(vaultText`sftp download path must name a file`),
 };
 
 /**

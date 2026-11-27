@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, recordOf } from "@harpoc/shared";
 import { EphemeralSshAgent } from "./index.js";
 import { connectAgent, parseIdentities, requestIdentities } from "../__fixtures__/agent-client.js";
 import type { AgentClient } from "../__fixtures__/agent-client.js";
@@ -71,6 +71,31 @@ describe("EphemeralSshAgent.start — the bind", () => {
     );
     expect(err.message).toBe(`${BIND_REFUSAL} (unknown error)`);
     expect(listen).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      what: "an errno code",
+      err: Object.assign(new Error(`listen ${NODE_TEXT_MARKER}`), { code: "EMFILE" }),
+      word: "EMFILE",
+    },
+    {
+      what: "a code no errno names",
+      err: Object.assign(new Error(`listen ${NODE_TEXT_MARKER}`), { code: NODE_TEXT_MARKER }),
+      word: "unknown error",
+    },
+    { what: "no code", err: new Error(`listen ${NODE_TEXT_MARKER}`), word: "unknown error" },
+  ])("a bind refusal with $what is assembled from parts", async ({ err, word }) => {
+    failNextBind(listen, err);
+
+    const refusal = await expectVaultError(
+      () => EphemeralSshAgent.start(KEY_PEM),
+      ErrorCode.SSH_AGENT_FAILED,
+    );
+
+    expectAbsent(refusal.message, NODE_TEXT_MARKER);
+    expect(refusal.message).toBe(`${BIND_REFUSAL} (${word})`);
+    expect(recordOf(refusal)).toBeDefined();
   });
 
   it("an error emitted on the bound server throws nothing, and the agent still answers REQUEST_IDENTITIES", async () => {

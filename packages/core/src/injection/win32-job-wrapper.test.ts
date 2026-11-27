@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isVaultText, renderVaultText, vaultText } from "@harpoc/shared";
 import { expectAbsent } from "@harpoc/test-utils";
 import {
   JOB_WRAPPER_COMPILE_TIMEOUT_MS,
@@ -31,7 +32,12 @@ import {
   setJobWrapperUnavailableHandler,
   wrapInJob,
 } from "./win32-job-wrapper.js";
-import type { JobWrap, JobWrapperResolution, JobWrapperSeams } from "./win32-job-wrapper.js";
+import type {
+  JobWrap,
+  JobWrapMiss,
+  JobWrapperResolution,
+  JobWrapperSeams,
+} from "./win32-job-wrapper.js";
 
 const TRICKY = [
   "a b",
@@ -55,6 +61,20 @@ function codedError(code: string, message: string): NodeJS.ErrnoException {
   const err = new Error(message) as NodeJS.ErrnoException;
   err.code = code;
   return err;
+}
+
+/** The owner restriction as the wrapper runs it, its icacls exiting `status`. */
+function failingRestriction(status: number): (dir: string) => void {
+  return (target) =>
+    restrictToOwner(target, {
+      account: "alice",
+      spawnSync: (() => ({
+        status,
+        error: undefined,
+        stdout: Buffer.from(""),
+        stderr: Buffer.from(""),
+      })) as unknown as typeof spawnSync,
+    });
 }
 
 function reasonOf(resolution: JobWrapperResolution): string | undefined {
@@ -170,9 +190,7 @@ describe("resolveJobWrapper", () => {
     writeFileSync(exe, "MZ-existing");
     const r = await resolveJobWrapper(
       seams({
-        restrictDir: () => {
-          throw new Error("ACL restriction failed (exit 5)");
-        },
+        restrictDir: failingRestriction(5),
       }),
     );
     expect(r).toEqual({ unavailable: expect.stringMatching(/ACL restriction failed \(exit 5\)/) });
@@ -245,7 +263,7 @@ describe("resolveJobWrapper", () => {
         },
       }),
     );
-    expect(r).toEqual({ unavailable: "resolution failed: boom" });
+    expect(r).toEqual({ unavailable: "resolution failed: unknown error" });
   });
 
   it("falls through to the home helpers dir, restricted to the owner, when the first dir is not writable", async () => {
@@ -260,9 +278,7 @@ describe("resolveJobWrapper", () => {
     writeFileSync(join(dir, "dist-win32"), "a file where the dir should be");
     const r = await resolveJobWrapper(
       seams({
-        restrictDir: () => {
-          throw new Error("ACL restriction failed (exit 5)");
-        },
+        restrictDir: failingRestriction(5),
       }),
     );
     expect(r).toEqual({ unavailable: expect.stringMatching(/ACL restriction failed \(exit 5\)/) });
@@ -313,7 +329,7 @@ describe("resolveJobWrapper", () => {
     const r = await resolveJobWrapper(
       seams({ runHelper: () => Promise.reject(new Error("boom")) }),
     );
-    expect(r).toEqual({ unavailable: "compile failed: csc did not complete: boom" });
+    expect(r).toEqual({ unavailable: "compile failed: csc did not complete: unknown error" });
   });
 
   it("a compiler that cannot be spawned is named by its errno code, never the spawn error's text (L9)", async () => {
@@ -361,7 +377,7 @@ describe("resolveJobWrapper", () => {
   });
 
   it("honours the forced-unavailable seam ahead of everything", async () => {
-    forceJobWrapperUnavailableForTests("test: fallback tier");
+    forceJobWrapperUnavailableForTests(vaultText`test: fallback tier`);
     expect(await resolveJobWrapper(seams())).toEqual({ unavailable: "test: fallback tier" });
     expect(calls).toHaveLength(0);
   });
@@ -390,7 +406,7 @@ describe("the unavailable handler (note 2, 2026-09-10)", () => {
     const seen: string[] = [];
     setJobWrapperUnavailableHandler((reason) => seen.push(reason));
     await resolveJobWrapper(seams({ platform: "linux" }));
-    forceJobWrapperUnavailableForTests("test: forced");
+    forceJobWrapperUnavailableForTests(vaultText`test: forced`);
     await resolveJobWrapper(seams());
     forceJobWrapperUnavailableForTests(null);
     expect(seen).toEqual([]);
@@ -528,15 +544,19 @@ describe("wrapInJob", () => {
   });
 
   it("a miss carries the resolver's reason", async () => {
-    expect(await wrapInJob("x", [], "keep", seams({ platform: "darwin" }))).toEqual({
-      mechanism: null,
-      reason: "unsupported platform: darwin",
-    });
+    const darwin = (await wrapInJob("x", [], "keep", seams({ platform: "darwin" }))) as JobWrapMiss;
     resetJobWrapperProbeForTests();
-    expect(await wrapInJob("x", [], "strict", seams({ runHelper: fakeHelper(0, 9010) }))).toEqual({
-      mechanism: null,
-      reason: "probe run exited 9010",
-    });
+    const probed = (await wrapInJob(
+      "x",
+      [],
+      "strict",
+      seams({ runHelper: fakeHelper(0, 9010) }),
+    )) as JobWrapMiss;
+    expect([darwin, probed].every((miss) => isVaultText(miss.reason))).toBe(true);
+    expect([darwin, probed].map((miss) => [miss.mechanism, renderVaultText(miss.reason)])).toEqual([
+      [null, "unsupported platform: darwin"],
+      [null, "probe run exited 9010"],
+    ]);
   });
 });
 

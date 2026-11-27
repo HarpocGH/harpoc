@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { VaultError } from "@harpoc/shared";
+import type { VaultText } from "@harpoc/shared";
+import { VaultError, token, vaultText } from "@harpoc/shared";
 import { BWRAP_NETWORK_PREFIX_ARGS, LINUX_BWRAP_CANDIDATES } from "./bwrap.js";
+import { PLATFORM_WORDS } from "./error-words.js";
 
 /**
  * Network isolation for process-mediated spawns (thesis §4.5.3 layer 4).
@@ -88,7 +90,7 @@ function requireProbePayload(probeBinary: (path: string) => boolean): string {
   const trueBin = findPinnedBinary(POSIX_TRUE_CANDIDATES, probeBinary);
   if (!trueBin) {
     throw VaultError.networkIsolationUnavailable(
-      "no /usr/bin/true or /bin/true available for the capability probe",
+      vaultText`no /usr/bin/true or /bin/true available for the capability probe`,
     );
   }
   return trueBin;
@@ -124,13 +126,13 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
 
   if (platform === "linux") {
     const unshare = findPinnedBinary(LINUX_UNSHARE_CANDIDATES, probeBinary);
-    let primaryReason = "unshare not found in /usr/bin or /bin";
+    let primaryReason: VaultText = vaultText`unshare not found in /usr/bin or /bin`;
     if (unshare) {
       const trueBin = requireProbePayload(probeBinary);
       if (await runProbe(unshare, ["-rn", "--", trueBin])) {
         return { wrapper: unshare, prefixArgs: ["-rn", "--"], mechanism: "unshare" };
       }
-      primaryReason = "unprivileged user namespaces unavailable (unshare -rn probe failed)";
+      primaryReason = vaultText`unprivileged user namespaces unavailable (unshare -rn probe failed)`;
     }
     // Second tier (D50): consulted only once the primary is out. bwrap needs
     // the same userns grant, so it rarely rescues a network demand on its
@@ -139,13 +141,13 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
     const bwrap = findPinnedBinary(LINUX_BWRAP_CANDIDATES, probeBinary);
     if (!bwrap) {
       throw VaultError.networkIsolationUnavailable(
-        `${primaryReason}; bwrap not found in /usr/bin or /bin`,
+        vaultText`${primaryReason}; bwrap not found in /usr/bin or /bin`,
       );
     }
     const trueBin = requireProbePayload(probeBinary);
     if (!(await runProbe(bwrap, [...BWRAP_NETWORK_PREFIX_ARGS, trueBin]))) {
       throw VaultError.networkIsolationUnavailable(
-        `${primaryReason}; bwrap --unshare-net probe failed (bubblewrap needs the same unprivileged user-namespace grant as unshare)`,
+        vaultText`${primaryReason}; bwrap --unshare-net probe failed (bubblewrap needs the same unprivileged user-namespace grant as unshare)`,
       );
     }
     return { wrapper: bwrap, prefixArgs: [...BWRAP_NETWORK_PREFIX_ARGS], mechanism: "bwrap" };
@@ -154,14 +156,16 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
   if (platform === "darwin") {
     if (!probeBinary(DARWIN_SANDBOX_EXEC)) {
       throw VaultError.networkIsolationUnavailable(
-        `sandbox-exec not found at ${DARWIN_SANDBOX_EXEC}`,
+        vaultText`sandbox-exec not found at /usr/bin/sandbox-exec`,
       );
     }
     const trueBin = requireProbePayload(probeBinary);
     if (
       !(await runProbe(DARWIN_SANDBOX_EXEC, ["-p", SANDBOX_EXEC_DENY_NETWORK_PROFILE, trueBin]))
     ) {
-      throw VaultError.networkIsolationUnavailable("sandbox-exec deny-network probe failed");
+      throw VaultError.networkIsolationUnavailable(
+        vaultText`sandbox-exec deny-network probe failed`,
+      );
     }
     return {
       wrapper: DARWIN_SANDBOX_EXEC,
@@ -170,7 +174,9 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
     };
   }
 
-  throw VaultError.networkIsolationUnavailable(`unsupported platform: ${platform}`);
+  throw VaultError.networkIsolationUnavailable(
+    vaultText`unsupported platform: ${token(platform, PLATFORM_WORDS)}`,
+  );
 }
 
 /**
@@ -186,7 +192,7 @@ async function resolveIsolation(seams?: NetworkIsolationSeams): Promise<Resolved
  * must reset between seam configs.
  */
 let cachedResolution: Promise<ResolvedIsolation> | null = null;
-let forcedUnavailableForTests: string | null = null;
+let forcedUnavailableForTests: VaultText | null = null;
 
 /**
  * Wrap an already-resolved command in the platform's network-isolation prefix,
@@ -226,6 +232,6 @@ export function resetNetworkIsolationProbeForTests(): void {
  * fail-closed path on hosts where the probe would succeed. Only unavailability
  * can be forced (tightening); there is no way to force "available".
  */
-export function forceNetworkIsolationUnavailableForTests(reason: string | null): void {
+export function forceNetworkIsolationUnavailableForTests(reason: VaultText | null): void {
   forcedUnavailableForTests = reason;
 }

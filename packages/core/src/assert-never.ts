@@ -1,4 +1,5 @@
-import { VaultError } from "@harpoc/shared";
+import type { TextPart, VaultText } from "@harpoc/shared";
+import { VaultError, renderVaultText, vaultText } from "@harpoc/shared";
 
 /**
  * Compile-time exhaustiveness guard (fail-safe defaults, thesis §5.3.1).
@@ -6,8 +7,10 @@ import { VaultError } from "@harpoc/shared";
  * value typed `never`: adding a union member without an explicit arm makes the
  * call a type error. A value that evades the type system anyway (plain-JS
  * callers, corrupted input) is rejected at runtime rather than passed through.
+ * A caller that holds the value's type as a part hands it in `named`.
  */
-export function assertNever(value: never, what: string): never {
+export function assertNever(value: never, what: VaultText, named?: TextPart): never {
+  if (named !== undefined) throw VaultError.invalidInput(vaultText`Unsupported ${what}: ${named}`);
   const type = (value as { type?: string } | null)?.type;
-  throw VaultError.invalidInput(`Unsupported ${what}: ${type ?? String(value)}`);
+  throw VaultError.invalidInput(`Unsupported ${renderVaultText(what)}: ${type ?? String(value)}`);
 }

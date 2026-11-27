@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, vaultText } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STDIN_ECHO_SCRIPT, STDIN_OPEN_PIPE_SCRIPT } from "./__fixtures__/spawn-children.js";
 import { sweepDescendants } from "./descendant-sweep.js";
@@ -134,7 +134,10 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
   it.runIf(process.platform === "win32")(
     "win32: a strict spawn with no wrapper is refused before anything spawns, naming the reason",
     async () => {
-      wrapMock.mockResolvedValue({ mechanism: null, reason: "test: no wrapper on this host" });
+      wrapMock.mockResolvedValue({
+        mechanism: null,
+        reason: vaultText`test: no wrapper on this host`,
+      });
       await expect(
         spawnCaptured(NODE, ["-e", "process.exit(0)"], {
           env: ENV,
@@ -152,7 +155,10 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
   it.runIf(process.platform !== "win32")(
     "POSIX: a strict spawn runs without a wrapper, marked strict, no tree_kill",
     async () => {
-      wrapMock.mockResolvedValue({ mechanism: null, reason: "unsupported platform: linux" });
+      wrapMock.mockResolvedValue({
+        mechanism: null,
+        reason: vaultText`unsupported platform: linux`,
+      });
       const r = await spawnCaptured(NODE, ["-e", "process.exit(0)"], {
         env: ENV,
         timeoutMs: 10_000,
@@ -229,7 +235,7 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
   );
 
   it("without a wrap: tree_kill is taskkill on win32 and absent elsewhere, and the sweep path is untouched", async () => {
-    wrapMock.mockResolvedValue({ mechanism: null, reason: "test: unavailable" });
+    wrapMock.mockResolvedValue({ mechanism: null, reason: vaultText`test: unavailable` });
     const r = await spawnCaptured(NODE, ["-e", "process.exit(0)"], {
       env: ENV,
       timeoutMs: 10_000,
@@ -239,7 +245,7 @@ describe("spawnCaptured — the job wrapper seam (D4)", () => {
   });
 
   it("the spawn-failed result carries tree_kill too", async () => {
-    wrapMock.mockResolvedValue({ mechanism: null, reason: "test: unavailable" });
+    wrapMock.mockResolvedValue({ mechanism: null, reason: vaultText`test: unavailable` });
     const r = await spawnCaptured("C:\\harpoc-no-such\\app.exe", [], {
       env: ENV,
       timeoutMs: 1_000,

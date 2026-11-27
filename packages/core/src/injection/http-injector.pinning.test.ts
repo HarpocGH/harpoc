@@ -132,7 +132,18 @@ describe("HTTP DNS resolution failure", () => {
       status: null,
       error: ErrorCode.DNS_RESOLUTION_FAILED,
     });
-    expect(validateUrl).toHaveBeenCalledExactlyOnceWith(url);
+    expect(validateUrl).toHaveBeenCalledOnce();
+    const call = vi.mocked(validateUrl).mock.calls[0];
+    expect(call?.length).toBe(3);
+    expect(call?.[0]).toBe(url);
+    expect(call?.[1]).toBeUndefined();
+    expect(call?.[2]?.parts).toMatchObject({
+      kind: "echo",
+      source: "action",
+      path: ["url"],
+      shown: url,
+    });
+    expect(call?.[2]?.values.length).toBe(1);
   });
 });
 

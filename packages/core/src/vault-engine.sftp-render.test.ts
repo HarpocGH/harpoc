@@ -17,6 +17,7 @@ import {
   injectionPolicyInputSchema,
   PrincipalType,
   VaultError,
+  vaultText,
 } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import {
@@ -31,12 +32,16 @@ import { resolveNativeSshClient } from "./injection/__fixtures__/native-ssh-clie
 import { approval, ENTRY, ENTRY_ONE, keyPolicy } from "./injection/__fixtures__/render-entries.js";
 import { BLOCK, BOOT } from "./injection/__fixtures__/ssh-public-keys.js";
 import { controlledPathDirs } from "./injection/allowlist.js";
-import type { RenderPlan, RenderRun } from "./injection/sftp-render.js";
+import type { RenderPlan, RenderRun, RenderSpawnFields } from "./injection/sftp-render.js";
 import { runRender } from "./injection/sftp-render.js";
 import { EphemeralSshAgent } from "./injection/ssh-agent/index.js";
 import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
-import type { SftpRenderSeam, SshBootstrapSeam } from "./vault-engine.js";
+import type {
+  RenderSpawnAuditKeyRecord,
+  SftpRenderSeam,
+  SshBootstrapSeam,
+} from "./vault-engine.js";
 import { VaultEngine } from "./vault-engine.js";
 import { system32Path } from "./win32-paths.js";
 
@@ -1306,11 +1311,10 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
     expect(details()).toStrictEqual([k({ written: "yes", entry: "plain", slots: [] })]);
   });
 
-  itSsh("the key's row takes the seam's six spawn fields by name", async () => {
-    const six = {
+  itSsh("the key's row takes the seam's five spawn fields by name", async () => {
+    const five = {
       isolation_mechanism: "unshare",
       fs_isolation_mechanism: "landlock",
-      sanitized: true,
       descendant_sweep: { killed: 1, failed: false },
       tree_kill: "job",
       strict_tree_exit: true,
@@ -1324,7 +1328,8 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
           spawn: {
             network_isolation: true,
             fs_isolation: true,
-            ...six,
+            ...five,
+            sanitized: true,
             exit_code: 9,
             timed_out: true,
             truncated: true,
@@ -1341,13 +1346,27 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
     await expect(engine.useSecret(KEY, render(), ALICE)).resolves.toStrictEqual(RESULT);
 
     expect(details(keyId)).toStrictEqual([
-      k({ written: "yes", network_isolation: true, fs_isolation: true, ...six }),
+      k({ written: "yes", network_isolation: true, fs_isolation: true, ...five }),
     ]);
     for (const handle of SLOTS) {
       expect(details(ids[handle])).toStrictEqual([
         s({ network_isolation: true, fs_isolation: true }),
       ]);
     }
+  });
+
+  it("the lists are exhaustive by type", () => {
+    const exact: Record<
+      Exclude<keyof RenderSpawnFields, "network_isolation" | "fs_isolation">,
+      true
+    > = {} as RenderSpawnAuditKeyRecord;
+    // @ts-expect-error a field without its key
+    const widened: Record<
+      Exclude<keyof (RenderSpawnFields & { added?: true }), "network_isolation" | "fs_isolation">,
+      true
+    > = {} as RenderSpawnAuditKeyRecord;
+    expect(typeof exact).toBe("object");
+    expect(typeof widened).toBe("object");
   });
 
   itSsh.each([
@@ -1399,7 +1418,7 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
         control.written = "no";
         return {
           kind: "not_spawned",
-          error: new VaultError(ErrorCode.FS_ISOLATION_UNAVAILABLE, text),
+          error: VaultError.fsIsolationUnavailable(vaultText`no mechanism on this host`),
           ...(spawn === undefined ? {} : { spawn }),
         };
       });
@@ -1430,7 +1449,6 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
     );
 
     expectNoValue([err.message]);
-    expect(err.message).toBe("agent down for [REDACTED]");
     expectFailedRows({ error: ErrorCode.SSH_AGENT_FAILED });
   });
 
@@ -1556,6 +1574,7 @@ describe("useSecret — a render's rows and answer (step 7)", () => {
         ErrorCode.SSH_AGENT_FAILED,
       );
       const text = refusal.message;
+      expect(text).toBe("Ephemeral ssh-agent failed: unsupported or malformed private key");
       await engine.rotateSecret(BOT, bytes(word(text)));
       await engine.rotateSecret(API, bytes(word(text)));
       installRenderSeam(engine, undefined, { run: runRender });

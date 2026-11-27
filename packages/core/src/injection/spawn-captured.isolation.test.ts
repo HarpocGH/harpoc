@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, vaultText } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requireIsolation } from "./isolation.js";
 import { requireNetworkIsolation } from "./network-isolation.js";
@@ -36,7 +36,7 @@ const spawnMock = vi.mocked(spawn);
 const composerMock = vi.mocked(requireIsolation);
 
 beforeEach(() => {
-  forceJobWrapperUnavailableForTests("test: the taskkill tier");
+  forceJobWrapperUnavailableForTests(vaultText`test: the taskkill tier`);
   isolationMock.mockReset();
   spawnMock.mockClear();
 });

@@ -1,7 +1,8 @@
 import { isIP } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { ConnectionOptions, TLSSocket } from "node:tls";
-import { VaultError } from "@harpoc/shared";
+import type { TextPart, VaultText } from "@harpoc/shared";
+import { VaultError, num, token, vaultText } from "@harpoc/shared";
 import { identityCheckerFor } from "../db-adapters.js";
 import type { SmtpAuth } from "./smtp-client.js";
 
@@ -32,12 +33,24 @@ export type ImapAuth = SmtpAuth;
 export interface ImapConnectOptions {
   host: string;
   port: number;
+  /** The target a refusal names, as the caller sent it; absent, `host:port`. */
+  origin?: TextPart | VaultText;
   /** SSRF-pinned address to dial; TLS identity is verified against `host`. */
   address: string;
   auth: ImapAuth;
   timeoutMs: number;
   tls?: { ca?: string };
 }
+
+/** The parts a refusal names an operation's values by, as the caller sent them; a value without one is named as given. */
+export interface ImapOperationNames {
+  since?: TextPart;
+  parts?: TextPart;
+  addFlags?: readonly TextPart[];
+  removeFlags?: readonly TextPart[];
+}
+
+type Origin = string | TextPart | VaultText;
 
 export type ImapArg =
   | { kind: "atom"; value: string }
@@ -97,6 +110,7 @@ const MAX_LIST_DEPTH = 32;
 // beyond this length (or with any excluded byte) the value goes as a literal.
 const MAX_QUOTED_BYTES = 1024;
 const LITERAL_MARK = "\0";
+const MAILBOX_VERBS: readonly string[] = ["select", "examine"];
 
 function literalPlaceholder(index: number): string {
   return `${LITERAL_MARK}${index}${LITERAL_MARK}`;
@@ -187,7 +201,7 @@ class ImapChannel {
 
   constructor(
     private readonly stream: TLSSocket,
-    private readonly origin: string,
+    private readonly origin: Origin,
     private readonly timeoutMs: number,
   ) {
     stream.setTimeout(timeoutMs);
@@ -218,7 +232,7 @@ class ImapChannel {
   }
 
   private opError(): VaultError {
-    return VaultError.imapOperationFailed(this.origin, "read");
+    return VaultError.imapOperationFailed(this.origin, vaultText`read`);
   }
 
   nextLine(): Promise<LogicalLine> {
@@ -296,7 +310,7 @@ class ImapChannel {
       const n = Number(match[1]);
       if (n > MAX_LITERAL_BYTES) {
         // Refused at the announcement — before a single literal octet is read.
-        this.fail(VaultError.imapOperationFailed(this.origin, "read"));
+        this.fail(VaultError.imapOperationFailed(this.origin, vaultText`read`));
         return;
       }
       const before = line.slice(0, line.length - match[0].length);
@@ -351,7 +365,7 @@ function tlsOptions(opts: ImapConnectOptions): ConnectionOptions {
   };
 }
 
-function awaitSecure(socket: TLSSocket, timeoutMs: number, origin: string): Promise<void> {
+function awaitSecure(socket: TLSSocket, timeoutMs: number, origin: Origin): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     socket.setTimeout(timeoutMs);
     const cleanup = (): void => {
@@ -365,12 +379,12 @@ function awaitSecure(socket: TLSSocket, timeoutMs: number, origin: string): Prom
     };
     const onErr = (): void => {
       cleanup();
-      reject(VaultError.imapOperationFailed(origin, "connect"));
+      reject(VaultError.imapOperationFailed(origin, vaultText`connect`));
     };
     const onTimeout = (): void => {
       cleanup();
       socket.destroy();
-      reject(VaultError.imapOperationFailed(origin, "connect"));
+      reject(VaultError.imapOperationFailed(origin, vaultText`connect`));
     };
     socket.once("secureConnect", onOk);
     socket.once("error", onErr);
@@ -411,10 +425,14 @@ const IMAP_MONTHS = [
 
 /** ISO date -> IMAP SEARCH date-text (`SINCE 1-Aug-2026`) — client-computed
  * from validated numeric components, never the raw input string. */
-function formatImapDate(iso: string): string {
+function formatImapDate(iso: string, named?: TextPart): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
-    throw VaultError.invalidInput(`invalid IMAP SEARCH date: ${iso}`);
+    throw VaultError.invalidInput(
+      named === undefined
+        ? `invalid IMAP SEARCH date: ${iso}`
+        : vaultText`invalid IMAP SEARCH date: ${named}`,
+    );
   }
   const month = IMAP_MONTHS[date.getUTCMonth()] ?? "Jan";
   return `${date.getUTCDate()}-${month}-${date.getUTCFullYear()}`;
@@ -424,12 +442,12 @@ function formatImapDate(iso: string): string {
  * free text; the format is why this is safe to send as a bare atom. */
 function formatUidSet(uids: number[]): string {
   if (uids.length === 0) {
-    throw VaultError.invalidInput("at least one UID is required");
+    throw VaultError.invalidInput(vaultText`at least one UID is required`);
   }
   return uids
     .map((uid) => {
       if (!Number.isSafeInteger(uid) || uid <= 0) {
-        throw VaultError.invalidInput(`invalid IMAP UID: ${uid}`);
+        throw VaultError.invalidInput(vaultText`invalid IMAP UID: ${num(uid)}`);
       }
       return String(uid);
     })
@@ -448,11 +466,14 @@ function flagArg(flag: string): ImapArg {
 // command(), so a malformed flag never reaches the wire.
 const ATOM_FORBIDDEN_CHARS = /[\s\r\n\0(){%*"\\]/;
 
-function validateFlags(flags: string[]): void {
-  for (const flag of flags) {
+function validateFlags(flags: string[], named?: readonly TextPart[]): void {
+  for (const [index, flag] of Array.from(flags).entries()) {
     const bare = flag.startsWith("\\") ? flag.slice(1) : flag;
     if (ATOM_FORBIDDEN_CHARS.test(bare) || bare.length === 0) {
-      throw VaultError.invalidInput(`invalid IMAP flag: ${flag}`);
+      const part = named?.[index];
+      throw VaultError.invalidInput(
+        part === undefined ? `invalid IMAP flag: ${flag}` : vaultText`invalid IMAP flag: ${part}`,
+      );
     }
   }
 }
@@ -473,7 +494,7 @@ function envelopeFetchList(extra: ImapArg[]): ImapArg {
 }
 
 /** `.PEEK` everywhere so a FETCH never implicitly sets `\Seen`. */
-function fetchItemsArg(parts: ImapFetchParts): ImapArg {
+function fetchItemsArg(parts: ImapFetchParts, named?: TextPart): ImapArg {
   switch (parts) {
     case "envelope":
       return envelopeFetchList([]);
@@ -485,7 +506,11 @@ function fetchItemsArg(parts: ImapFetchParts): ImapArg {
       return envelopeFetchList([FETCH_HEADER_ITEM, FETCH_TEXT_ITEM]);
     default: {
       const exhaustive: never = parts;
-      throw VaultError.invalidInput(`unsupported IMAP fetch parts: ${String(exhaustive)}`);
+      throw VaultError.invalidInput(
+        named === undefined
+          ? `unsupported IMAP fetch parts: ${String(exhaustive)}`
+          : vaultText`unsupported IMAP fetch parts: ${named}`,
+      );
     }
   }
 }
@@ -502,7 +527,7 @@ class SExprParser {
   constructor(
     private readonly text: string,
     private readonly literals: Buffer[],
-    private readonly origin: string,
+    private readonly origin: Origin,
     private pos: number = 0,
   ) {}
 
@@ -511,7 +536,7 @@ class SExprParser {
     const ch = this.text[this.pos];
     if (ch === "(") {
       if (depth >= MAX_LIST_DEPTH) {
-        throw VaultError.imapOperationFailed(this.origin, "fetch");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`fetch`);
       }
       this.pos += 1;
       const items: SExpr[] = [];
@@ -615,7 +640,7 @@ function toEnvelope(parsed: SExpr): ImapEnvelope {
  * name — a literal where the server sent one, a quoted string or NIL — and a
  * quoted field spelling `UID 999` decides nothing. A line with no UID item is
  * skipped. */
-function parseFetchMessages(untagged: UntaggedLine[], origin: string): ImapMessage[] {
+function parseFetchMessages(untagged: UntaggedLine[], origin: Origin): ImapMessage[] {
   const messages: ImapMessage[] = [];
   for (const line of untagged) {
     const head = /^\*\s+\d+\s+FETCH\s+(?=\()/i.exec(line.raw);
@@ -675,7 +700,7 @@ export class ImapClient {
 
   private constructor(
     private readonly channel: ImapChannel,
-    private readonly origin: string,
+    private readonly origin: Origin,
     private readonly host: string,
   ) {}
 
@@ -691,7 +716,7 @@ export class ImapClient {
    * would remove it and is a documented follow-up.
    */
   static async connect(opts: ImapConnectOptions): Promise<ImapClient> {
-    const origin = `${opts.host}:${opts.port}`;
+    const origin: Origin = opts.origin ?? `${opts.host}:${opts.port}`;
     const socket = tlsConnect({ host: opts.address, port: opts.port, ...tlsOptions(opts) });
     socket.setNoDelay(true);
     try {
@@ -723,7 +748,7 @@ export class ImapClient {
     const verb = readOnly ? "EXAMINE" : "SELECT";
     const response = await this.command(verb, [{ kind: "string", value: mailbox }]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, verb.toLowerCase());
+      throw VaultError.imapOperationFailed(this.origin, token(verb.toLowerCase(), MAILBOX_VERBS));
     }
     let exists = 0;
     for (const line of response.untagged) {
@@ -738,7 +763,10 @@ export class ImapClient {
     return { exists };
   }
 
-  async searchUids(criteria: ImapSearchCriteria): Promise<number[]> {
+  async searchUids(
+    criteria: ImapSearchCriteria,
+    named: ImapOperationNames = {},
+  ): Promise<number[]> {
     const args: ImapArg[] = [];
     if (criteria.unseen) {
       args.push({ kind: "atom", value: "UNSEEN" });
@@ -746,7 +774,7 @@ export class ImapClient {
     if (criteria.since !== undefined) {
       args.push(
         { kind: "atom", value: "SINCE" },
-        { kind: "atom", value: formatImapDate(criteria.since) },
+        { kind: "atom", value: formatImapDate(criteria.since, named.since) },
       );
     }
     if (criteria.from !== undefined) {
@@ -765,14 +793,14 @@ export class ImapClient {
     }
     const response = await this.command("UID SEARCH", args);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "search");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`search`);
     }
     const uids: number[] = [];
     for (const line of response.untagged) {
       // `* SEARCH <uid> <uid> ...` — UID SEARCH reports UIDs, not sequence numbers.
       if (line.atoms[0] === "*" && line.atoms[1]?.toUpperCase() === "SEARCH") {
-        for (const token of line.atoms.slice(2)) {
-          const n = Number(token);
+        for (const atom of line.atoms.slice(2)) {
+          const n = Number(atom);
           if (Number.isFinite(n)) {
             uids.push(n);
           }
@@ -782,26 +810,35 @@ export class ImapClient {
     return uids;
   }
 
-  async fetch(uids: number[], parts: ImapFetchParts): Promise<ImapMessage[]> {
+  async fetch(
+    uids: number[],
+    parts: ImapFetchParts,
+    named: ImapOperationNames = {},
+  ): Promise<ImapMessage[]> {
     const uidSet = formatUidSet(uids);
     const response = await this.command("UID FETCH", [
       { kind: "atom", value: uidSet },
-      fetchItemsArg(parts),
+      fetchItemsArg(parts, named.parts),
     ]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "fetch");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`fetch`);
     }
     return parseFetchMessages(response.untagged, this.origin);
   }
 
   /** The returned count is the requested UID count, not a server-confirmed count. */
-  async store(uids: number[], addFlags: string[], removeFlags: string[]): Promise<number> {
+  async store(
+    uids: number[],
+    addFlags: string[],
+    removeFlags: string[],
+    named: ImapOperationNames = {},
+  ): Promise<number> {
     const uidSet = formatUidSet(uids);
     if (addFlags.length > 0) {
-      await this.runStore(uidSet, "+FLAGS", addFlags);
+      await this.runStore(uidSet, "+FLAGS", addFlags, named.addFlags);
     }
     if (removeFlags.length > 0) {
-      await this.runStore(uidSet, "-FLAGS", removeFlags);
+      await this.runStore(uidSet, "-FLAGS", removeFlags, named.removeFlags);
     }
     return uids.length;
   }
@@ -833,7 +870,7 @@ export class ImapClient {
         { kind: "string", value: targetMailbox },
       ]);
       if (response.tagged.status !== "OK") {
-        throw VaultError.imapOperationFailed(this.origin, "move");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`move`);
       }
       return uids.length;
     }
@@ -845,7 +882,7 @@ export class ImapClient {
       { kind: "string", value: targetMailbox },
     ]);
     if (copyResponse.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "move");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`move`);
     }
     await this.runStore(uidSet, "+FLAGS", ["\\Deleted"]);
     await this.uidExpunge(uidSet);
@@ -860,7 +897,7 @@ export class ImapClient {
       { kind: "string", value: targetMailbox },
     ]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "copy");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`copy`);
     }
     return uids.length;
   }
@@ -868,7 +905,7 @@ export class ImapClient {
   async expunge(): Promise<number> {
     const response = await this.command("EXPUNGE", []);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "expunge");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`expunge`);
     }
     return countExpungeLines(response.untagged);
   }
@@ -878,7 +915,7 @@ export class ImapClient {
   private async uidExpunge(uidSet: string): Promise<number> {
     const response = await this.command("UID EXPUNGE", [{ kind: "atom", value: uidSet }]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "expunge");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`expunge`);
     }
     return countExpungeLines(response.untagged);
   }
@@ -887,15 +924,16 @@ export class ImapClient {
     uidSet: string,
     verb: "+FLAGS" | "-FLAGS",
     flags: string[],
+    named?: readonly TextPart[],
   ): Promise<void> {
-    validateFlags(flags);
+    validateFlags(flags, named);
     const response = await this.command("UID STORE", [
       { kind: "atom", value: uidSet },
       { kind: "atom", value: verb },
       { kind: "list", items: flags.map(flagArg) },
     ]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "store");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`store`);
     }
   }
 
@@ -948,7 +986,7 @@ export class ImapClient {
   private async awaitContinuation(): Promise<void> {
     const line = await this.channel.nextLine();
     if (!line.text.startsWith("+")) {
-      throw VaultError.imapOperationFailed(this.origin, "literal");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`literal`);
     }
   }
 
@@ -962,15 +1000,15 @@ export class ImapClient {
       }
       if (line.text.startsWith("+")) {
         // A stray continuation with no literal outstanding is a protocol fault.
-        throw VaultError.imapOperationFailed(this.origin, "read");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`read`);
       }
       const tagged = parseTagged(line.text);
       if (!tagged) {
-        throw VaultError.imapOperationFailed(this.origin, "read");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`read`);
       }
       const receivedTag = line.text.split(/\s+/)[0] ?? "";
       if (receivedTag !== tag) {
-        throw VaultError.imapOperationFailed(this.origin, "read");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`read`);
       }
       return { tagged, untagged };
     }
@@ -981,7 +1019,7 @@ export class ImapClient {
     const atoms = line.text.split(/\s+/).filter((a) => a.length > 0);
     const status = atoms[1]?.toUpperCase();
     if (atoms[0] !== "*" || (status !== "OK" && status !== "PREAUTH")) {
-      throw VaultError.imapOperationFailed(this.origin, "connect");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`connect`);
     }
     for (const cap of parseCapabilities(atoms)) {
       this.caps.add(cap);
@@ -991,7 +1029,7 @@ export class ImapClient {
   private async loadCapabilities(): Promise<void> {
     const response = await this.command("CAPABILITY", []);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "capability");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`capability`);
     }
     for (const line of response.untagged) {
       for (const cap of parseCapabilities(line.atoms)) {
@@ -1010,7 +1048,7 @@ export class ImapClient {
       { kind: "string", value: auth.password },
     ]);
     if (response.tagged.status !== "OK") {
-      throw VaultError.imapOperationFailed(this.origin, "login");
+      throw VaultError.imapOperationFailed(this.origin, vaultText`login`);
     }
   }
 
@@ -1036,7 +1074,7 @@ export class ImapClient {
       }
       const tagged = parseTagged(line.text);
       if (!tagged || tagged.status !== "OK") {
-        throw VaultError.imapOperationFailed(this.origin, "authenticate");
+        throw VaultError.imapOperationFailed(this.origin, vaultText`authenticate`);
       }
       return;
     }

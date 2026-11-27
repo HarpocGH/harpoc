@@ -1,5 +1,6 @@
-import { VaultError } from "@harpoc/shared";
-import { redactEscapeTolerant } from "./escape-tolerant.js";
+import type { TextPart } from "@harpoc/shared";
+import { VaultError, outsidePart } from "@harpoc/shared";
+import { findEscapeTolerant, type Spans } from "./escape-tolerant.js";
 
 const REDACTION = "[REDACTED]";
 
@@ -121,69 +122,36 @@ export function mapStringLeaves(
 }
 
 /**
- * The credential and the encodings a careless or hostile endpoint may echo it
- * in. Computed once per redaction call and reused at every nesting level —
- * base64 and hex of the same value do not change with depth.
+ * The credential, the encodings a careless or hostile endpoint may echo it
+ * in, and the upper-case form of each that is hex-shaped (hex is
+ * case-insensitive on the wire). Computed once per redaction call and reused at
+ * every nesting level; the buffer the encodings are read from is zeroed before
+ * this returns.
  *
  * The V8 `JSON.stringify(secret).slice(1, -1)` needle is gone: it covered one
- * escaping convention, and the tolerant pass below covers the class it belongs
+ * escaping convention, and the tolerant scan covers the class it belongs
  * to — including the conventions V8 does not use (review 2026-08-14, F1).
  */
 function needlesFor(secret: string): string[] {
   const secretBytes = Buffer.from(secret, "utf8");
-  return [
-    ...new Set<string>([
+  const needles = new Set<string>();
+  try {
+    for (const form of [
       secret,
       secretBytes.toString("base64"),
       secretBytes.toString("base64url"),
       secretBytes.toString("hex"),
       encodeURIComponent(secret),
-    ]),
-  ].filter((n) => n.length > 0);
-}
-
-/**
- * Literal + escape-tolerant redaction of one flat string. This is the pass that
- * shipped before the structural descent; it is unchanged in behaviour and is
- * applied by the descent to every string leaf and key it reaches.
- *
- * `redactEscapeTolerant` can only match a character through an escape
- * sequence, and every escape sequence begins with a backslash, so if `text`
- * contains none at all, any tolerant match is necessarily a purely literal
- * one — which the literal pass below has already made and replaced. The
- * tolerant passes are therefore provably redundant for such text.
- * `[REDACTED]` itself contains no backslash, so replacing a needle with it
- * cannot introduce one partway through the loop — checked once, up front,
- * per call, not per needle (a per-needle check would give back most of the
- * win it buys on non-escaped bodies, the common case on the HTTP response path).
- */
-function redactFlat(text: string, needles: string[]): string {
-  if (text.length === 0) return text;
-  const hasBackslash = text.includes("\\");
-  let result = text;
-  for (const needle of needles) {
-    if (result.includes(needle)) {
-      result = result.split(needle).join(REDACTION);
+    ]) {
+      if (form.length === 0) continue;
+      needles.add(form);
+      const upper = form.toUpperCase();
+      if (upper !== form && /^[0-9a-fA-F]+$/.test(form)) needles.add(upper);
     }
-    // hex is case-insensitive on the wire; also strip an uppercase rendering,
-    // tolerant of JSON escaping the same as the lowercase form below (a hex
-    // credential can be escaped just as any other needle can).
-    const upper = needle.toUpperCase();
-    const isHexNeedle = upper !== needle && /^[0-9a-fA-F]+$/.test(needle);
-    if (isHexNeedle && result.includes(upper)) {
-      result = result.split(upper).join(REDACTION);
-    }
-    if (hasBackslash && isHexNeedle) {
-      result = redactEscapeTolerant(result, upper, REDACTION);
-    }
-    // Then the same needle again, tolerating any JSON string escaping. Run
-    // AFTER the literal pass so this change is purely additive: everything the
-    // previous implementation removed is already gone by here.
-    if (hasBackslash) {
-      result = redactEscapeTolerant(result, needle, REDACTION);
-    }
+  } finally {
+    secretBytes.fill(0);
   }
-  return result;
+  return [...needles];
 }
 
 /**
@@ -202,20 +170,382 @@ const MAX_JSON_PARSES = 4;
  * size the descent is skipped and the flat result stands. Characters, not bytes
  * — a deliberate over-estimate of the real limit.
  *
- * The bound is checked against `flat` — the string the descent actually
- * parses — not the original `text`: every needle occurrence the flat passes
- * already redacted expanded to the 10-character `[REDACTED]`, so for a short,
- * frequently-occurring needle `flat` can run substantially longer than `text`,
- * and comparing `text.length` here would let a parse well past this bound
- * through.
+ * The bound is checked against the string that is parsed: the text as it
+ * stands, or, where only that form parses, the text with its flat matches
+ * written.
  */
 const MAX_STRUCTURAL_CHARS = 4 * 1024 * 1024;
 
+/** For each prefix of a needle, the length of its longest proper border (Knuth-Morris-Pratt). */
+function borders(needle: string): Int32Array {
+  const border = new Int32Array(needle.length);
+  let k = 0;
+  for (let i = 1; i < needle.length; i++) {
+    while (k > 0 && needle[i] !== needle[k]) k = border[k - 1] as number;
+    if (needle[i] === needle[k]) k++;
+    border[i] = k;
+  }
+  return border;
+}
+
 /**
- * Redact `secret` and its encodings from `text`, including occurrences nested
- * inside a JSON document carried as a string value (a webhook `data` envelope,
- * an MCP result whose body is itself serialized JSON) up to `MAX_JSON_PARSES`
- * levels deep.
+ * Appends every literal occurrence of `needle` in `text` to `out`, overlapping
+ * ones included; occurrences that overlap one another are appended as one span.
+ * Only a needle that can overlap itself is read character by character, behind
+ * an occurrence and while a further one could still begin inside the span.
+ */
+function findLiteral(text: string, needle: string, out: Spans): void {
+  const m = needle.length;
+  const border = borders(needle);
+  const self = border[m - 1] as number;
+  let i = text.indexOf(needle);
+  while (i !== -1) {
+    let end = i + m;
+    if (self > 0) {
+      let k = self;
+      let q = end;
+      while (q < text.length && q - k < end) {
+        const ch = text[q];
+        while (k > 0 && needle[k] !== ch) k = border[k - 1] as number;
+        if (needle[k] === ch) k++;
+        q++;
+        if (k === m) {
+          end = q;
+          k = self;
+        }
+      }
+    }
+    out.push(i, end);
+    i = text.indexOf(needle, end);
+  }
+}
+
+const PACK = 2 ** 27;
+
+/** Orders spans by start and merges those that overlap; spans that only touch stay apart. */
+function mergeSpans(found: Spans): Spans {
+  if (found.length === 0) return found;
+  let src = found;
+  let ordered = true;
+  let max = 0;
+  for (let i = 0; i < found.length; i += 2) {
+    if (i > 0 && (found[i] as number) < (found[i - 2] as number)) ordered = false;
+    if ((found[i + 1] as number) > max) max = found[i + 1] as number;
+  }
+  if (!ordered && max < PACK / 2) {
+    const keys = new Float64Array(found.length / 2);
+    for (let i = 0; i < keys.length; i++) {
+      keys[i] = (found[2 * i] as number) * PACK + (found[2 * i + 1] as number);
+    }
+    keys.sort();
+    src = new Array<number>(found.length);
+    for (let i = 0; i < keys.length; i++) {
+      const start = Math.floor((keys[i] as number) / PACK);
+      src[2 * i] = start;
+      src[2 * i + 1] = (keys[i] as number) - start * PACK;
+    }
+  } else if (!ordered) {
+    const pairs: [number, number][] = [];
+    for (let i = 0; i < found.length; i += 2) {
+      pairs.push([found[i] as number, found[i + 1] as number]);
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    src = pairs.flat();
+  }
+  const out: Spans = [];
+  let start = src[0] as number;
+  let end = src[1] as number;
+  for (let i = 2; i < src.length; i += 2) {
+    const next = src[i] as number;
+    if (next < end) {
+      if ((src[i + 1] as number) > end) end = src[i + 1] as number;
+    } else {
+      out.push(start, end);
+      start = next;
+      end = src[i + 1] as number;
+    }
+  }
+  out.push(start, end);
+  return out;
+}
+
+/**
+ * A span that lies inside a `[REDACTED]` of `text` is dropped; one that shares a
+ * character with one, without lying inside, is widened to cover it whole.
+ */
+function respectMarkers(text: string, found: Spans): Spans {
+  if (found.length === 0 || !text.includes(REDACTION)) return found;
+  const markers: number[] = [];
+  for (
+    let i = text.indexOf(REDACTION);
+    i !== -1;
+    i = text.indexOf(REDACTION, i + REDACTION.length)
+  ) {
+    markers.push(i);
+  }
+  const out: Spans = [];
+  for (let i = 0; i < found.length; i += 2) {
+    let start = found[i] as number;
+    let end = found[i + 1] as number;
+    let lo = 0;
+    let hi = markers.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((markers[mid] as number) + REDACTION.length <= start) lo = mid + 1;
+      else hi = mid;
+    }
+    let inside = false;
+    for (let k = lo; k < markers.length && (markers[k] as number) < end; k++) {
+      const markerStart = markers[k] as number;
+      const markerEnd = markerStart + REDACTION.length;
+      if (start >= markerStart && end <= markerEnd) {
+        inside = true;
+        break;
+      }
+      if (markerStart < start) start = markerStart;
+      if (markerEnd > end) end = markerEnd;
+    }
+    if (!inside) out.push(start, end);
+  }
+  return out;
+}
+
+/** One value's needles in one text: each literally and, where the text holds a backslash, through one escape layer. */
+function flatSpans(text: string, needles: readonly string[]): Spans {
+  const found: Spans = [];
+  if (text.length === 0) return found;
+  const tolerant = text.includes("\\");
+  for (const needle of needles) {
+    findLiteral(text, needle, found);
+    if (tolerant) findEscapeTolerant(text, needle, found);
+  }
+  return respectMarkers(text, found);
+}
+
+/** Calls `visit(contentStart, contentEnd, isKey)` for each string token of a valid JSON text. */
+function forEachStringToken(
+  doc: string,
+  visit: (start: number, end: number, isKey: boolean) => void,
+): void {
+  let i = 0;
+  for (;;) {
+    const open = doc.indexOf('"', i);
+    if (open === -1) return;
+    let close = open + 1;
+    for (;;) {
+      close = doc.indexOf('"', close);
+      if (close === -1) return;
+      let backslashes = 0;
+      for (let b = close - 1; b > open && doc[b] === "\\"; b--) backslashes++;
+      if (backslashes % 2 === 0) break;
+      close++;
+    }
+    let after = close + 1;
+    while (
+      doc[after] === " " ||
+      doc[after] === "\t" ||
+      doc[after] === "\n" ||
+      doc[after] === "\r"
+    ) {
+      after++;
+    }
+    visit(open + 1, close, doc[after] === ":");
+    i = close + 1;
+  }
+}
+
+/** The offsets in a string token's raw content at which each decoded code unit starts, and its end. */
+function unitOffsets(raw: string): number[] {
+  const offsets: number[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    offsets.push(i);
+    i += raw[i] === "\\" ? (raw[i + 1] === "u" ? 6 : 2) : 1;
+  }
+  offsets.push(raw.length);
+  return offsets;
+}
+
+/** `text` with one marker for each of its merged spans. */
+function writeSpans(text: string, merged: Spans): string {
+  if (merged.length === 0) return text;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (let i = 0; i < merged.length; i += 2) {
+    const start = merged[i] as number;
+    if (start > cursor) parts.push(text.slice(cursor, start));
+    parts.push(REDACTION);
+    cursor = merged[i + 1] as number;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
+}
+
+/** Where the positions of `writeSpans(text, merged)` stood in `text`; a span edge at a marker maps to the edge of the span it replaced. */
+function mapBack(found: Spans, merged: Spans): Spans {
+  const ends: number[] = [];
+  const shifts: number[] = [];
+  let shift = 0;
+  for (let i = 0; i < merged.length; i += 2) {
+    const end = merged[i + 1] as number;
+    shift += REDACTION.length - (end - (merged[i] as number));
+    ends.push(end + shift);
+    shifts.push(shift);
+  }
+  const origin = (p: number, isEnd: boolean): number => {
+    let lo = 0;
+    let hi = ends.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((ends[mid] as number) <= p) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < ends.length && p > (ends[lo] as number) - REDACTION.length) {
+      return merged[2 * lo + (isEnd ? 1 : 0)] as number;
+    }
+    return p - (lo > 0 ? (shifts[lo - 1] as number) : 0);
+  };
+  const out: Spans = [];
+  for (let i = 0; i < found.length; i += 2) {
+    out.push(origin(found[i] as number, false), origin(found[i + 1] as number, true));
+  }
+  return out;
+}
+
+function sameSpans(a: Spans, b: Spans): boolean {
+  return a.length === b.length && a.every((n, i) => n === b[i]);
+}
+
+/**
+ * Appends the spans that the string tokens of a JSON document report, mapped
+ * back through each token's escaping to the characters of `text` that spell
+ * them; false, and nothing appended, when `text` is no JSON object or array. A
+ * token whose raw or decoded form holds no backslash is skipped: the scan of
+ * `text` has read all it holds. A key is scanned flat, a value is a level of its own.
+ */
+function leafSpans(
+  text: string,
+  needles: readonly string[][],
+  depth: number,
+  found: Spans,
+): boolean {
+  if (depth === 0 && text.length > MAX_STRUCTURAL_CHARS) return false;
+  const doc = text.trim();
+  try {
+    const parsed: unknown = JSON.parse(doc);
+    if (typeof parsed !== "object" || parsed === null) return false;
+  } catch {
+    return false;
+  }
+  const lead = text.length - text.trimStart().length;
+  let backslash = doc.indexOf("\\");
+  forEachStringToken(doc, (start, end, isKey) => {
+    if (backslash !== -1 && backslash < start) backslash = doc.indexOf("\\", start);
+    if (backslash === -1 || backslash >= end) return;
+    const raw = doc.slice(start, end);
+    const leaf = JSON.parse(`"${raw}"`) as string;
+    if (!leaf.includes("\\")) return;
+    const inner = isKey
+      ? needles.flatMap((own) => flatSpans(leaf, own))
+      : levelSpans(leaf, needles, depth + 1);
+    if (inner.length === 0) return;
+    const offsets = unitOffsets(raw);
+    const base = lead + start;
+    if (offsets.length !== leaf.length + 1) {
+      found.push(base, base + raw.length);
+      return;
+    }
+    for (let i = 0; i < inner.length; i += 2) {
+      found.push(
+        base + (offsets[inner[i] as number] as number),
+        base + (offsets[inner[i + 1] as number] as number),
+      );
+    }
+  });
+  return true;
+}
+
+/**
+ * The spans of one text in its own coordinates, unmerged: its flat scan, and the
+ * spans of its string leaves; `depth` counts the parses made to reach it. A text
+ * that is no document as it stands but holds a hit is parsed again with its flat
+ * spans written — all of them, and each value's alone — since a marker can be
+ * what makes it parse.
+ */
+function levelSpans(text: string, needles: readonly string[][], depth: number): Spans {
+  const perValue = needles.map((own) => flatSpans(text, own));
+  const found = perValue.flat();
+  if (depth >= MAX_JSON_PARSES || !text.includes("\\")) return found;
+  const doc = text.trim();
+  if (!doc.startsWith("{") && !doc.startsWith("[")) return found;
+  if (leafSpans(text, needles, depth, found) || found.length === 0) return found;
+  const candidates = [mergeSpans(found)];
+  if (perValue.length > 1) {
+    for (const own of perValue) if (own.length > 0) candidates.push(mergeSpans(own));
+  }
+  const tried: Spans[] = [];
+  for (const merged of candidates) {
+    if (tried.some((done) => sameSpans(done, merged))) continue;
+    tried.push(merged);
+    const inner: Spans = [];
+    if (!leafSpans(writeSpans(text, merged), needles, depth, inner)) continue;
+    for (const p of mapBack(inner, merged)) found.push(p);
+  }
+  return found;
+}
+
+/** A value that can complete a match together with a marker another span wrote. */
+function markerAffine(value: string): boolean {
+  if (value.includes(REDACTION)) return true;
+  for (let n = 1; n < REDACTION.length && n < value.length; n++) {
+    if (value.endsWith(REDACTION.slice(0, n))) return true;
+    if (value.startsWith(REDACTION.slice(REDACTION.length - n))) return true;
+  }
+  return false;
+}
+
+function distinctValues(values: readonly string[]): string[] {
+  return [...new Set(values)].filter((value) => value.length > 0);
+}
+
+function applyOnce(text: string, needles: readonly string[][]): { merged: Spans; out: string } {
+  if (text.length === 0 || needles.length === 0) return { merged: [], out: text };
+  const merged = mergeSpans(levelSpans(text, needles, 0));
+  return { merged, out: writeSpans(text, merged) };
+}
+
+/** The merged spans one application of {@link redactValues} writes a marker for. */
+export function redactSpans(text: string, values: readonly string[]): Spans {
+  if (text.length === 0) return [];
+  return applyOnce(text, distinctValues(values).map(needlesFor)).merged;
+}
+
+/** {@link redactValues}, and whether it changed the text. */
+export function redactValuesTracked(
+  text: string,
+  values: readonly string[],
+): { text: string; changed: boolean } {
+  const distinct = text.length === 0 ? [] : distinctValues(values);
+  if (distinct.length === 0) return { text, changed: false };
+  const needles = distinct.map(needlesFor);
+  const first = applyOnce(text, needles);
+  if (first.merged.length === 0) return { text, changed: false };
+  let out = first.out;
+  if (distinct.some(markerAffine)) {
+    for (let round = 0; round <= distinct.length; round++) {
+      const next = applyOnce(out, needles);
+      if (next.merged.length === 0) break;
+      out = next.out;
+    }
+  }
+  return { text: out, changed: true };
+}
+
+/**
+ * Redact every value of `values` and its encodings from `text`, including
+ * occurrences nested inside a JSON document carried as a string value (a webhook
+ * `data` envelope, an MCP result whose body is itself serialized JSON) up to
+ * `MAX_JSON_PARSES` levels deep.
  *
  * This is the best-effort output-sanitization layer for process-mediated
  * injection (thesis §4.5.2). It removes the raw value and its base64 / base64url
@@ -225,80 +555,39 @@ const MAX_STRUCTURAL_CHARS = 4 * 1024 * 1024;
  * arbitrary transforms or character-by-character chunking; those residual
  * bypasses are characterized in the evaluation, not claimed to be blocked.
  *
+ * Every match is found on the unchanged text, for all values at once: every
+ * occurrence, overlapping ones included, and in each string value and key of a
+ * JSON document the text holds, mapped back through the escaping to the
+ * characters that spell it. Spans that overlap are merged, spans that only touch
+ * stay apart, and one marker is written for each, once, into the text's own
+ * bytes: nothing is re-serialized, so a document keeps its whitespace, key
+ * order and numbers around a nested marker. A match inside a `[REDACTED]` of the
+ * text is dropped and one that overlaps it covers it whole. A value that begins
+ * or ends with a piece of the marker gets the function applied again to its
+ * result, a bounded number of times, so that one call and two in a row read
+ * alike.
+ *
  * Cost is linear in `text` but carries a per-needle constant on escape-dense
  * input (every backslash is a candidate escape start for every needle) — a
  * best-effort layer atop structural opacity, not claimed to be free.
- *
- * **Re-serialization contract:** when the structural descent finds and redacts
- * a nested occurrence, the returned text is `JSON.stringify` output, not the
- * original bytes with a substring replaced. Concretely: the body comes back
- * minified (original whitespace is not preserved), integer-like object keys
- * are reordered to the front per the JS property-enumeration spec, numbers are
- * normalized through IEEE-754 round-tripping (e.g. a 20-digit integer loses
- * trailing precision), and duplicate keys are collapsed to the last one. This
- * is deliberate, not a defect: the descent only ever fires on a body that was
- * actually leaking the credential, and by the time it fires `redactFlat` has
- * already replaced bytes with `[REDACTED]` — so byte-exactness is already void
- * on this path, and every one of these differences (except duplicate-key
- * collapse, which JSON itself does not define behaviour for) is something any
- * caller doing its own `JSON.parse` on the same body would see regardless. A
- * clean body that never hits the descent, or hits it and finds nothing, is
- * still returned byte-identical (see `walked.changed` below) — this contract
- * applies only on an actual redaction.
  */
+export function redactValues(text: string, values: readonly string[]): string {
+  return redactValuesTracked(text, values).text;
+}
+
 export function redactSecretEncodings(text: string, secret: string): string {
-  if (text.length === 0 || secret.length === 0) return text;
+  return redactValues(text, [secret]);
+}
 
-  const needles = needlesFor(secret);
-  const flat = redactFlat(text, needles);
-
-  // A nested occurrence is one whose characters are escaped at the outer level,
-  // and every escape begins with a backslash — so a body with none cannot hide
-  // one, and the common path never pays for a parse. The size check is against
-  // `flat`, not `text` — see MAX_STRUCTURAL_CHARS's doc comment.
-  if (!text.includes("\\") || flat.length > MAX_STRUCTURAL_CHARS) return flat;
-
-  const trimmed = flat.trim();
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return flat;
-
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (typeof parsed !== "object" || parsed === null) return flat;
-    const walked = mapStringLeavesTracked(
-      parsed,
-      (s) => redactFlat(s, needles),
-      MAX_JSON_PARSES - 1,
-    );
-    if (!walked.changed) return flat;
-    // `JSON.stringify` re-encodes EVERY string in `walked.value`, not just the
-    // leaf that changed: an untouched sibling holding a control character
-    // (e.g. an actual newline) is re-escaped through V8's short-escape
-    // convention (`\n`) — two characters, a backslash followed by the letter
-    // "n" — which is byte-identical to a credential that happens to contain a
-    // literal backslash followed by "n". That sibling was never near the
-    // credential; re-serialization alone introduced the collision. A final
-    // flat pass over the fully re-serialized text closes it the same way the
-    // first flat pass closes it for the original document — one extra linear
-    // pass over a body that is, by construction, already carrying a
-    // redaction. Like every other flat pass in this file, it is biased
-    // toward over-redaction and can leave the result malformed JSON if it
-    // clips a span that turns out to be syntax rather than credential; that
-    // is this module's existing doctrine (see escape-tolerant.ts), not a new
-    // policy — a missed redaction is the failure this layer must not have, a
-    // malformed downstream body is not.
-    return redactFlat(JSON.stringify(walked.value), needles);
-  } catch {
-    // Not a JSON document, or the flat pass left it malformed (that pass is
-    // biased toward over-redaction and may break structure by design). The
-    // flat result stands — this pass can only ever subtract more, never less.
-    return flat;
-  }
+/** Outside text as a part of an error text, redacted of every value of its context's list. */
+export function outside(text: string, values: readonly string[]): TextPart {
+  return outsidePart(redactValues(text, values));
 }
 
 /**
- * Strips every value of `secrets` from a VaultError's message and details, the
- * longer value first; an error that holds none is returned as it is. Empty
- * strings and repeats are dropped, and no length floor is applied here: a
+ * Strips every value of `secrets` from a VaultError's message and details in
+ * one {@link redactValues} each; an error that holds none is returned as it is.
+ * Empty strings and repeats are dropped, and no length floor is applied here: a
  * caller that needs one (`MIN_REDACTABLE_FRAGMENT`) applies it where it builds
  * its list.
  *
@@ -316,17 +605,15 @@ export function redactSecretEncodings(text: string, secret: string): string {
  */
 export function redactErrorMessage(err: unknown, secrets: readonly string[]): unknown {
   if (!(err instanceof VaultError)) return err;
-  const values = [...new Set(secrets.filter((s) => s.length > 0))].sort(
-    (a, b) => b.length - a.length,
-  );
+  const values = distinctValues(secrets);
   if (values.length === 0) return err;
-  const redact = (text: string): string =>
-    values.reduce((out, value) => redactSecretEncodings(out, value), text);
-  const message = redact(err.message);
+  const message = redactValuesTracked(err.message, values);
   const walked =
-    err.details === undefined ? undefined : mapStringLeavesTracked(err.details, redact, 0);
-  if (message === err.message && walked?.changed !== true) return err;
+    err.details === undefined
+      ? undefined
+      : mapStringLeavesTracked(err.details, (s) => redactValues(s, values), 0);
+  if (!message.changed && walked?.changed !== true) return err;
   const details =
     walked?.changed === true ? (walked.value as Record<string, unknown>) : err.details;
-  return new VaultError(err.code, message, details);
+  return new VaultError(err.code, message.text, details);
 }

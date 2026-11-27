@@ -12,12 +12,23 @@ import { lstat } from "node:fs/promises";
 import { isIPv4, isIPv6 } from "node:net";
 import { devNull, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { ConnectionConfig, GitAction, GitResult, InjectionPolicy } from "@harpoc/shared";
+import type {
+  ConnectionConfig,
+  GitAction,
+  GitResult,
+  InjectionPolicy,
+  TextPart,
+  VaultText,
+} from "@harpoc/shared";
 import {
   DEFAULT_GIT_TIMEOUT_MS,
   ErrorCode,
   MIN_REDACTABLE_FRAGMENT,
   VaultError,
+  echoField,
+  num,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
@@ -29,6 +40,7 @@ import {
   resolveAndMatchCommand,
   resolveExecutable,
 } from "./allowlist.js";
+import { passError } from "./error-pass.js";
 import {
   formatGitVersion,
   GIT_MIN_VERSION,
@@ -37,6 +49,7 @@ import {
   gitVersionAtLeast,
   readGitVersion,
 } from "./git-injector-version.js";
+import type { GitVersion, GitVersionFloor } from "./git-injector-version.js";
 import {
   judgeOwnConfig,
   LOCAL_FETCH_SWITCHES,
@@ -197,8 +210,7 @@ const SHORT_WITH_VALUE: Record<GitAction["operation"], ReadonlySet<string>> = {
 const FORBIDDEN_REPO_PREFIXES = ["ext::", "fd::", "file:", "git+"];
 
 /** The fixed message of every refusal of an SSH repository address's user part. */
-const SSH_USER_NOT_A_NAME =
-  "SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit";
+const SSH_USER_NOT_A_NAME = vaultText`SSH user of the repository must be a name of letters, digits, '.', '_' and '-' that begins with a letter or a digit`;
 
 /**
  * The bundled askpass helper: prints the username or token from the environment,
@@ -402,9 +414,10 @@ export interface FetchRefspec {
  * A fetch refspec names the remote's refs only (RX-B9-2): `refs/heads/<name>`
  * or `refs/tags/<name>`, one `*` at most, a leading `+` or `^`. The vault
  * chooses where both steps store them (fetchRefspecPlan), so a destination, a
- * short name, an object id and every other namespace are refused.
+ * short name, an object id and every other namespace are refused. The refusal
+ * quotes `named`, the refspec's part, where the caller hands one.
  */
-export function parseFetchRefspec(spec: string): FetchRefspec {
+export function parseFetchRefspec(spec: string, named?: TextPart): FetchRefspec {
   const negative = spec.startsWith("^");
   const force = spec.startsWith("+");
   const source = negative || force ? spec.slice(1) : spec;
@@ -414,7 +427,11 @@ export function parseFetchRefspec(spec: string): FetchRefspec {
     stars > 1 ||
     !isPlainRefname(source.replace("*", "x"))
   ) {
-    throw VaultError.invalidGitConfig(`unsupported fetch refspec: ${spec}`);
+    throw VaultError.invalidGitConfig(
+      named === undefined
+        ? `unsupported fetch refspec: ${spec}`
+        : vaultText`unsupported fetch refspec: ${named}`,
+    );
   }
   return { force, negative, source };
 }
@@ -450,20 +467,31 @@ export function fetchRefspecPlan(
 function fetchRefspecsOf(action: GitAction): FetchRefspec[] {
   if (action.operation !== "fetch") {
     if (action.refspecs !== undefined) {
-      throw VaultError.invalidGitConfig(`refspecs is only accepted by a fetch`);
+      throw VaultError.invalidGitConfig(vaultText`refspecs is only accepted by a fetch`);
     }
     return [];
   }
   if (action.refspecs?.length === 0) {
-    throw VaultError.invalidGitConfig("refspecs must not be empty");
+    throw VaultError.invalidGitConfig(vaultText`refspecs must not be empty`);
   }
-  const parsed = (action.refspecs ?? DEFAULT_FETCH_REFSPECS).map(parseFetchRefspec);
+  const sent = action.refspecs;
+  const parsed = (sent ?? DEFAULT_FETCH_REFSPECS).map((spec, i) =>
+    parseFetchRefspec(spec, sent ? echoField(action, "refspecs", i) : undefined),
+  );
   if (parsed.every((r) => r.negative)) {
     throw VaultError.invalidGitConfig(
-      `a fetch needs a refspec that is not negative: ${(action.refspecs ?? []).join(" ")}`,
+      vaultText`a fetch needs a refspec that is not negative: ${refspecList(action)}`,
     );
   }
   return parsed;
+}
+
+/** The caller's refspecs, each its own part, joined by `, `. */
+function refspecList(action: GitAction): VaultText {
+  const [first, ...rest] = (action.refspecs ?? []).map((_, i) => echoField(action, "refspecs", i));
+  let listed = first === undefined ? vaultText`` : vaultText`${first}`;
+  for (const part of rest) listed = vaultText`${listed}, ${part}`;
+  return listed;
 }
 
 interface FloorPaths {
@@ -508,59 +536,71 @@ export class GitInjector {
     local?: FloorPaths,
     signal?: AbortSignal,
   ): Promise<GitResult> {
-    let transport: "https" | "ssh" | null;
+    const thrownValues = gitThrownValues(action.repository, secretValue);
     try {
-      assertRepositoryShape(action);
-      transport = detectTransport(action.repository);
-      if (!transport) throw VaultError.gitUnsupportedTransport(action.repository);
-      assertKnownOperation(action);
-      assertSafeArgs(action.operation, action.args);
-      assertNoPositional(action);
-      fetchRefspecsOf(action);
-      if (action.working_directory && action.working_directory.startsWith("-")) {
-        throw VaultError.invalidGitConfig("working_directory must not start with '-'");
+      let transport: "https" | "ssh" | null;
+      try {
+        assertRepositoryShape(action);
+        transport = detectTransport(action.repository);
+        if (!transport) {
+          throw VaultError.gitUnsupportedTransport(echoField(action, "repository"));
+        }
+        assertKnownOperation(action);
+        assertSafeArgs(action.operation, action.args);
+        assertNoPositional(action);
+        fetchRefspecsOf(action);
+        if (action.working_directory && action.working_directory.startsWith("-")) {
+          throw VaultError.invalidGitConfig(vaultText`working_directory must not start with '-'`);
+        }
+        if (action.repository.startsWith("-")) {
+          throw VaultError.invalidGitConfig(vaultText`repository must not start with '-'`);
+        }
+      } catch (err) {
+        if (err instanceof VaultError)
+          this.audit(action, secretId, { error: err.code }, false, attribution);
+        throw err;
       }
-      if (action.repository.startsWith("-")) {
-        throw VaultError.invalidGitConfig("repository must not start with '-'");
-      }
-    } catch (err) {
-      if (err instanceof VaultError)
-        this.audit(action, secretId, { error: err.code }, false, attribution);
-      throw err;
-    }
 
-    let gitPath: string;
-    try {
-      gitPath = resolveAndMatchCommand("git", policy.command_allowlist, controlledPathDirs());
-    } catch (err) {
-      if (err instanceof VaultError)
-        this.audit(action, secretId, { error: err.code }, false, attribution);
-      throw err;
-    }
-
-    return transport === "https"
-      ? this.runHttps(
-          action,
-          gitPath,
-          secretValue,
-          policy,
-          config,
-          secretId,
-          attribution,
-          local,
-          signal,
-        )
-      : this.runSsh(
-          action,
-          gitPath,
-          secretValue,
-          policy,
-          config,
-          secretId,
-          attribution,
-          local,
-          signal,
+      let gitPath: string;
+      try {
+        gitPath = resolveAndMatchCommand(
+          "git",
+          policy.command_allowlist,
+          controlledPathDirs(),
+          vaultText`git`,
         );
+      } catch (err) {
+        if (err instanceof VaultError)
+          this.audit(action, secretId, { error: err.code }, false, attribution);
+        throw err;
+      }
+
+      return transport === "https"
+        ? await this.runHttps(
+            action,
+            gitPath,
+            secretValue,
+            policy,
+            config,
+            secretId,
+            attribution,
+            local,
+            signal,
+          )
+        : await this.runSsh(
+            action,
+            gitPath,
+            secretValue,
+            policy,
+            config,
+            secretId,
+            attribution,
+            local,
+            signal,
+          );
+    } catch (err) {
+      throw passError(err, thrownValues);
+    }
   }
 
   private async runHttps(
@@ -577,14 +617,17 @@ export class GitInjector {
     if (hostLeadsWithSign(action.repository)) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig(
-        "HTTPS host of the repository must not begin with '-' or '+'",
+        vaultText`HTTPS host of the repository must not begin with '-' or '+'`,
       );
     }
     // Mandatory floor: HTTPS + SSRF. Above it the per-secret URL allowlist, deny-by-default.
     let url: URL;
     let resolvedAddresses: string[] | undefined;
     try {
-      ({ url, resolvedAddresses } = await validateUrl(action.repository));
+      ({ url, resolvedAddresses } = await validateUrl(action.repository, undefined, {
+        parts: echoField(action, "repository"),
+        values: gitThrownValues(action.repository, secretValue),
+      }));
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { error: err.code }, false, attribution);
@@ -593,12 +636,12 @@ export class GitInjector {
     const judged = url.href;
     if (!matchesUrlAllowlist(judged, policy.url_allowlist)) {
       this.audit(action, secretId, { error: "URL_NOT_ALLOWED" }, false, attribution);
-      throw VaultError.urlNotAllowed(action.repository);
+      throw VaultError.urlNotAllowed(echoField(action, "repository"));
     }
     if (resolvedAddresses && !pinAdmitsAskedIpVersions(action, resolvedAddresses)) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig(
-        "repository host has no address of the requested IP version",
+        vaultText`repository host has no address of the requested IP version`,
       );
     }
     await this.refuseUnsupportedGit(
@@ -687,11 +730,7 @@ export class GitInjector {
       // (MIN_REDACTABLE_FRAGMENT); shorter fragments stay unredacted.
       const joined = `${user}:${password}`;
       const redactable = (s: string) => s.length >= MIN_REDACTABLE_FRAGMENT;
-      const redact = [
-        ...(redactable(joined) ? [joined] : []),
-        password,
-        ...(redactable(user) ? [user] : []),
-      ];
+      const redact = httpsRedactList(user, password);
       const tokenInUser = (password === "" || password === "x-oauth-basic") && redactable(user);
       const networkIsolation = policy.network_isolation === true;
       const fsIsolation = policy.fs_isolation === true;
@@ -773,14 +812,14 @@ export class GitInjector {
     const address = parseSshHost(action.repository);
     if (!address) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
-      throw VaultError.invalidGitConfig("could not parse SSH host from repository");
+      throw VaultError.invalidGitConfig(vaultText`could not parse SSH host from repository`);
     }
     const { host } = address;
     const dialHost = sshDialHost(host);
     if (!dialHost) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
       throw VaultError.invalidGitConfig(
-        "SSH host of the repository must be a host name or an IPv6 literal",
+        vaultText`SSH host of the repository must be a host name or an IPv6 literal`,
       );
     }
     if (address.user !== null && !isSshName(address.user)) {
@@ -789,7 +828,9 @@ export class GitInjector {
     }
     if (address.password) {
       this.audit(action, secretId, { error: "INVALID_GIT_CONFIG" }, false, attribution);
-      throw VaultError.invalidGitConfig("an SSH repository address must not carry a password");
+      throw VaultError.invalidGitConfig(
+        vaultText`an SSH repository address must not carry a password`,
+      );
     }
     const afterScheme = action.repository.slice("ssh://".length);
     if (address.user === null && (afterScheme.includes("@") || afterScheme.includes("%40"))) {
@@ -799,7 +840,7 @@ export class GitInjector {
     // Host allowlist — deny-by-default (an empty list refuses).
     if (!matchesHostAllowlist(host, policy.host_allowlist)) {
       this.audit(action, secretId, { host, error: "HOST_NOT_ALLOWED" }, false, attribution);
-      throw VaultError.hostNotAllowed(host);
+      throw VaultError.hostNotAllowed(echoField(action, "repository"));
     }
     const knownHosts = config?.ssh?.known_hosts;
     if (!knownHosts || knownHosts.length === 0) {
@@ -809,10 +850,11 @@ export class GitInjector {
     const sshPath = resolveExecutable("ssh", controlledPathDirs());
     if (!sshPath) {
       this.audit(action, secretId, { host, error: "INVALID_GIT_CONFIG" }, false, attribution);
-      throw VaultError.invalidGitConfig("ssh binary not found on the controlled PATH");
+      throw VaultError.invalidGitConfig(vaultText`ssh binary not found on the controlled PATH`);
     }
+    const keyPem = Buffer.from(secretValue).toString("utf8");
     try {
-      assertNativeWin32SshClient(sshPath);
+      assertNativeWin32SshClient(sshPath, [keyPem]);
     } catch (err) {
       if (err instanceof VaultError)
         this.audit(action, secretId, { host, error: err.code }, false, attribution);
@@ -828,7 +870,6 @@ export class GitInjector {
       attribution,
     );
 
-    const keyPem = Buffer.from(secretValue).toString("utf8");
     let hooks: { dir: string; dispose: () => void };
     try {
       hooks = createEmptyHooksDir();
@@ -942,7 +983,7 @@ export class GitInjector {
           false,
           attribution,
         );
-        throw VaultError.sshHostKeyMismatch(host);
+        throw VaultError.sshHostKeyMismatch(echoField(action, "repository"));
       }
 
       const result = toGitResult(action, r);
@@ -986,14 +1027,14 @@ export class GitInjector {
     const version = await readGitVersion(gitPath, baseGitEnv(envAllowlist));
     let refusal: VaultError;
     if (version === null) {
-      refusal = VaultError.gitOperationFailed("git's version could not be read");
+      refusal = VaultError.gitOperationFailed(vaultText`git's version could not be read`);
     } else if (!gitVersionAtLeast(version, GIT_MIN_VERSION)) {
       refusal = VaultError.gitOperationFailed(
-        `git ${formatGitVersion(version)} is older than ${GIT_MIN_VERSION.join(".")}, which the git context needs`,
+        vaultText`git ${versionText(version)} is older than ${floorText(GIT_MIN_VERSION)}, which the git context needs`,
       );
     } else if (pinned && !gitVersionAtLeast(version, GIT_PIN_MIN_VERSION)) {
       refusal = VaultError.gitOperationFailed(
-        `git ${formatGitVersion(version)} is older than ${GIT_PIN_MIN_VERSION.join(".")} and would ignore the addresses the vault judged for the repository host`,
+        vaultText`git ${versionText(version)} is older than ${floorText(GIT_PIN_MIN_VERSION)} and would ignore the addresses the vault judged for the repository host`,
       );
     } else if (
       process.platform === "win32" &&
@@ -1002,7 +1043,7 @@ export class GitInjector {
       !gitVersionAtLeast(version, GIT_WIN32_OWNER_MIN_VERSION)
     ) {
       refusal = VaultError.gitOperationFailed(
-        `git ${formatGitVersion(version)} is older than ${GIT_WIN32_OWNER_MIN_VERSION.join(".")}, which a pull, a push and a fetch need on Windows`,
+        vaultText`git ${versionText(version)} is older than ${floorText(GIT_WIN32_OWNER_MIN_VERSION)}, which a pull, a push and a fetch need on Windows`,
       );
     } else {
       return;
@@ -1042,12 +1083,23 @@ export class GitInjector {
   }
 }
 
+/** A version's digits as numbers between the words `.`. */
+function versionText(version: GitVersion): VaultText {
+  return vaultText`${num(version.major)}.${num(version.minor)}.${num(version.patch)}`;
+}
+
+function floorText(floor: GitVersionFloor): VaultText {
+  return floor.length === 3
+    ? vaultText`${num(floor[0])}.${num(floor[1])}.${num(floor[2])}`
+    : vaultText`${num(floor[0])}.${num(floor[1])}`;
+}
+
 /** A repository the schema never parsed may be anything: it must be a string that is its own trimmed reading, or a check would judge a spelling git never receives. */
 function assertRepositoryShape(action: GitAction): void {
   const repository: unknown = action.repository;
   if (typeof repository !== "string" || repository.trim() !== repository) {
     throw VaultError.invalidGitConfig(
-      "repository must be a string without leading or trailing whitespace",
+      vaultText`repository must be a string without leading or trailing whitespace`,
     );
   }
 }
@@ -1134,6 +1186,15 @@ const OPERATION_DENIED_OPTION_VALUES: Record<GitAction["operation"], readonly De
     ],
   };
 
+/** Every entry a denied argument can reach: the words a refusal names it by. */
+const DENIED_ARGUMENT_ENTRIES: ReadonlySet<string> = new Set([
+  ...DANGEROUS_ARG_PREFIXES,
+  ...Object.values(OPERATION_DANGEROUS_ARG_PREFIXES).flat(),
+  ...Object.values(OPERATION_DENIED_OPTION_VALUES)
+    .flat()
+    .map((option) => option.entry),
+]);
+
 /**
  * The entry of `denied` that `arg` reaches with a denied value, or null:
  * `--<name>=<value>` where the name is the option or git's abbreviation of
@@ -1177,7 +1238,7 @@ function deniedOptionValueReached(
  */
 function assertKnownOperation(action: GitAction): void {
   if (typeof action.operation !== "string" || !Object.hasOwn(SHORT_WITH_VALUE, action.operation)) {
-    throw VaultError.invalidGitConfig("unsupported git operation");
+    throw VaultError.invalidGitConfig(vaultText`unsupported git operation`);
   }
 }
 
@@ -1192,7 +1253,9 @@ function assertSafeArgs(operation: GitAction["operation"], args: string[] | unde
         SHORT_WITH_VALUE[operation],
       );
     if (entry !== null) {
-      throw VaultError.invalidGitConfig(`disallowed git argument: ${entry}`);
+      throw VaultError.invalidGitConfig(
+        vaultText`disallowed git argument: ${token(entry, DENIED_ARGUMENT_ENTRIES)}`,
+      );
     }
   }
 }
@@ -1215,21 +1278,25 @@ function assertSafeArgs(operation: GitAction["operation"], args: string[] | unde
 function assertNoPositional(action: GitAction): void {
   const subject =
     action.operation === "push"
-      ? "a push"
+      ? vaultText`a push`
       : action.operation === "pull"
-        ? "a pull"
+        ? vaultText`a pull`
         : action.operation === "fetch"
-          ? "a fetch"
+          ? vaultText`a fetch`
           : action.operation === "ls-remote"
-            ? "an ls-remote"
+            ? vaultText`an ls-remote`
             : action.operation === "clone" && !action.working_directory
-              ? "a clone without working_directory"
+              ? vaultText`a clone without working_directory`
               : null;
   if (subject === null) return;
+  let index = 0;
   for (const arg of action.args ?? []) {
     if (arg === "-" || arg === "--" || arg === "--end-of-options" || !arg.startsWith("-")) {
-      throw VaultError.invalidGitConfig(`${subject} takes no positional argument: ${arg}`);
+      throw VaultError.invalidGitConfig(
+        vaultText`${subject} takes no positional argument: ${echoField(action, "args", index)}`,
+      );
     }
+    index++;
   }
 }
 
@@ -1284,6 +1351,24 @@ function parseGitCredential(value: Uint8Array): { user: string; password: string
   return { user: s.slice(0, i), password: s.slice(i + 1) };
 }
 
+/** The HTTPS credential's parts a step's output is redacted of: the joined pair and the user at the shared floor or longer, and the password. */
+function httpsRedactList(user: string, password: string): string[] {
+  const joined = `${user}:${password}`;
+  return [
+    ...(joined.length >= MIN_REDACTABLE_FRAGMENT ? [joined] : []),
+    password,
+    ...(user.length >= MIN_REDACTABLE_FRAGMENT ? [user] : []),
+  ];
+}
+
+/** What an error thrown out of a use is redacted of: the whole value, and over HTTPS each part split off it. */
+function gitThrownValues(repository: unknown, secretValue: Uint8Array): string[] {
+  const value = Buffer.from(secretValue).toString("utf8");
+  if (typeof repository !== "string" || detectTransport(repository) !== "https") return [value];
+  const { user, password } = parseGitCredential(secretValue);
+  return [value, ...httpsRedactList(user, password)];
+}
+
 /**
  * Config the vault forces on every git invocation, both transports, every step
  * (N11, S1): no hook of the caller's tree runs (an empty vault-authored
@@ -1305,24 +1390,28 @@ function forcedGitConfig(hooksDir: string): string[] {
   ];
 }
 
-const DOT_GIT_SEGMENT = "working_directory must not hold a .git segment";
-const CLONE_DERIVES_DOT_GIT =
-  "a clone without working_directory must not derive a .git directory from the repository";
-const CLONE_DERIVES_NO_NAME =
-  "a clone without working_directory needs a repository address that names a directory";
+const DOT_GIT_SEGMENT = vaultText`working_directory must not hold a .git segment`;
+const CLONE_DERIVES_DOT_GIT = vaultText`a clone without working_directory must not derive a .git directory from the repository`;
+const CLONE_DERIVES_NO_NAME = vaultText`a clone without working_directory needs a repository address that names a directory`;
+
+const WORKING_TREE_OPERATIONS: readonly string[] = ["pull", "push", "fetch"];
 
 function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): void {
   if (action.operation === "clone") {
     if (!action.working_directory && local?.daemon !== undefined) {
-      throw VaultError.invalidGitConfig("working_directory is required for clone in a daemon");
+      throw VaultError.invalidGitConfig(
+        vaultText`working_directory is required for clone in a daemon`,
+      );
     }
   } else if (action.operation === "ls-remote") {
     if (action.working_directory !== undefined) {
-      throw VaultError.invalidGitConfig("working_directory is not accepted by ls-remote");
+      throw VaultError.invalidGitConfig(vaultText`working_directory is not accepted by ls-remote`);
     }
     return;
   } else if (!action.working_directory) {
-    throw VaultError.invalidGitConfig(`working_directory is required for ${action.operation}`);
+    throw VaultError.invalidGitConfig(
+      vaultText`working_directory is required for ${token(action.operation, WORKING_TREE_OPERATIONS)}`,
+    );
   }
   const wd = action.working_directory;
   if (!wd) {
@@ -1332,10 +1421,10 @@ function assertWorkingTree(action: GitAction, local: FloorPaths | undefined): vo
     return;
   }
   if (namesNetworkShare(wd, process.platform) && !namesDeviceNamespaceDrive(wd, process.platform)) {
-    throw VaultError.invalidGitConfig("working_directory names a network share");
+    throw VaultError.invalidGitConfig(vaultText`working_directory names a network share`);
   }
   if (local?.daemon !== undefined && holdsDotSegment(wd, process.platform)) {
-    throw VaultError.invalidGitConfig("working_directory must not hold a .. segment");
+    throw VaultError.invalidGitConfig(vaultText`working_directory must not hold a .. segment`);
   }
   if (holdsDotGitName(wd)) throw VaultError.invalidGitConfig(DOT_GIT_SEGMENT);
 }
@@ -1734,9 +1823,10 @@ async function runLsRemote(
  * URL, and the lookup is a probe, read unredacted (RG-6), so a URL or a
  * remote name carrying the credential's username is found like any other:
  * exactly one, and a name that can stand in `refs/remotes/<name>/`. Anything
- * else is refused rather than guessed.
+ * else is refused rather than guessed, the refusal quoting `repository`, the
+ * repository's part.
  */
-function remoteOf(listing: string, repository: string): string {
+function remoteOf(listing: string, repository: TextPart): string {
   const names = new Set<string>();
   for (const key of listing.split("\0")) {
     if (key.startsWith("remote.") && key.endsWith(".url")) {
@@ -1744,17 +1834,19 @@ function remoteOf(listing: string, repository: string): string {
     }
   }
   if (names.size === 0) {
-    throw VaultError.invalidGitConfig(`no remote of the working tree has the URL ${repository}`);
+    throw VaultError.invalidGitConfig(
+      vaultText`no remote of the working tree has the URL ${repository}`,
+    );
   }
   if (names.size > 1) {
     throw VaultError.invalidGitConfig(
-      `${String(names.size)} remotes of the working tree have the URL ${repository}`,
+      vaultText`${num(names.size)} remotes of the working tree have the URL ${repository}`,
     );
   }
   const [remote] = [...names] as [string];
   if (!isPlainRefname(`refs/remotes/${remote}`)) {
     throw VaultError.invalidGitConfig(
-      `the working tree's remote for ${repository} is not a plain ref name`,
+      vaultText`the working tree's remote for ${repository} is not a plain ref name`,
     );
   }
   return remote;
@@ -1861,19 +1953,21 @@ async function runRelayed(
     if (remotes.exit_code !== 0 && remotes.exit_code !== 1) return remotes;
     if (remotes.truncated) {
       throw VaultError.gitOperationFailed(
-        "the working tree's remote listing exceeds the output cap",
+        vaultText`the working tree's remote listing exceeds the output cap`,
       );
     }
     refspecs = fetchRefspecPlan(
       fetchRefspecsOf(action),
-      remoteOf(remotes.stdout, action.repository),
+      remoteOf(remotes.stdout, echoField(action, "repository")),
     );
   }
 
   const listed = await localProbe(["for-each-ref", "--format=%(objectname) %(refname)"]);
   if (!succeeded(listed)) return listed;
   if (listed.truncated) {
-    throw VaultError.gitOperationFailed("the working tree's ref listing exceeds the output cap");
+    throw VaultError.gitOperationFailed(
+      vaultText`the working tree's ref listing exceeds the output cap`,
+    );
   }
   const refs = parseRefListing(
     listed.stdout,
@@ -1929,10 +2023,9 @@ async function runRelayed(
   }
 }
 
-const UNRESOLVED_REPOSITORY = "could not resolve the working tree's repository";
-const OWN_CONFIGURATION =
-  "working_directory's repository configures a program or an address rewrite of its own";
-const UNLISTED_CONFIGURATION = "the repository's configuration could not be listed";
+const UNRESOLVED_REPOSITORY = vaultText`could not resolve the working tree's repository`;
+const OWN_CONFIGURATION = vaultText`working_directory's repository configures a program or an address rewrite of its own`;
+const UNLISTED_CONFIGURATION = vaultText`the repository's configuration could not be listed`;
 
 /**
  * A copy of `env` with `LC_ALL=C` written last, no other spelling of the name
@@ -2158,7 +2251,7 @@ function createRelayRepo(opts: {
   const unprepared = (err: unknown) =>
     err instanceof VaultError
       ? err
-      : VaultError.gitOperationFailed("the relay repository could not be prepared");
+      : VaultError.gitOperationFailed(vaultText`the relay repository could not be prepared`);
   let dir: string;
   try {
     dir = mkdtempSync(join(tmpdir(), "harpoc-git-relay-"));
@@ -2239,7 +2332,9 @@ function createRelayRepo(opts: {
         RELAY_CONFIG_REDIRECTS.every((name) => !existsSync(join(dir, name)));
     }
     if (!intact) {
-      throw VaultError.gitOperationFailed("the relay repository changed outside the vault");
+      throw VaultError.gitOperationFailed(
+        vaultText`the relay repository changed outside the vault`,
+      );
     }
   };
   const setHead = (value: string) => {
@@ -2255,11 +2350,11 @@ function createRelayRepo(opts: {
 function assertDirectory(dir: string): void {
   try {
     if (!statSync(dir).isDirectory()) {
-      throw VaultError.invalidGitConfig("working_directory is not a directory");
+      throw VaultError.invalidGitConfig(vaultText`working_directory is not a directory`);
     }
   } catch (err) {
     if (err instanceof VaultError) throw err;
-    throw VaultError.invalidGitConfig("working_directory does not exist");
+    throw VaultError.invalidGitConfig(vaultText`working_directory does not exist`);
   }
 }
 
@@ -2299,7 +2394,9 @@ function isolateGitConfig(env: Record<string, string>): Record<string, string> {
 function tempFileFailure(err: unknown): VaultError {
   return err instanceof VaultError
     ? err
-    : VaultError.gitOperationFailed("a temporary file of the git context could not be prepared");
+    : VaultError.gitOperationFailed(
+        vaultText`a temporary file of the git context could not be prepared`,
+      );
 }
 
 /**

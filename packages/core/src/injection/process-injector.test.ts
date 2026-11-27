@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ProcessAction, ProcessResult } from "@harpoc/shared";
-import { ErrorCode, MAX_PROCESS_OUTPUT_BYTES } from "@harpoc/shared";
+import { ErrorCode, MAX_PROCESS_OUTPUT_BYTES, vaultText } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { controlledPathDirs, resolveExecutable } from "./allowlist.js";
 import { forceFsIsolationUnavailableForTests } from "./fs-isolation.js";
@@ -245,7 +245,7 @@ describe("ProcessInjector — network isolation (§4.5.3 layer 4)", () => {
   afterEach(() => forceNetworkIsolationUnavailableForTests(null));
 
   it("refuses fail-closed and audits when the platform cannot deliver isolation", async () => {
-    forceNetworkIsolationUnavailableForTests("forced for test");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced for test`);
     const log = vi.fn();
     const audited = new ProcessInjector({ log } as unknown as AuditLogger);
     await expect(
@@ -311,7 +311,7 @@ describe("ProcessInjector — filesystem isolation (§4.5.3 layer 4)", () => {
   });
 
   it("refuses fail-closed before any spawn and audits when the platform cannot deliver isolation", async () => {
-    forceFsIsolationUnavailableForTests("forced by test");
+    forceFsIsolationUnavailableForTests(vaultText`forced by test`);
     const marker = join(fsTmpRoot, "marker");
     const log = vi.fn();
     const audited = new ProcessInjector({ log } as unknown as AuditLogger);

@@ -626,7 +626,6 @@ describe("runBootstrap", () => {
       isolation_mechanism: "bwrap",
       fs_isolation: true,
       fs_isolation_mechanism: "landlock",
-      sanitized: true,
       descendant_sweep: { killed: 1, failed: false },
       tree_kill: "job",
       strict_tree_exit: true,

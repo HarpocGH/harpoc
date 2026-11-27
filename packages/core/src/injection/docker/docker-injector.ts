@@ -7,9 +7,11 @@ import {
   ErrorCode,
   MIN_REDACTABLE_FRAGMENT,
   VaultError,
+  echoField,
+  vaultText,
 } from "@harpoc/shared";
 import { controlledPathDirs, matchesHostAllowlist, resolveAndMatchCommand } from "../allowlist.js";
-import { redactErrorMessage } from "../output-sanitizer.js";
+import { passError } from "../error-pass.js";
 import { spawnCaptured } from "../spawn-captured.js";
 import type { SpawnCapturedResult } from "../spawn-captured.js";
 import { writeHelperFiles } from "../spawn-captured-helpers.js";
@@ -135,6 +137,7 @@ export function buildDockerAuditDetails(action: DockerRegistryAction): DockerAud
 
 /** The default registry docker itself resolves a registry-less reference to. */
 const DEFAULT_REGISTRY = "registry-1.docker.io";
+const DEFAULT_REGISTRY_TEXT = vaultText`registry-1.docker.io`;
 
 /**
  * The key docker consults in `credHelpers` — and hands the helper on stdin —
@@ -301,12 +304,18 @@ export async function executeDockerRegistryAction(
   signal?: AbortSignal,
 ): Promise<DockerExecution> {
   const { user, secret } = parseDockerCredential(secretValue);
+  const whole = Buffer.from(secretValue).toString("utf8");
+  const thrownValues = [
+    secret,
+    ...(user.length >= MIN_REDACTABLE_FRAGMENT ? [user] : []),
+    ...(whole !== secret ? [whole] : []),
+  ];
   try {
     return await runDocker(action, policy, user, secret, signal);
   } catch (rawErr) {
-    // Every throw out of the injector passes redactErrorMessage: a thrown
+    // Every throw out of the injector passes passError: a thrown
     // message is a model-visible channel no result-shaped redaction touches.
-    throw redactErrorMessage(rawErr, [secret]);
+    throw passError(rawErr, thrownValues);
   }
 }
 
@@ -322,7 +331,7 @@ async function runDocker(
   // and DirectClient.useSecret take the action unparsed — on that path this
   // guard is the only check.
   if (typeof action.image !== "string" || action.image.startsWith("-")) {
-    throw VaultError.invalidInput("docker image reference must not start with '-'");
+    throw VaultError.invalidInput(vaultText`docker image reference must not start with '-'`);
   }
 
   const { registry, credentialKey } = parseImageReference(action.image);
@@ -330,7 +339,9 @@ async function runDocker(
   // Registry host allowlist — deny-by-default (an empty list refuses). The
   // default Docker Hub host is not exempt.
   if (!matchesHostAllowlist(registry, policy.host_allowlist)) {
-    throw VaultError.hostNotAllowed(registry);
+    throw VaultError.hostNotAllowed(
+      credentialKey === DOCKER_HUB_AUTH_KEY ? DEFAULT_REGISTRY_TEXT : echoField(action, "image"),
+    );
   }
 
   // Resolve + allowlist the docker binary (fail-safe deny, absolute-path pinned).
@@ -338,6 +349,7 @@ async function runDocker(
     "docker",
     policy.command_allowlist,
     controlledPathDirs(),
+    vaultText`docker`,
   );
 
   const config = writeDockerConfig(credentialKey);

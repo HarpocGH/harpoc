@@ -28,6 +28,8 @@ const HEADER_ECHO_TOKEN = "header-echo-token-value";
 const ECHOED_CREDENTIAL = "echo-me-token-value";
 const HEAD_REQUEST_TOKEN = "head-token";
 const ABORT_TOKEN = "abort-probe-token";
+const WARNING_TOKEN = "warning-origin-token";
+const WARNING_TOKEN_HEX = Buffer.from(WARNING_TOKEN).toString("hex");
 
 // The recording logger is module-scoped, so every case that reads `rows.at(-1)`
 // starts from an empty log — no row may be load-bearing across cases.
@@ -127,6 +129,15 @@ beforeAll(async () => {
       const port = (server.address() as { port: number }).port;
       res.writeHead(302, {
         Location: `http://localhost:${port}/echo?${url.searchParams.toString()}`,
+      });
+      res.end();
+      return;
+    }
+
+    if (url.pathname === "/redirect-hex-host") {
+      const port = (server.address() as { port: number }).port;
+      res.writeHead(302, {
+        Location: `http://${WARNING_TOKEN_HEX}.example.net:${port}/status?code=200`,
       });
       res.end();
       return;
@@ -1096,7 +1107,9 @@ describe("HttpInjector", () => {
         ),
       );
       expect((err as { code?: string }).code).toBe(ErrorCode.RESPONSE_TOO_LARGE);
-      expect(err.message).not.toContain("/big");
+      expect(err.message).toBe(
+        `Response body from ${baseUrl}/big?bytes=${MAX_HTTP_RESPONSE_BYTES + 1} exceeds the ${MAX_HTTP_RESPONSE_BYTES}-byte limit`,
+      );
       const last = rows.at(-1) as { detail: { error?: string }; success?: boolean };
       expect(last.success).toBe(false);
       expect(last.detail.error).toBe(ErrorCode.RESPONSE_TOO_LARGE);
@@ -1213,6 +1226,37 @@ describe("HttpInjector", () => {
       expect(response.headers?.["x-echo"]).toBe("header-echo-token-value");
       const last = rows.at(-1) as { detail: Record<string, unknown> };
       expect("sanitized" in last.detail).toBe(false);
+    });
+
+    it("redirect_warning does not carry the value", async () => {
+      const real = await vi.importActual<typeof import("./url-validator.js")>("./url-validator.js");
+      vi.mocked(validateUrl)
+        .mockImplementationOnce(real.validateUrl)
+        .mockImplementationOnce(async (urlStr) => ({
+          url: new URL(urlStr),
+          resolvedAddresses: ["127.0.0.1"],
+        }));
+      const hop = `http://${WARNING_TOKEN_HEX}.example.net:${port()}`;
+
+      const response = await new HttpInjector(logger).executeWithSecret(
+        {
+          method: "GET",
+          url: `${baseUrl}/redirect-hex-host`,
+          urlAllowlist: [`${baseUrl}/*`, `${hop}/*`],
+        },
+        new Uint8Array(Buffer.from(WARNING_TOKEN)),
+        { type: "bearer" },
+        "same-origin",
+        "secret-1",
+      );
+
+      expectAbsent(response.redirect_warning, WARNING_TOKEN_HEX);
+      expect(response.status).toBe(200);
+      expect(response.redirect_warning).toBe(
+        `Cross-origin redirect to http://[REDACTED].example.net:${port()} — credentials stripped`,
+      );
+      const last = rows.at(-1) as { detail: Record<string, unknown> };
+      expect(last.detail).toMatchObject({ context: "http", status: 200, sanitized: true });
     });
   });
 

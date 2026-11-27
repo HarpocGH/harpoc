@@ -1,5 +1,6 @@
 import { statSync, realpathSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
+import type { TextPart, VaultText } from "@harpoc/shared";
 import { VaultError } from "@harpoc/shared";
 
 /**
@@ -288,14 +289,16 @@ export function resolveExecutablePaths(
  * absolute paths against the same controlled PATH, then compared, so a bare name
  * and its absolute path are equivalent and PATH-shadowing cannot widen the set.
  *
- * @throws VaultError COMMAND_NOT_ALLOWED when the command is not permitted.
+ * @throws VaultError COMMAND_NOT_ALLOWED when the command is not permitted,
+ * quoting `named` where the caller hands the command's part, else the command.
  */
 export function resolveAndMatchCommand(
   command: string,
   allowlist: string[],
   pathDirs: string[],
+  named?: TextPart | VaultText,
 ): string {
-  return resolveAndMatchCommandPaths(command, allowlist, pathDirs).resolved;
+  return resolveAndMatchCommandPaths(command, allowlist, pathDirs, named).resolved;
 }
 
 /**
@@ -310,14 +313,15 @@ export function resolveAndMatchCommandPaths(
   command: string,
   allowlist: string[],
   pathDirs: string[],
+  named?: TextPart | VaultText,
 ): { found: string; resolved: string; matchedEntries: string[] } {
   if (allowlist.length === 0) {
-    throw VaultError.commandNotAllowed(command);
+    throw VaultError.commandNotAllowed(named ?? command);
   }
 
   const request = resolveExecutablePaths(command, pathDirs);
   if (!request) {
-    throw VaultError.commandNotAllowed(command);
+    throw VaultError.commandNotAllowed(named ?? command);
   }
 
   const target = normalizeForCompare(request.resolved);
@@ -330,7 +334,7 @@ export function resolveAndMatchCommandPaths(
   }
 
   if (matchedEntries.length === 0) {
-    throw VaultError.commandNotAllowed(command);
+    throw VaultError.commandNotAllowed(named ?? command);
   }
 
   return { found: request.found, resolved: request.resolved, matchedEntries };

@@ -1,4 +1,4 @@
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, recordOf } from "@harpoc/shared";
 import type { UseSecretResponse } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -232,5 +232,24 @@ describe("sanitizeUseSecretResult", () => {
       ErrorCode.INVALID_INPUT,
     );
     expect(err.message).toContain("Unsupported result type: ftp");
+  });
+
+  it("names an unknown result type as it stands, with no record: the type is no field of an action", async () => {
+    const bogus = { type: "ftp", payload: "x" } as unknown as UseSecretResponse;
+    const err = await expectVaultError(
+      () => sanitizeUseSecretResult(bogus, guard),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("Unsupported result type: ftp");
+    expect(recordOf(err)).toBeUndefined();
+  });
+
+  it("names a result without a type as it did", async () => {
+    const bogus = { payload: "x" } as unknown as UseSecretResponse;
+    const err = await expectVaultError(
+      () => sanitizeUseSecretResult(bogus, guard),
+      ErrorCode.INVALID_INPUT,
+    );
+    expect(err.message).toBe("Unsupported result type: [object Object]");
   });
 });

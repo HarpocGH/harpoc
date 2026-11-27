@@ -1,6 +1,12 @@
 import { randomBytes } from "node:crypto";
 import type { InjectionPolicy } from "@harpoc/shared";
-import { ErrorCode, SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC, VaultError } from "@harpoc/shared";
+import {
+  ErrorCode,
+  SSH_BOOTSTRAP_CONNECT_TIMEOUT_SEC,
+  VaultError,
+  token,
+  vaultText,
+} from "@harpoc/shared";
 import { asciiLowerCase } from "./allowlist.js";
 import type { FsIsolationMechanism } from "./fs-isolation.js";
 import type { NetworkIsolationMechanism } from "./network-isolation.js";
@@ -22,6 +28,8 @@ import type { SshPublicKey } from "./ssh-common-keys.js";
 import {
   BOOTSTRAP_REMOTE_COMMAND,
   type BootstrapStatus,
+  STATUS_DROP_IN_WORDS,
+  STATUS_KEY_WORDS,
   bootstrapStdin,
   readBootstrapStatus,
   redactedLines,
@@ -61,9 +69,9 @@ export const SSH_ASKPASS_FILES: HelperFilesSpec = {
   nullStdin: true,
 };
 
-const NAMES_REFUSED = "host and user must be names of letters, digits, '.', '_' and '-'";
-const MARKS_UNDRAWN = "ssh bootstrap could not draw its marks";
-const TEMP_FILE_UNPREPARED = "a temporary file of the ssh bootstrap could not be prepared";
+const NAMES_REFUSED = vaultText`host and user must be names of letters, digits, '.', '_' and '-'`;
+const MARKS_UNDRAWN = vaultText`ssh bootstrap could not draw its marks`;
+const TEMP_FILE_UNPREPARED = vaultText`a temporary file of the ssh bootstrap could not be prepared`;
 
 /** What the engine hands the bootstrap: the block's target and keys, the opt-in, and the stored password. */
 export interface BootstrapCall {
@@ -79,7 +87,10 @@ export interface BootstrapCall {
   budgetMs: number;
 }
 
-/** The spawn seam's fields for the outcome's row, folded as the `ssh` context folds them. */
+/**
+ * The spawn seam's fields for the outcome's row: the `ssh` context's fold of a spawn's result,
+ * with `truncated` and without `sanitized`.
+ */
 export interface SpawnAuditFields {
   exit_code: number | null;
   timed_out: boolean;
@@ -88,7 +99,6 @@ export interface SpawnAuditFields {
   isolation_mechanism?: NetworkIsolationMechanism;
   fs_isolation: boolean;
   fs_isolation_mechanism?: FsIsolationMechanism;
-  sanitized?: true;
   descendant_sweep?: { killed: number; failed: boolean };
   tree_kill?: TreeKillMechanism;
   strict_tree_exit?: true;
@@ -188,7 +198,7 @@ export function readBootstrapOutcome(
   if (seen.spawn_failed && !seen.timed_out) {
     return {
       kind: "not_spawned",
-      error: VaultError.sshConnectFailed("the ssh client could not be started"),
+      error: VaultError.sshConnectFailed(vaultText`the ssh client could not be started`),
     };
   }
   if (seen.truncated) return { kind: "unconfirmed" };
@@ -207,7 +217,10 @@ export function readBootstrapOutcome(
   if (status !== null && (status.key === "not_attempted" || status.key === "failed")) {
     return {
       kind: "refused",
-      error: VaultError.sshBootstrapStepFailed(status.dropIn, status.key),
+      error: VaultError.sshBootstrapStepFailed(
+        token(status.dropIn, STATUS_DROP_IN_WORDS),
+        token(status.key, STATUS_KEY_WORDS),
+      ),
       status,
     };
   }
@@ -265,7 +278,6 @@ function spawnAuditFields(
     ...(r.isolation_mechanism ? { isolation_mechanism: r.isolation_mechanism } : {}),
     fs_isolation: fsIsolation,
     ...(r.fs_isolation_mechanism ? { fs_isolation_mechanism: r.fs_isolation_mechanism } : {}),
-    ...(r.redacted ? { sanitized: true } : {}),
     ...(r.descendant_sweep ? { descendant_sweep: r.descendant_sweep } : {}),
     ...(r.tree_kill ? { tree_kill: r.tree_kill } : {}),
     ...(r.strict_tree_exit ? { strict_tree_exit: true } : {}),

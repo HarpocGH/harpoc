@@ -1,25 +1,27 @@
-import type { ImapAction, ImapResult, InjectionPolicy } from "@harpoc/shared";
+import type { ImapAction, ImapResult, InjectionPolicy, TextPart, VaultText } from "@harpoc/shared";
 import {
   ActionType,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_IMAP_PORT,
   MIN_REDACTABLE_FRAGMENT,
   VaultError,
+  echoField,
+  num,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import { matchesHostPortAllowlist } from "./allowlist.js";
+import { passError } from "./error-pass.js";
 import type {
   ImapAuth,
   ImapConnectOptions,
   ImapFetchParts,
   ImapMessage,
+  ImapOperationNames,
   ImapSearchCriteria,
 } from "./mail/imap-client.js";
 import { ImapClient } from "./mail/imap-client.js";
-import {
-  mapStringLeavesTracked,
-  redactErrorMessage,
-  redactSecretEncodings,
-} from "./output-sanitizer.js";
+import { mapStringLeavesTracked, redactValues } from "./output-sanitizer.js";
 import type { MailTlsConfig } from "./smtp-injector.js";
 import { validateHostPort } from "./url-validator.js";
 
@@ -89,9 +91,14 @@ export interface ImapExecution {
  */
 export interface ImapClientLike {
   select(mailbox: string, readOnly: boolean): Promise<{ exists: number }>;
-  searchUids(criteria: ImapSearchCriteria): Promise<number[]>;
-  fetch(uids: number[], parts: ImapFetchParts): Promise<ImapMessage[]>;
-  store(uids: number[], addFlags: string[], removeFlags: string[]): Promise<number>;
+  searchUids(criteria: ImapSearchCriteria, named?: ImapOperationNames): Promise<number[]>;
+  fetch(uids: number[], parts: ImapFetchParts, named?: ImapOperationNames): Promise<ImapMessage[]>;
+  store(
+    uids: number[],
+    addFlags: string[],
+    removeFlags: string[],
+    named?: ImapOperationNames,
+  ): Promise<number>;
   move(uids: number[], targetMailbox: string): Promise<number>;
   copy(uids: number[], targetMailbox: string): Promise<number>;
   expunge(): Promise<number>;
@@ -114,6 +121,12 @@ const MUTATION_KINDS = new Set<ImapAction["operation"]["kind"]>([
   "move",
   "copy",
   "expunge",
+]);
+
+const OPERATION_KINDS = new Set<ImapAction["operation"]["kind"]>([
+  "search",
+  "fetch",
+  ...MUTATION_KINDS,
 ]);
 
 /** The number of UIDs/messages a result actually touched — the sole source of
@@ -160,7 +173,7 @@ export function buildImapAuditDetails(
  * policy value — a read must never risk setting `\Seen` as a side effect —
  * while a mutation (only reachable when `imap_read_only` is false) uses
  * SELECT. Every throw leaves the injector with the credential stripped
- * (`redactErrorMessage`), and every fetched message's header/text content is
+ * (`passError`), and every fetched message's header/text content is
  * redacted the same way before it is returned, so a credential planted in a
  * message body never reaches the model.
  *
@@ -191,7 +204,7 @@ export class ImapInjector {
     try {
       return await this.execute(action, secretValue, policy, connection, oauth, material, signal);
     } catch (err) {
-      throw redactThrown(err, material);
+      throw passError(err, material);
     }
   }
 
@@ -204,25 +217,28 @@ export class ImapInjector {
     material: string[],
     signal: AbortSignal | undefined,
   ): Promise<ImapExecution> {
-    const { host, port } = resolveHostPort(action);
+    const { host, port, target } = resolveHostPort(action);
     const kind = action.operation.kind;
     const isMutation = MUTATION_KINDS.has(kind);
 
     // 1. imap_read_only gate — BEFORE any socket. A refused mutation never
     //    reaches connectImap.
     if (policy.imap_read_only && isMutation) {
-      throw VaultError.imapMutationNotAllowed(kind);
+      throw VaultError.imapMutationNotAllowed(token(kind, OPERATION_KINDS));
     }
 
     // 2. Host allowlist (deny-by-default, atop the mandatory SSRF floor).
     if (!matchesHostPortAllowlist(host, port, policy.host_allowlist)) {
-      throw VaultError.hostNotAllowed(`${host}:${port}`);
+      throw VaultError.hostNotAllowed(target);
     }
 
     // 3. SSRF pre-flight: reject private/internal targets and pin the dialed
     //    address so the socket cannot be re-resolved (TLS identity stays
     //    bound to the logical host — mirrors the database/SMTP injectors).
-    const validated = await validateHostPort(host, port);
+    const validated = await validateHostPort(host, port, {
+      parts: echoField(action, "host"),
+      values: [secretValue, ...material],
+    });
     if (signal?.aborted) throw VaultError.vaultLocked();
     const pinnedAddress = validated.resolvedAddress;
 
@@ -235,6 +251,7 @@ export class ImapInjector {
     const client = await this.connectImap({
       host,
       port,
+      origin: target,
       address: pinnedAddress,
       auth,
       timeoutMs,
@@ -252,7 +269,7 @@ export class ImapInjector {
       // 7. Dispatch the single operation (sequential — one command in flight
       //    per connection), then wrap its operation-shaped fields in the wire
       //    discriminants.
-      const { fields, sanitized } = await this.runOperation(client, action.operation, material);
+      const { fields, sanitized } = await this.runOperation(client, action, material);
 
       return {
         result: { type: ActionType.IMAP, operation: kind, ...fields },
@@ -270,9 +287,10 @@ export class ImapInjector {
 
   private async runOperation(
     client: ImapClientLike,
-    operation: ImapAction["operation"],
+    action: ImapAction,
     material: string[],
   ): Promise<{ fields: ImapOperationFields; sanitized: boolean }> {
+    const operation = action.operation;
     switch (operation.kind) {
       case "search": {
         const criteria: ImapSearchCriteria = {
@@ -282,20 +300,25 @@ export class ImapInjector {
           subject: operation.subject,
           text: operation.text,
         };
-        const uids = await client.searchUids(criteria);
+        const uids = await client.searchUids(criteria, {
+          since: echoField(action, "operation", "since"),
+        });
         return { fields: { uids }, sanitized: false };
       }
       case "fetch": {
-        const messages = await client.fetch(operation.uids, operation.parts);
+        const messages = await client.fetch(operation.uids, operation.parts, {
+          parts: echoField(action, "operation", "parts"),
+        });
         const redacted = redactMessages(messages, material);
         return { fields: { messages: redacted.messages }, sanitized: redacted.sanitized };
       }
       case "store": {
-        const affected = await client.store(
-          operation.uids,
-          operation.add_flags ?? [],
-          operation.remove_flags ?? [],
-        );
+        const addFlags = operation.add_flags ?? [];
+        const removeFlags = operation.remove_flags ?? [];
+        const affected = await client.store(operation.uids, addFlags, removeFlags, {
+          addFlags: flagParts(action, "add_flags", addFlags),
+          removeFlags: flagParts(action, "remove_flags", removeFlags),
+        });
         return { fields: { affected }, sanitized: false };
       }
       case "move": {
@@ -313,7 +336,7 @@ export class ImapInjector {
       default: {
         const exhaustive: never = operation;
         throw VaultError.invalidInput(
-          `unsupported IMAP operation: ${String((exhaustive as { kind: string }).kind)}`,
+          vaultText`unsupported IMAP operation: ${token((exhaustive as { kind: unknown }).kind, OPERATION_KINDS)}`,
         );
       }
     }
@@ -339,18 +362,39 @@ export async function executeImapAction(
 }
 
 /** Split `host` (which may embed `:port`) and an optional explicit port. */
-function resolveHostPort(action: ImapAction): { host: string; port: number } {
+function resolveHostPort(action: ImapAction): { host: string; port: number; target: VaultText } {
   const hostField: unknown = action.host;
-  if (typeof hostField !== "string") throw VaultError.invalidInput("host must be a string");
+  if (typeof hostField !== "string") {
+    throw VaultError.invalidInput(vaultText`host must be a string`);
+  }
   const match = /^(.*):(\d+)$/.exec(action.host);
   if (match && match[1] !== undefined && match[2] !== undefined) {
     const embedded = Number.parseInt(match[2], 10);
     if (embedded < 1 || embedded > 65_535) {
-      throw VaultError.invalidInput("embedded port out of range (1-65535)");
+      throw VaultError.invalidInput(vaultText`embedded port out of range (1-65535)`);
     }
-    return { host: match[1], port: action.port ?? embedded };
+    const port = action.port ?? embedded;
+    return { host: match[1], port, target: targetText(action, true, port) };
   }
-  return { host: action.host, port: action.port ?? DEFAULT_IMAP_PORT };
+  const port = action.port ?? DEFAULT_IMAP_PORT;
+  return { host: action.host, port, target: targetText(action, false, port) };
+}
+
+/** The target as the action named it: the host field as sent, and the port unless the field embeds one and the action sent none. */
+function targetText(action: ImapAction, embedsPort: boolean, port: number): VaultText {
+  const sent: unknown = action.port;
+  const host = echoField(action, "host");
+  if (embedsPort && (sent === undefined || sent === null)) return vaultText`${host}`;
+  return vaultText`${host}:${typeof sent === "string" ? echoField(action, "port") : num(port)}`;
+}
+
+/** The part of each flag in an operation's `field`, as the action sent it. */
+function flagParts(
+  action: ImapAction,
+  field: "add_flags" | "remove_flags",
+  flags: readonly string[],
+): TextPart[] {
+  return Array.from(flags, (_flag, index) => echoField(action, "operation", field, index));
 }
 
 /** XOAUTH2 when an OAuth token is present, else the `username:password` arm. */
@@ -360,7 +404,7 @@ function buildAuth(secretValue: string, oauth: ImapOAuth | undefined): ImapAuth 
   }
   const i = secretValue.indexOf(":");
   if (i < 0) {
-    throw VaultError.invalidInput("IMAP secret must be in 'username:password' form");
+    throw VaultError.invalidInput(vaultText`IMAP secret must be in 'username:password' form`);
   }
   return {
     kind: "password",
@@ -392,15 +436,6 @@ function redactionMaterial(secretValue: string, oauth: ImapOAuth | undefined): s
   return user.length >= MIN_REDACTABLE_FRAGMENT ? [password, user] : [password];
 }
 
-/** Strip every credential fragment from a thrown error, in turn. */
-function redactThrown(err: unknown, material: string[]): unknown {
-  let out = err;
-  for (const secret of material) {
-    if (secret.length > 0) out = redactErrorMessage(out, [secret]);
-  }
-  return out;
-}
-
 /**
  * Redact every string leaf (headers, text, envelope fields) of every fetched
  * message. A credential planted in a message body — the mail-context analog
@@ -411,11 +446,7 @@ function redactMessages(
   messages: ImapMessage[],
   material: string[],
 ): { messages: ImapMessage[]; sanitized: boolean } {
-  const redactOne = (s: string): string =>
-    material.reduce(
-      (acc, secret) => (secret.length > 0 ? redactSecretEncodings(acc, secret) : acc),
-      s,
-    );
+  const redactOne = (s: string): string => redactValues(s, material);
   const walked = mapStringLeavesTracked(messages, redactOne, 0);
   return { messages: walked.value as ImapMessage[], sanitized: walked.changed };
 }

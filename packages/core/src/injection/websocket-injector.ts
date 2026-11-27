@@ -10,12 +10,15 @@ import {
   DEFAULT_WS_COLLECT_WINDOW_MS,
   ResponseMode as ResponseModeValue,
   VaultError,
+  echoField,
+  token,
 } from "@harpoc/shared";
 import { Agent, WebSocket } from "undici";
 import type { CloseEvent, MessageEvent } from "undici";
 import { matchesUrlAllowlist } from "./allowlist.js";
+import { passError } from "./error-pass.js";
 import { applyInjectionConfig, createPinnedLookup } from "./http-injector.js";
-import { redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
+import { redactSecretEncodings } from "./output-sanitizer.js";
 import { isResponseModeAllowed } from "./response-mode.js";
 import { WS_SCHEMES, validateUrl } from "./url-validator.js";
 
@@ -74,7 +77,10 @@ export function buildWsAuditDetails(
 function resolveResponseMode(action: WebsocketAction, policy: InjectionPolicy): ResponseMode {
   const floor = policy.response_mode ?? ResponseModeValue.FILTERED;
   if (action.response_mode && !isResponseModeAllowed(floor, action.response_mode)) {
-    throw VaultError.responseModeNotAllowed(action.response_mode, floor);
+    throw VaultError.responseModeNotAllowed(
+      echoField(action, "response_mode"),
+      token(floor, Object.values(ResponseModeValue)),
+    );
   }
   return action.response_mode ?? floor;
 }
@@ -291,8 +297,8 @@ async function dialAndCollect(
  * URL search param — all applied to the handshake request, never sent as a
  * frame. A non-101 handshake response (including a 3xx — undici's WebSocket
  * never follows a redirect; see `waitForOpen`'s doc comment) surfaces as
- * `websocketConnectFailed(origin)`, origin-only, with the credential stripped
- * from any residual error text via `redactErrorMessage`.
+ * `websocketConnectFailed`, quoting the URL as the action sent it, never the
+ * dialled one, which can carry the injected query credential.
  */
 export async function executeWebsocketAction(
   action: WebsocketAction,
@@ -301,17 +307,17 @@ export async function executeWebsocketAction(
   signal?: AbortSignal,
 ): Promise<WebsocketExecution> {
   const responseMode = resolveResponseMode(action, policy);
+  const named = echoField(action, "url");
 
   if (!matchesUrlAllowlist(action.url, policy.url_allowlist)) {
-    throw VaultError.urlNotAllowed(action.url);
+    throw VaultError.urlNotAllowed(named);
   }
 
   const valueStr = Buffer.from(secretValue).toString("utf8");
 
-  const validated = await validateUrl(action.url, WS_SCHEMES);
+  const validated = await validateUrl(action.url, WS_SCHEMES, { parts: named, values: [valueStr] });
   if (signal?.aborted) throw VaultError.vaultLocked();
   const url = validated.url;
-  const origin = url.origin;
 
   const { url: finalUrl, headers } = applyInjectionConfig(url, {}, action.injection, secretValue);
 
@@ -335,9 +341,9 @@ export async function executeWebsocketAction(
   try {
     return await dialAndCollect(finalUrl, headers, dispatcher, action, responseMode, valueStr);
   } catch (rawErr) {
-    const err = redactErrorMessage(rawErr, [valueStr]);
+    const err = passError(rawErr, [valueStr]);
     if (err instanceof VaultError) throw err;
-    throw VaultError.websocketConnectFailed(origin);
+    throw VaultError.websocketConnectFailed(named);
   } finally {
     // destroy(), not close(): close() waited for a pending connect the
     // handshake timeout could not cancel, so a stalled connect refused ~10 s

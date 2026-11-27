@@ -4,7 +4,8 @@ import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { maxUnixSocketPathBytes, VaultError } from "@harpoc/shared";
+import { maxUnixSocketPathBytes, num, VaultError, vaultText } from "@harpoc/shared";
+import { errnoToken } from "../error-words.js";
 import { IDENTITY_COMMENT, createAgentResponder } from "./agent-protocol.js";
 import { loadPrivateKey, opensshPublicKeyLine } from "./key-loader.js";
 
@@ -58,8 +59,9 @@ export class EphemeralSshAgent {
     try {
       key = loadPrivateKey(privateKeyPem);
     } catch (err) {
-      const message = err instanceof VaultError ? err.message : "invalid private key";
-      return Promise.reject(err instanceof VaultError ? err : VaultError.sshAgentFailed(message));
+      return Promise.reject(
+        err instanceof VaultError ? err : VaultError.sshAgentFailed(vaultText`invalid private key`),
+      );
     }
 
     let authSock: string;
@@ -73,7 +75,7 @@ export class EphemeralSshAgent {
       if (bytes > max) {
         return Promise.reject(
           VaultError.sshAgentFailed(
-            `the agent's socket path is ${String(bytes)} bytes, over the ${String(max)} a Unix socket address holds`,
+            vaultText`the agent's socket path is ${num(bytes)} bytes, over the ${num(max)} a Unix socket address holds`,
           ),
         );
       }
@@ -81,7 +83,7 @@ export class EphemeralSshAgent {
         tempDir = mkdtempSync(prefix);
       } catch {
         return Promise.reject(
-          VaultError.sshAgentFailed("the agent's socket directory could not be created"),
+          VaultError.sshAgentFailed(vaultText`the agent's socket directory could not be created`),
         );
       }
       authSock = join(tempDir, SOCKET_NAME);
@@ -117,7 +119,7 @@ export class EphemeralSshAgent {
         }
         reject(
           VaultError.sshAgentFailed(
-            `the agent's socket could not be bound (${(err as NodeJS.ErrnoException | null | undefined)?.code ?? "unknown error"})`,
+            vaultText`the agent's socket could not be bound (${errnoToken((err as NodeJS.ErrnoException | null | undefined)?.code)})`,
           ),
         );
       };

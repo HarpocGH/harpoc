@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, vaultText } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import {
   MONITOR_WRAPPER,
@@ -144,7 +144,7 @@ child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
   });
 
   it("records no tree_kill when the wrapper is unavailable off win32", async () => {
-    jobMock.mockResolvedValue({ mechanism: null, reason: "test: unavailable" });
+    jobMock.mockResolvedValue({ mechanism: null, reason: vaultText`test: unavailable` });
     const log = vi.fn();
     const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
     await auditedInjector.executeWithSecret(
@@ -323,7 +323,10 @@ process.stderr.write("gpid=" + String(g.pid) + "\\n");
   it.runIf(process.platform === "win32")(
     "win32: a strict secret with no wrapper is refused before the spawn, audited, naming the reason",
     async () => {
-      jobMock.mockResolvedValue({ mechanism: null, reason: "test: no wrapper on this host" });
+      jobMock.mockResolvedValue({
+        mechanism: null,
+        reason: vaultText`test: no wrapper on this host`,
+      });
       const log = vi.fn();
       const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
       await expect(
@@ -352,7 +355,10 @@ process.stderr.write("gpid=" + String(g.pid) + "\\n");
   it.runIf(process.platform !== "win32")(
     "POSIX: a strict secret runs without a wrapper, marked strict on mcp.spawn, no tree_kill",
     async () => {
-      jobMock.mockResolvedValue({ mechanism: null, reason: "unsupported platform: linux" });
+      jobMock.mockResolvedValue({
+        mechanism: null,
+        reason: vaultText`unsupported platform: linux`,
+      });
       const log = vi.fn();
       const auditedInjector = new McpInjector({ log } as unknown as AuditLogger, registry);
       await auditedInjector.executeWithSecret(

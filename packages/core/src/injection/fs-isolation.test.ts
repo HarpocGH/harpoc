@@ -1,4 +1,4 @@
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, recordOf, vaultText } from "@harpoc/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BWRAP_COMBINED_PREFIX_ARGS, BWRAP_FS_PREFIX_ARGS } from "./bwrap.js";
 import {
@@ -347,7 +347,7 @@ describe("requireFsIsolation", () => {
       probeBinary: () => true,
       runProbe: vi.fn().mockResolvedValue(true),
     };
-    forceFsIsolationUnavailableForTests("forced by test");
+    forceFsIsolationUnavailableForTests(vaultText`forced by test`);
     await expect(requireFsIsolation("/usr/bin/tool", [], seams)).rejects.toSatisfy(
       (err: unknown) => {
         expectFsIsolationUnavailable(err, "forced by test");
@@ -362,7 +362,7 @@ describe("requireFsIsolation", () => {
   it("is checked before any platform lookup — the force hook wins on darwin too", async () => {
     const probeBinary = vi.fn();
     const runProbe = vi.fn();
-    forceFsIsolationUnavailableForTests("forced everywhere");
+    forceFsIsolationUnavailableForTests(vaultText`forced everywhere`);
     await expect(
       requireFsIsolation("/usr/bin/tool", [], { platform: "darwin", probeBinary, runProbe }),
     ).rejects.toSatisfy((err: unknown) => {
@@ -582,7 +582,7 @@ describe("requireCombinedIsolation", () => {
     const probeBinary = vi.fn().mockReturnValue(true);
     const runProbe = vi.fn().mockResolvedValue(true);
     const seams = { platform: "darwin" as const, probeBinary, runProbe };
-    forceFsIsolationUnavailableForTests("forced by test");
+    forceFsIsolationUnavailableForTests(vaultText`forced by test`);
     await expect(requireCombinedIsolation("/usr/bin/tool", [], seams)).rejects.toSatisfy(
       (err: unknown) => {
         expectFsIsolationUnavailable(err, "forced by test");
@@ -614,5 +614,123 @@ describe("requireCombinedIsolation", () => {
     ]);
     expect(fsWrap.args[1]).toBe(SANDBOX_EXEC_DENY_WRITE_PROFILE);
     expect(combinedWrap.args[1]).toBe(SANDBOX_EXEC_DENY_NETWORK_AND_WRITE_PROFILE);
+  });
+});
+
+describe("a refusal is assembled from parts, its text unchanged", () => {
+  beforeEach(() => resetFsIsolationProbeForTests());
+  afterEach(() => {
+    forceFsIsolationUnavailableForTests(null);
+    resetFsIsolationProbeForTests();
+  });
+
+  const failing = (): Promise<boolean> => Promise.resolve(false);
+  const LANDLOCK_OUT =
+    "Landlock unavailable (setpriv --landlock-access probe failed; needs util-linux >= 2.40 on a Landlock-enabled kernel)";
+  const COMBINED_ON_LINUX =
+    "combined network+filesystem isolation on linux takes one bwrap wrapper when unshare and Landlock are not both available";
+
+  it.each([
+    {
+      what: "no probe payload",
+      wrap: requireFsIsolation,
+      seams: { platform: "linux", probeBinary: (p: string) => p.endsWith("/setpriv") },
+      reason: "no /usr/bin/true or /bin/true available for the capability probe",
+    },
+    {
+      what: "neither linux tier",
+      wrap: requireFsIsolation,
+      seams: { platform: "linux", probeBinary: () => false },
+      reason: "setpriv not found in /usr/bin or /bin; bwrap not found in /usr/bin or /bin",
+    },
+    {
+      what: "both linux probes failing",
+      wrap: requireFsIsolation,
+      seams: { platform: "linux", probeBinary: () => true, runProbe: failing },
+      reason: `${LANDLOCK_OUT}; bwrap --ro-bind probe failed (bubblewrap needs the unprivileged user-namespace grant)`,
+    },
+    {
+      what: "no sandbox-exec",
+      wrap: requireFsIsolation,
+      seams: { platform: "darwin", probeBinary: () => false },
+      reason: "sandbox-exec not found at /usr/bin/sandbox-exec",
+    },
+    {
+      what: "a failing sandbox-exec probe",
+      wrap: requireFsIsolation,
+      seams: { platform: "darwin", probeBinary: () => true, runProbe: failing },
+      reason: "sandbox-exec deny-write probe failed",
+    },
+    {
+      what: "win32",
+      wrap: requireFsIsolation,
+      seams: { platform: "win32" },
+      reason: "unsupported platform: win32",
+    },
+    {
+      what: "a platform node does not name",
+      wrap: requireFsIsolation,
+      seams: { platform: "plan9" },
+      reason: "unsupported platform: unknown",
+    },
+    {
+      what: "combined: no bwrap on linux",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "linux", probeBinary: () => false },
+      reason: `${COMBINED_ON_LINUX}; bwrap not found in /usr/bin or /bin`,
+    },
+    {
+      what: "combined: a failing bwrap probe on linux",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "linux", probeBinary: () => true, runProbe: failing },
+      reason: `${COMBINED_ON_LINUX}; bwrap --ro-bind --unshare-net probe failed (bubblewrap needs the unprivileged user-namespace grant)`,
+    },
+    {
+      what: "combined: no sandbox-exec",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "darwin", probeBinary: () => false },
+      reason: "sandbox-exec not found at /usr/bin/sandbox-exec",
+    },
+    {
+      what: "combined: a failing sandbox-exec probe",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "darwin", probeBinary: () => true, runProbe: failing },
+      reason: "sandbox-exec deny-network+deny-write probe failed",
+    },
+    {
+      what: "combined: win32",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "win32" },
+      reason: "unsupported platform: win32",
+    },
+    {
+      what: "combined: a platform node does not name",
+      wrap: requireCombinedIsolation,
+      seams: { platform: "plan9" },
+      reason: "unsupported platform: unknown",
+    },
+  ])("$what", async ({ wrap, seams, reason }) => {
+    const err = await expectVaultError(
+      () => wrap("/usr/bin/tool", [], { ...seams, platform: seams.platform as NodeJS.Platform }),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
+
+    expect(err.message).toBe(VaultError.fsIsolationUnavailable(reason).message);
+    expect(recordOf(err)).toBeDefined();
+  });
+
+  it.each([
+    { what: "filesystem", wrap: requireFsIsolation },
+    { what: "combined", wrap: requireCombinedIsolation },
+  ])("the forced refusal — $what", async ({ wrap }) => {
+    forceFsIsolationUnavailableForTests(vaultText`forced by test`);
+
+    const err = await expectVaultError(
+      () => wrap("/usr/bin/tool", []),
+      ErrorCode.FS_ISOLATION_UNAVAILABLE,
+    );
+
+    expect(err.message).toBe(VaultError.fsIsolationUnavailable("forced by test").message);
+    expect(recordOf(err)).toBeDefined();
   });
 });

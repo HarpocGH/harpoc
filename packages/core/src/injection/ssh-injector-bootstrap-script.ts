@@ -129,6 +129,12 @@ const STATUS_PAIRS: readonly BootstrapStatus[] = [
   { dropIn: "refused", key: "not_attempted" },
 ];
 
+/** The words of the status table's two columns: what became of the sudoers drop-in, and of the key. */
+export const STATUS_DROP_IN_WORDS: ReadonlySet<string> = new Set(
+  STATUS_PAIRS.map((pair) => pair.dropIn),
+);
+export const STATUS_KEY_WORDS: ReadonlySet<string> = new Set(STATUS_PAIRS.map((pair) => pair.key));
+
 const FRAME = /^[A-Za-z0-9_-]{24}$/;
 
 /**

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, renderVaultText, vaultText } from "@harpoc/shared";
 import { VaultEngine } from "./vault-engine.js";
 import { controlledPathDirs, resolveExecutable } from "./injection/allowlist.js";
 import { resolveNativeSshClient } from "./injection/__fixtures__/native-ssh-client.js";
@@ -33,7 +33,7 @@ const SSH = resolveNativeSshClient("ssh");
 const SFTP = resolveNativeSshClient("sftp");
 const DOCKER = resolveExecutable("docker", controlledPathDirs());
 
-const REASON = "test: no job wrapper on this host";
+const REASON = vaultText`test: no job wrapper on this host`;
 
 let tempDir: string;
 let cloneDir: string;
@@ -86,7 +86,7 @@ async function refusedRow(handle: string, action: Action): Promise<unknown> {
     () => engine.useSecret(handle, action),
     ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE,
   );
-  expect(err.message).toContain(REASON);
+  expect(err.message).toContain(renderVaultText(REASON));
   const secretId = await engine.resolveSecretId(handle);
   const rows = engine.queryAudit({ secretId, eventType: AuditEventType.SECRET_USE });
   expect(rows).toHaveLength(1);

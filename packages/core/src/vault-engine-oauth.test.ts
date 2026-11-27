@@ -1272,6 +1272,67 @@ describe("refreshOAuthToken — the SSRF floor on the token endpoint", () => {
 });
 
 // ---------------------------------------------------------------------------
+// A POST that fails: a code, nothing of fetch's message
+// ---------------------------------------------------------------------------
+
+describe("refreshOAuthToken — a POST that fails names a code", () => {
+  let secretId: string;
+
+  beforeEach(async () => {
+    await engine.initVault("password");
+    ({ secretId } = await engine.createOAuthSecret("unreachable", defaultProviderConfig()));
+    await engine.completeOAuthFlow(secretId, "old-access", "old-refresh", Date.now() - 1000);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      what: "a refused connection",
+      thrown: () =>
+        Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+      word: "ECONNREFUSED",
+      absent: "fetch failed",
+    },
+    {
+      what: "a code a TLS peer chooses",
+      thrown: () =>
+        Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ERR_SSL_PACKET_LENGTH_TOO_LONG" },
+        }),
+      word: "unknown error",
+      absent: "ERR_SSL",
+    },
+    {
+      what: "the timeout",
+      thrown: () => new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      word: "timeout",
+      absent: "aborted",
+    },
+    {
+      what: "a URL fetch cannot parse",
+      thrown: () => new TypeError("Failed to parse URL from https://stored"),
+      word: "unknown error",
+      absent: "stored",
+    },
+  ])("a failed refresh names a code — $what", async ({ thrown, word, absent }) => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(thrown()));
+
+    const err = await expectVaultError(
+      () => engine.refreshOAuthToken(secretId),
+      ErrorCode.OAUTH_REFRESH_FAILED,
+    );
+
+    expect(err.message.includes(absent)).toBe(false);
+    expect(err.message).toBe(
+      `OAuth token refresh failed: the token endpoint could not be reached (${word})`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Caller policy enforcement on the OAuth entry points
 // ---------------------------------------------------------------------------
 

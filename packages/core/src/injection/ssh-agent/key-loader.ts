@@ -1,6 +1,6 @@
 import { createPrivateKey, createPublicKey, sign as cryptoSign } from "node:crypto";
 import type { KeyObject } from "node:crypto";
-import { VaultError } from "@harpoc/shared";
+import { VaultError, token, vaultText } from "@harpoc/shared";
 import { hasEncryptedPemMarker } from "./key-detection.js";
 import {
   SshReader,
@@ -34,6 +34,26 @@ const EC_BY_NAMED_CURVE: Record<string, string> = {
   secp384r1: "P-384",
   secp521r1: "P-521",
 };
+
+/** The key types OpenSSH 9.5p2 (`ssh -Q key`) and node name that the loader does not take. */
+const KNOWN_UNSUPPORTED_KEY_TYPES: ReadonlySet<string> = new Set([
+  "ssh-dss",
+  "sk-ssh-ed25519@openssh.com",
+  "sk-ecdsa-sha2-nistp256@openssh.com",
+  "ssh-ed25519-cert-v01@openssh.com",
+  "sk-ssh-ed25519-cert-v01@openssh.com",
+  "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
+  "ssh-dss-cert-v01@openssh.com",
+  "ssh-rsa-cert-v01@openssh.com",
+  "ed448",
+  "x25519",
+  "x448",
+  "ml-dsa-44",
+  "ml-dsa-65",
+  "ml-dsa-87",
+]);
+
+const KNOWN_UNSUPPORTED_CURVES: ReadonlySet<string> = new Set(["secp256k1"]);
 
 /** A private key ready to serve: its SSH public-key blob and a signer. */
 export interface LoadedKey {
@@ -74,16 +94,30 @@ export function opensshPublicKeyLine(key: LoadedKey, comment: string): string {
 function keyObjectFromPem(pem: string): KeyObject {
   if (hasEncryptedPemMarker(pem)) {
     throw VaultError.sshAgentFailed(
-      "stored key is encrypted; re-import it with `harpoc secret set --from-file` so the vault can decrypt it at import",
+      vaultText`stored key is encrypted; re-import it with \`harpoc secret set --from-file\` so the vault can decrypt it at import`,
     );
   }
   try {
     return createPrivateKey(pem);
-  } catch (err) {
-    throw VaultError.sshAgentFailed(
-      `unsupported or malformed private key (${err instanceof Error ? err.name : "parse error"})`,
-    );
+  } catch {
+    throw VaultError.sshAgentFailed(vaultText`unsupported or malformed private key`);
   }
+}
+
+function unsupportedKeyType(name: unknown): VaultError {
+  return VaultError.sshAgentFailed(
+    typeof name === "string" && KNOWN_UNSUPPORTED_KEY_TYPES.has(name)
+      ? vaultText`unsupported key type: ${token(name, KNOWN_UNSUPPORTED_KEY_TYPES)}`
+      : vaultText`unsupported key type`,
+  );
+}
+
+function unsupportedCurve(name: unknown): VaultError {
+  return VaultError.sshAgentFailed(
+    typeof name === "string" && KNOWN_UNSUPPORTED_CURVES.has(name)
+      ? vaultText`unsupported ECDSA curve: ${token(name, KNOWN_UNSUPPORTED_CURVES)}`
+      : vaultText`unsupported ECDSA curve`,
+  );
 }
 
 // --- OpenSSH container → JWK → KeyObject ------------------------------------
@@ -98,7 +132,7 @@ function openOpensshContainer(pem: string): SshReader {
 
   const magic = raw.subarray(0, OPENSSH_MAGIC.length).toString("binary");
   if (magic !== OPENSSH_MAGIC) {
-    throw VaultError.sshAgentFailed("malformed OpenSSH private key (bad magic)");
+    throw VaultError.sshAgentFailed(vaultText`malformed OpenSSH private key (bad magic)`);
   }
 
   return new SshReader(raw.subarray(OPENSSH_MAGIC.length));
@@ -110,42 +144,39 @@ export function opensshKeyCipher(pem: string): string {
 }
 
 function keyObjectFromOpenssh(pem: string): KeyObject {
-  const r = openOpensshContainer(pem);
-  const cipher = r.readCString();
-  r.readString(); // kdfname
-  r.readString(); // kdfoptions
-  const nkeys = r.readUint32();
-
-  if (cipher !== "none") {
-    throw VaultError.sshAgentFailed(
-      "encrypted private keys are not supported; convert with `ssh-keygen -p -f <keyfile> -m PKCS8` " +
-        "(RSA/ECDSA, passphrase kept) or strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` " +
-        "(ed25519), then re-import via `harpoc secret set --from-file` — the vault stores the key " +
-        "under its own encryption",
-    );
-  }
-  if (nkeys !== 1) {
-    throw VaultError.sshAgentFailed("OpenSSH keys with multiple identities are not supported");
-  }
-
-  r.readString(); // public key blob — re-derived from the private JWK below
-  const priv = new SshReader(r.readString());
-
-  const check1 = priv.readUint32();
-  const check2 = priv.readUint32();
-  if (check1 !== check2) {
-    throw VaultError.sshAgentFailed("malformed OpenSSH private key (check mismatch)");
-  }
-
-  const keyType = priv.readCString();
   try {
+    const r = openOpensshContainer(pem);
+    const cipher = r.readCString();
+    r.readString(); // kdfname
+    r.readString(); // kdfoptions
+    const nkeys = r.readUint32();
+
+    if (cipher !== "none") {
+      throw VaultError.sshAgentFailed(
+        vaultText`encrypted private keys are not supported; convert with \`ssh-keygen -p -f <keyfile> -m PKCS8\` (RSA/ECDSA, passphrase kept) or strip the passphrase with \`ssh-keygen -p -f <keyfile> -N ''\` (ed25519), then re-import via \`harpoc secret set --from-file\` — the vault stores the key under its own encryption`,
+      );
+    }
+    if (nkeys !== 1) {
+      throw VaultError.sshAgentFailed(
+        vaultText`OpenSSH keys with multiple identities are not supported`,
+      );
+    }
+
+    r.readString(); // public key blob — re-derived from the private JWK below
+    const priv = new SshReader(r.readString());
+
+    const check1 = priv.readUint32();
+    const check2 = priv.readUint32();
+    if (check1 !== check2) {
+      throw VaultError.sshAgentFailed(vaultText`malformed OpenSSH private key (check mismatch)`);
+    }
+
+    const keyType = priv.readCString();
     const jwk = privateJwkFromOpenssh(keyType, priv);
     return createPrivateKey({ key: jwk, format: "jwk" });
   } catch (err) {
     if (err instanceof VaultError) throw err;
-    throw VaultError.sshAgentFailed(
-      `malformed OpenSSH private key (${err instanceof Error ? err.message : "parse error"})`,
-    );
+    throw VaultError.sshAgentFailed(vaultText`malformed OpenSSH private key`);
   }
 }
 
@@ -190,11 +221,11 @@ function privateJwkFromOpenssh(keyType: string, r: SshReader): Record<string, st
     const d = r.readMpint();
     const jwkCrv = Object.keys(EC_BY_JWK_CRV).find((c) => EC_BY_JWK_CRV[c]?.curve === curveId);
     const ec = jwkCrv ? EC_BY_JWK_CRV[jwkCrv] : undefined;
-    if (!jwkCrv || !ec) {
-      throw VaultError.sshAgentFailed(`unsupported ECDSA curve: ${curveId}`);
-    }
+    if (!jwkCrv || !ec) throw unsupportedCurve(curveId);
     if (point[0] !== 0x04) {
-      throw VaultError.sshAgentFailed("unsupported ECDSA point encoding (not uncompressed)");
+      throw VaultError.sshAgentFailed(
+        vaultText`unsupported ECDSA point encoding (not uncompressed)`,
+      );
     }
     const coord = ec.size;
     return {
@@ -206,29 +237,40 @@ function privateJwkFromOpenssh(keyType: string, r: SshReader): Record<string, st
     };
   }
 
-  throw VaultError.sshAgentFailed(`unsupported key type: ${keyType}`);
+  throw unsupportedKeyType(keyType);
 }
 
 // --- Public-key blob + signer from a KeyObject ------------------------------
 
 function publicKeyBlobFor(key: KeyObject): Buffer {
-  const jwk = createPublicKey(key).export({ format: "jwk" }) as Record<string, string>;
-
   if (key.asymmetricKeyType === "ed25519") {
-    return ed25519PublicKeyBlob(fromB64url(jwk.x as string));
+    return ed25519PublicKeyBlob(fromB64url(publicJwk(key).x as string));
   }
   if (key.asymmetricKeyType === "rsa") {
+    const jwk = publicJwk(key);
     return rsaPublicKeyBlob(fromB64url(jwk.e as string), fromB64url(jwk.n as string));
   }
   if (key.asymmetricKeyType === "ec") {
+    const jwk = publicJwk(key);
     const ec = EC_BY_JWK_CRV[jwk.crv as string];
-    if (!ec) throw VaultError.sshAgentFailed(`unsupported ECDSA curve: ${jwk.crv}`);
+    if (!ec) throw unsupportedCurve(jwk.crv);
     const x = leftPad(fromB64url(jwk.x as string), ec.size);
     const y = leftPad(fromB64url(jwk.y as string), ec.size);
     const point = Buffer.concat([Buffer.from([0x04]), x, y]);
     return ecdsaPublicKeyBlob(ec.curve, point);
   }
-  throw VaultError.sshAgentFailed(`unsupported key type: ${key.asymmetricKeyType ?? "unknown"}`);
+  throw unsupportedKeyType(key.asymmetricKeyType);
+}
+
+/** node refuses a JWK for a curve off its JWK set (brainpool, secp224r1). */
+function publicJwk(key: KeyObject): Record<string, string> {
+  try {
+    return createPublicKey(key).export({ format: "jwk" }) as Record<string, string>;
+  } catch {
+    throw key.asymmetricKeyType === "ec"
+      ? unsupportedCurve(key.asymmetricKeyDetails?.namedCurve)
+      : VaultError.sshAgentFailed(vaultText`unsupported or malformed private key`);
+  }
 }
 
 function signerFor(key: KeyObject): (data: Buffer, flags: number) => Buffer {
@@ -255,14 +297,14 @@ function signerFor(key: KeyObject): (data: Buffer, flags: number) => Buffer {
     const named = key.asymmetricKeyDetails?.namedCurve ?? "";
     const jwkCrv = EC_BY_NAMED_CURVE[named];
     const ec = jwkCrv ? EC_BY_JWK_CRV[jwkCrv] : undefined;
-    if (!ec) throw VaultError.sshAgentFailed(`unsupported ECDSA curve: ${named}`);
+    if (!ec) throw unsupportedCurve(named);
     return (data) => {
       const rs = cryptoSign(ec.hash, data, { key, dsaEncoding: "ieee-p1363" });
       return encodeEcdsaSignature(`ecdsa-sha2-${ec.curve}`, rs);
     };
   }
 
-  throw VaultError.sshAgentFailed(`unsupported key type: ${key.asymmetricKeyType ?? "unknown"}`);
+  throw unsupportedKeyType(key.asymmetricKeyType);
 }
 
 // --- small helpers ----------------------------------------------------------

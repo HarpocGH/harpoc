@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { VaultError } from "@harpoc/shared";
+import { outside } from "./output-sanitizer.js";
 import type { SshPublicKey } from "./ssh-common-keys.js";
 
 /** A file written for one ssh invocation, removed with its directory on dispose. */
@@ -324,10 +325,11 @@ const NON_NATIVE_RUNTIME_DLLS = ["msys-2.0.dll", "cygwin1.dll"];
  * one identity it cannot sign for and dies as exit 255 "Permission denied
  * (publickey)" — a misleading SSH_CONNECT_FAILED. The runtime DLL sits beside
  * the binary in every such distribution, so one stat per name decides. The
- * message names the directory, never the binary path or any argument. A
+ * message names the directory, never the binary path or any argument; handed
+ * the context's `values`, the directory is outside text redacted of them. A
  * no-op off win32.
  */
-export function assertNativeWin32SshClient(resolvedPath: string): void {
+export function assertNativeWin32SshClient(resolvedPath: string, values?: readonly string[]): void {
   if (process.platform !== "win32") return;
   const directory = dirname(resolvedPath);
   for (const dll of NON_NATIVE_RUNTIME_DLLS) {
@@ -337,6 +339,10 @@ export function assertNativeWin32SshClient(resolvedPath: string): void {
     } catch {
       // not here — the next name
     }
-    if (isFile) throw VaultError.sshClientUnsupported(directory);
+    if (isFile) {
+      throw VaultError.sshClientUnsupported(
+        values === undefined ? directory : outside(directory, values),
+      );
+    }
   }
 }

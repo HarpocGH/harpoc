@@ -68,7 +68,7 @@ interface Cell {
   /** The decrypted `secret.use` detail the cell's one row carries, `interface` aside. */
   detail(via: Via): Record<string, unknown>;
   /** A round trip's result as the engine returns it, or the refusal's code and message. */
-  outcome: Outcome;
+  outcome: Outcome | ((via: Via) => Outcome);
   /** What the fake server observed — absent for the two refusal cells. */
   observed?(via: Via, credential: string): void;
 }
@@ -221,10 +221,10 @@ const CELLS: Cell[] = [
       operation: "pull",
       error: ErrorCode.HOST_NOT_ALLOWED,
     }),
-    outcome: {
+    outcome: (via) => ({
       code: ErrorCode.HOST_NOT_ALLOWED,
-      message: `Host not in secret allowlist: ${HOST}:5000`,
-    },
+      message: `Host not in secret allowlist: ${HOST}:5000/team/app:${via}`,
+    }),
   },
 ];
 
@@ -314,7 +314,7 @@ describe("use_secret through REST and MCP Streamable HTTP — the v1.3 contexts 
         const action = cell.action(via);
         const rendered = via === "rest" ? await viaRest(name, action) : await viaMcp(name, action);
 
-        const outcome = cell.outcome;
+        const outcome = typeof cell.outcome === "function" ? cell.outcome(via) : cell.outcome;
         expectAbsent(rendered.text, credential.split(":").at(-1) as string);
         if ("result" in outcome) {
           expect(rendered.refused, rendered.text).toBe(false);

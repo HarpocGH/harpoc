@@ -147,7 +147,7 @@ describe("EphemeralSshAgent", () => {
       () => EphemeralSshAgent.start(truncated),
       ErrorCode.SSH_AGENT_FAILED,
     );
-    expect(err.message).toBe("Ephemeral ssh-agent failed: invalid private key");
+    expect(err.message).toBe("Ephemeral ssh-agent failed: malformed OpenSSH private key");
   });
 
   it("rejects an encrypted private key", async () => {

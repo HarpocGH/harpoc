@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, recordOf } from "@harpoc/shared";
 import { buildCleanEnv } from "./clean-env.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
@@ -12,6 +12,14 @@ describe("buildCleanEnv refuses an env_var a plain object cannot hold (S11)", ()
       ErrorCode.INVALID_INJECTION_CONFIG,
     );
     expect(err.message).toBe("environment variable name must not be __proto__");
+  });
+
+  it("refuses __proto__ in the vault's own words, recorded", async () => {
+    const err = await expectVaultError(
+      () => buildCleanEnv("__proto__", VALUE, []),
+      ErrorCode.INVALID_INJECTION_CONFIG,
+    );
+    expect(recordOf(err)).toBeDefined();
   });
 
   it.each(["constructor", "prototype", "__PROTO__", "__proto__x", "x__proto__"])(

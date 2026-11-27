@@ -1,4 +1,4 @@
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, vaultText } from "@harpoc/shared";
 
 /**
  * Build a clean child environment: the injected credential, a controlled PATH
@@ -14,7 +14,7 @@ export function buildCleanEnv(
   if (envVar === "__proto__") {
     throw new VaultError(
       ErrorCode.INVALID_INJECTION_CONFIG,
-      "environment variable name must not be __proto__",
+      vaultText`environment variable name must not be __proto__`,
     );
   }
   const env: Record<string, string> = {};

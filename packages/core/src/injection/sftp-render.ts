@@ -4,6 +4,7 @@ import {
   RENDER_CONNECT_TIMEOUT_SEC,
   SSH_HOST_KEY_TYPES,
   VaultError,
+  vaultText,
 } from "@harpoc/shared";
 import { asciiLowerCase, controlledPathDirs, resolveAndMatchCommand } from "./allowlist.js";
 import { writeRemoteFile } from "./sftp/sftp-writer.js";
@@ -26,9 +27,9 @@ import type { SshPublicKey } from "./ssh-common-keys.js";
 import { hostKeyFailureSeen } from "./ssh-injector-bootstrap.js";
 import type { SpawnAuditFields } from "./ssh-injector-bootstrap.js";
 
-const NAMES_REFUSED = "host and user must be names of letters, digits, '.', '_' and '-'";
-const TEMP_FILE_UNPREPARED = "a temporary file of the sftp render could not be prepared";
-const HOST_KEY_UNREAD = "a render host key line does not parse";
+const NAMES_REFUSED = vaultText`host and user must be names of letters, digits, '.', '_' and '-'`;
+const TEMP_FILE_UNPREPARED = vaultText`a temporary file of the sftp render could not be prepared`;
+const HOST_KEY_UNREAD = vaultText`a render host key line does not parse`;
 
 /** The engine's hold on a running render: `signal` ends it at a seal, `written` is what the writer last reported. */
 export interface RenderControl {
@@ -57,7 +58,6 @@ export type RenderSpawnFields = Pick<
   | "isolation_mechanism"
   | "fs_isolation"
   | "fs_isolation_mechanism"
-  | "sanitized"
   | "descendant_sweep"
   | "tree_kill"
   | "strict_tree_exit"
@@ -113,7 +113,6 @@ function renderSpawnFields(
     ...(seen.isolation_mechanism ? { isolation_mechanism: seen.isolation_mechanism } : {}),
     fs_isolation: fsIsolation,
     ...(seen.fs_isolation_mechanism ? { fs_isolation_mechanism: seen.fs_isolation_mechanism } : {}),
-    ...(seen.redacted ? { sanitized: true } : {}),
     ...(seen.descendant_sweep ? { descendant_sweep: seen.descendant_sweep } : {}),
     ...(seen.tree_kill ? { tree_kill: seen.tree_kill } : {}),
     ...(seen.strict_tree_exit ? { strict_tree_exit: true } : {}),
@@ -123,8 +122,7 @@ function renderSpawnFields(
 /**
  * The render's one spawn: `ssh -s … sftp` pinned to the entry's own host keys, the key through
  * the ephemeral agent, the content written by `writeRemoteFile` over the two-way pipe. Never
- * throws a `VaultError` and returns no byte the host or ssh wrote; a `not_spawned` error reaches
- * the caller as it stands, so its text holds no value. `control.signal` cuts the
+ * throws a `VaultError` and returns no byte the host or ssh wrote. `control.signal` cuts the
  * writer, so that no frame is handed on after it, and then ends the child. The files, the agent,
  * the content and the redaction list are gone on every path once the call settled.
  */

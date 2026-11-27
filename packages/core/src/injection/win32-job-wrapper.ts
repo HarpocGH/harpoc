@@ -34,7 +34,10 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:f
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { TextPart, VaultText } from "@harpoc/shared";
+import { num, renderVaultText, token, vaultText } from "@harpoc/shared";
 import { system32Path } from "../win32-paths.js";
+import { PLATFORM_WORDS, errnoToken } from "./error-words.js";
 
 export const JOB_WRAPPER_SOURCE = `// harpoc-job: the vault's win32 lifecycle wrapper (thesis 4.5.3 layer 4; D1 of
 // docs/implementation-plan-win32-job-wrapper-2026-09-10.md). Creates a kill-on-close job
@@ -147,10 +150,12 @@ export interface JobWrap {
 /** The tier is unavailable on this host, or the platform has none; `reason` is the resolver's verdict. */
 export interface JobWrapMiss {
   mechanism: null;
-  reason: string;
+  reason: VaultText;
 }
 
 export type JobWrapperResolution = { exe: string } | { unavailable: string };
+
+type Resolution = { exe: string } | { unavailable: VaultText };
 
 /** Injectable seams for unit tests; production callers pass nothing. */
 export interface JobWrapperSeams {
@@ -199,6 +204,38 @@ export function isJobWrapperFailure(code: number | null, stderr: string): boolea
   );
 }
 
+const HELPER_TIMED_OUT = "job wrapper helper timed out";
+const NO_ACCOUNT = "could not determine the current account name";
+const ACL_NOT_RUN = "ACL restriction failed to run";
+
+/** The wrapper's own constant failure texts, named as words where a seam hands one back. */
+const WRAPPER_TEXTS: readonly string[] = [HELPER_TIMED_OUT, NO_ACCOUNT, ACL_NOT_RUN];
+
+const NULL_EXIT = token(null, [], "null");
+
+/** A failure of one of the wrapper's own steps, its reason in the wrapper's words. */
+class WrapperFailure extends Error {
+  constructor(readonly reason: VaultText) {
+    super(renderVaultText(reason));
+  }
+}
+
+/** A compiler that ran and failed, or did not complete: host-wide, so the candidate loop stops (minor 2). */
+class CompilerFailure extends WrapperFailure {}
+
+function exitNumber(code: number | null): TextPart {
+  return code === null ? NULL_EXIT : num(code);
+}
+
+function failureReason(err: unknown): VaultText {
+  if (err instanceof WrapperFailure) return err.reason;
+  if (!(err instanceof Error)) return vaultText`unknown error`;
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string"
+    ? vaultText`${errnoToken(code)}`
+    : vaultText`${token(err.message, WRAPPER_TEXTS, "unknown error")}`;
+}
+
 /** Rejects only when the helper could not be run to completion (spawn error, timeout). */
 function defaultRunHelper(
   command: string,
@@ -217,7 +254,7 @@ function defaultRunHelper(
     };
     const timer = setTimeout(() => {
       child.kill();
-      finish(new Error("job wrapper helper timed out"), null);
+      finish(new Error(HELPER_TIMED_OUT), null);
     }, timeoutMs);
     if (timer.unref) timer.unref();
     child.on("error", (err) => finish(err, null));
@@ -241,7 +278,7 @@ export interface RestrictSeams {
  */
 export function restrictToOwner(dir: string, seams: RestrictSeams = {}): void {
   const account = seams.account ?? userInfo().username;
-  if (!account) throw new Error("could not determine the current account name");
+  if (!account) throw new Error(NO_ACCOUNT);
   const res = (seams.spawnSync ?? spawnSync)(
     system32Path("icacls.exe"),
     [dir, "/inheritance:r", "/grant:r", `${account}:(OI)(CI)F`],
@@ -252,17 +289,10 @@ export function restrictToOwner(dir: string, seams: RestrictSeams = {}): void {
       timeout: 15_000,
     },
   );
-  if (res.error) throw new Error("ACL restriction failed to run");
-  if (res.status !== 0) throw new Error(`ACL restriction failed (exit ${String(res.status)})`);
-}
-
-/** A compiler that ran and failed, or did not complete: host-wide, so the candidate loop stops (minor 2). */
-class CompilerFailure extends Error {}
-
-function failureReason(err: unknown): string {
-  if (!(err instanceof Error)) return "unknown error";
-  const code = (err as NodeJS.ErrnoException).code;
-  return typeof code === "string" ? code : err.message;
+  if (res.error) throw new Error(ACL_NOT_RUN);
+  if (res.status !== 0) {
+    throw new WrapperFailure(vaultText`ACL restriction failed (exit ${exitNumber(res.status)})`);
+  }
 }
 
 /** EPERM-tolerant: a tmp exe still mapped by a rejected helper's process cannot be unlinked on win32 (minor 1). */
@@ -297,12 +327,12 @@ async function compileInto(
   } catch (err) {
     removeQuietly(tmp);
     removeQuietly(source);
-    throw new CompilerFailure(`csc did not complete: ${failureReason(err)}`);
+    throw new CompilerFailure(vaultText`csc did not complete: ${failureReason(err)}`);
   }
   if (code !== 0) {
     removeQuietly(tmp);
     removeQuietly(source);
-    throw new CompilerFailure(`csc exited ${String(code)}`);
+    throw new CompilerFailure(vaultText`csc exited ${exitNumber(code)}`);
   }
   try {
     renameSync(tmp, exe);
@@ -330,16 +360,18 @@ async function compileInto(
   removeQuietly(source);
 }
 
-async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
+async function resolve(seams: JobWrapperSeams): Promise<Resolution> {
   const platform = seams.platform ?? process.platform;
-  if (platform !== "win32") return { unavailable: `unsupported platform: ${platform}` };
+  if (platform !== "win32") {
+    return { unavailable: vaultText`unsupported platform: ${token(platform, PLATFORM_WORDS)}` };
+  }
   const probeBinary = seams.probeBinary ?? existsSync;
   const runHelper = seams.runHelper ?? defaultRunHelper;
   const restrictDir = seams.restrictDir ?? restrictToOwner;
   const dirs = seams.cacheDirs ?? jobWrapperCacheDirs();
 
   let exe: string | undefined;
-  let lastError = "no cache directory";
+  let lastError: VaultText = vaultText`no cache directory`;
   for (const [index, dir] of dirs.entries()) {
     const candidate = jobWrapperExePath(dir);
     if (!probeBinary(candidate)) continue;
@@ -361,7 +393,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
       probeBinary(p),
     );
     if (csc === undefined) {
-      return { unavailable: "csc.exe not found under Microsoft.NET Framework v4.0.30319" };
+      return { unavailable: vaultText`csc.exe not found under Microsoft.NET Framework v4.0.30319` };
     }
     for (const [index, dir] of dirs.entries()) {
       const candidate = jobWrapperExePath(dir);
@@ -380,7 +412,7 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
         if (err instanceof CompilerFailure) break;
       }
     }
-    if (exe === undefined) return { unavailable: `compile failed: ${lastError}` };
+    if (exe === undefined) return { unavailable: vaultText`compile failed: ${lastError}` };
   }
 
   let probeCode: number | null;
@@ -393,16 +425,16 @@ async function resolve(seams: JobWrapperSeams): Promise<JobWrapperResolution> {
       )
     ).code;
   } catch (err) {
-    return { unavailable: `probe run failed: ${failureReason(err)}` };
+    return { unavailable: vaultText`probe run failed: ${failureReason(err)}` };
   }
-  if (probeCode !== 0) return { unavailable: `probe run exited ${String(probeCode)}` };
+  if (probeCode !== 0) return { unavailable: vaultText`probe run exited ${exitNumber(probeCode)}` };
   return { exe };
 }
 
-let cachedResolution: Promise<JobWrapperResolution> | null = null;
+let cachedResolution: Promise<Resolution> | null = null;
 let unavailableUntil = 0;
-let lastUnavailable = "";
-let forcedUnavailableForTests: string | null = null;
+let lastUnavailable: VaultText = vaultText``;
+let forcedUnavailableForTests: VaultText | null = null;
 let unavailableHandler: ((reason: string) => void) | null = null;
 let unavailableWarned = false;
 
@@ -437,29 +469,39 @@ function notifyUnavailable(reason: string, platform: NodeJS.Platform): void {
  * enough that a transient one under load does not disable the tier for a
  * long-lived server. Concurrent callers coalesce on the in-flight promise.
  */
-export async function resolveJobWrapper(
-  seams: JobWrapperSeams = {},
-): Promise<JobWrapperResolution> {
+async function resolveReason(seams: JobWrapperSeams = {}): Promise<Resolution> {
   if (forcedUnavailableForTests !== null) return { unavailable: forcedUnavailableForTests };
   const now = seams.now ?? Date.now;
   if (!cachedResolution) {
     if (now() < unavailableUntil) return { unavailable: lastUnavailable };
-    const attempt: Promise<JobWrapperResolution> = resolve(seams)
-      .catch((err: unknown): JobWrapperResolution => ({
-        unavailable: `resolution failed: ${failureReason(err)}`,
+    const attempt: Promise<Resolution> = resolve(seams)
+      .catch((err: unknown): Resolution => ({
+        unavailable: vaultText`resolution failed: ${failureReason(err)}`,
       }))
       .then((result) => {
         if ("unavailable" in result && cachedResolution === attempt) {
           cachedResolution = null;
           lastUnavailable = result.unavailable;
           unavailableUntil = now() + JOB_WRAPPER_RETRY_MS;
-          notifyUnavailable(result.unavailable, seams.platform ?? process.platform);
+          notifyUnavailable(
+            renderVaultText(result.unavailable),
+            seams.platform ?? process.platform,
+          );
         }
         return result;
       });
     cachedResolution = attempt;
   }
   return cachedResolution;
+}
+
+export async function resolveJobWrapper(
+  seams: JobWrapperSeams = {},
+): Promise<JobWrapperResolution> {
+  const resolved = await resolveReason(seams);
+  return "unavailable" in resolved
+    ? { unavailable: renderVaultText(resolved.unavailable) }
+    : resolved;
 }
 
 /**
@@ -474,7 +516,7 @@ export async function wrapInJob(
   mode: JobWrapMode,
   seams?: JobWrapperSeams,
 ): Promise<JobWrap | JobWrapMiss> {
-  const resolved = await resolveJobWrapper(seams);
+  const resolved = await resolveReason(seams);
   if ("unavailable" in resolved) return { mechanism: null, reason: resolved.unavailable };
   return {
     command: resolved.exe,
@@ -487,11 +529,11 @@ export async function wrapInJob(
 export function resetJobWrapperProbeForTests(): void {
   cachedResolution = null;
   unavailableUntil = 0;
-  lastUnavailable = "";
+  lastUnavailable = vaultText``;
   unavailableWarned = false;
 }
 
 /** Force the fallback tier regardless of platform. Only unavailability can be forced (tightening). */
-export function forceJobWrapperUnavailableForTests(reason: string | null): void {
+export function forceJobWrapperUnavailableForTests(reason: VaultText | null): void {
   forcedUnavailableForTests = reason;
 }

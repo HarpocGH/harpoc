@@ -1,6 +1,16 @@
 import { promises as dns } from "node:dns";
 import { isIPv4, isIPv6 } from "node:net";
-import { ErrorCode, LOOPBACK_BIND_HOSTS, LOOPBACK_URL_HOSTS, VaultError } from "@harpoc/shared";
+import type { TextPart } from "@harpoc/shared";
+import {
+  ErrorCode,
+  LOOPBACK_BIND_HOSTS,
+  LOOPBACK_URL_HOSTS,
+  VaultError,
+  token,
+  vaultText,
+} from "@harpoc/shared";
+import { errnoToken } from "./error-words.js";
+import { outside } from "./output-sanitizer.js";
 
 /** RFC 1918 and link-local IPv4 ranges. */
 const PRIVATE_IPV4_RANGES: [number, number, number][] = [
@@ -145,6 +155,23 @@ const HTTP_SCHEMES: UrlSchemePolicy = { secure: "https:", insecure: "http:" };
  * `websocketActionSchema` already enforces (schemas.ts `websocketUrlSchema`). */
 export const WS_SCHEMES: UrlSchemePolicy = { secure: "wss:", insecure: "ws:" };
 
+const SCHEME_WORDS: readonly string[] = [
+  HTTP_SCHEMES.secure,
+  HTTP_SCHEMES.insecure,
+  WS_SCHEMES.secure,
+  WS_SCHEMES.insecure,
+];
+
+/**
+ * What a use hands the validator: the part that names its target where a
+ * refusal quotes the URL or the host, and the context's list, which the DNS
+ * answer is redacted with. Without it every refusal is built from strings.
+ */
+export interface ValidationSubject {
+  parts: TextPart;
+  values: readonly string[];
+}
+
 /**
  * Validate a URL for use in secret injection.
  *
@@ -165,12 +192,16 @@ export const WS_SCHEMES: UrlSchemePolicy = { secure: "wss:", insecure: "ws:" };
 export async function validateUrl(
   urlStr: string,
   schemes: UrlSchemePolicy = HTTP_SCHEMES,
+  subject?: ValidationSubject,
 ): Promise<ValidatedUrl> {
   let url: URL;
   try {
     url = new URL(urlStr);
   } catch {
-    throw new VaultError(ErrorCode.URL_INVALID, `Invalid URL: ${urlStr}`);
+    throw new VaultError(
+      ErrorCode.URL_INVALID,
+      subject === undefined ? `Invalid URL: ${urlStr}` : vaultText`Invalid URL: ${subject.parts}`,
+    );
   }
 
   const hostname = url.hostname;
@@ -180,13 +211,17 @@ export async function validateUrl(
     if (!isLoopback(hostname)) {
       throw new VaultError(
         ErrorCode.URL_HTTPS_REQUIRED,
-        `${schemes.insecure} is only allowed for loopback addresses (localhost, 127.0.0.1, ::1)`,
+        subject === undefined
+          ? `${schemes.insecure} is only allowed for loopback addresses (localhost, 127.0.0.1, ::1)`
+          : vaultText`${token(schemes.insecure, SCHEME_WORDS)} is only allowed for loopback addresses (localhost, 127.0.0.1, ::1)`,
       );
     }
   } else if (url.protocol !== schemes.secure) {
     throw new VaultError(
       ErrorCode.URL_HTTPS_REQUIRED,
-      `Only ${schemes.secure} URLs are allowed, got ${url.protocol}`,
+      subject === undefined
+        ? `Only ${schemes.secure} URLs are allowed, got ${url.protocol}`
+        : vaultText`Only ${token(schemes.secure, SCHEME_WORDS)} URLs are allowed`,
     );
   }
 
@@ -194,7 +229,9 @@ export async function validateUrl(
   if (!isLoopback(hostname) && isPrivateIp(hostname)) {
     throw new VaultError(
       ErrorCode.SSRF_BLOCKED,
-      `SSRF blocked: ${hostname} resolves to a private/internal IP address`,
+      subject === undefined
+        ? `SSRF blocked: ${hostname} resolves to a private/internal IP address`
+        : vaultText`SSRF blocked: ${subject.parts} resolves to a private/internal IP address`,
     );
   }
 
@@ -207,33 +244,53 @@ export async function validateUrl(
       if (results.length === 0) {
         throw new VaultError(
           ErrorCode.DNS_RESOLUTION_FAILED,
-          `DNS resolution failed for ${hostname}: no addresses returned`,
+          subject === undefined
+            ? `DNS resolution failed for ${hostname}: no addresses returned`
+            : vaultText`DNS resolution failed for ${subject.parts}: no addresses returned`,
         );
       }
       for (const { address } of results) {
-        if (isPrivateIp(address)) {
-          throw new VaultError(
-            ErrorCode.SSRF_BLOCKED,
-            `SSRF blocked: ${hostname} resolves to private IP ${address}`,
-          );
-        }
+        if (isPrivateIp(address)) throw privateAnswer(hostname, address, subject);
       }
       resolvedAddresses = results.map((result) => result.address);
     } catch (err) {
       if (err instanceof VaultError) throw err;
-      throw new VaultError(
-        ErrorCode.DNS_RESOLUTION_FAILED,
-        `DNS resolution failed for ${hostname}: ${errnoCode(err)}`,
-      );
+      throw failedLookup(hostname, err, subject);
     }
   }
 
   return { url, resolvedAddresses };
 }
 
-function errnoCode(err: unknown): string {
-  const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
-  return typeof code === "string" ? code : "unknown error";
+function errnoCode(err: unknown): unknown {
+  return err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+}
+
+function privateAnswer(
+  hostname: string,
+  address: string,
+  subject: ValidationSubject | undefined,
+): VaultError {
+  return new VaultError(
+    ErrorCode.SSRF_BLOCKED,
+    subject === undefined
+      ? `SSRF blocked: ${hostname} resolves to private IP ${address}`
+      : vaultText`SSRF blocked: ${subject.parts} resolves to private IP ${outside(address, subject.values)}`,
+  );
+}
+
+function failedLookup(
+  hostname: string,
+  err: unknown,
+  subject: ValidationSubject | undefined,
+): VaultError {
+  const code = errnoCode(err);
+  return new VaultError(
+    ErrorCode.DNS_RESOLUTION_FAILED,
+    subject === undefined
+      ? `DNS resolution failed for ${hostname}: ${typeof code === "string" ? code : "unknown error"}`
+      : vaultText`DNS resolution failed for ${subject.parts}: ${errnoToken(code)}`,
+  );
 }
 
 /** Check if a string looks like an IP address (v4 or v6). */
@@ -290,11 +347,17 @@ export interface ValidatedHostPort {
  * cannot classify (see {@link isWellFormedHost}) is refused `SSRF_BLOCKED`
  * before any lookup, named escaped so no control character reaches a log.
  */
-export async function validateHostPort(host: string, port: number): Promise<ValidatedHostPort> {
+export async function validateHostPort(
+  host: string,
+  port: number,
+  subject?: ValidationSubject,
+): Promise<ValidatedHostPort> {
   if (!isWellFormedHost(host)) {
     throw new VaultError(
       ErrorCode.SSRF_BLOCKED,
-      `SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`,
+      subject === undefined
+        ? `SSRF blocked: ${JSON.stringify(host)} is not a well-formed host`
+        : vaultText`SSRF blocked: the host is not a well-formed host`,
     );
   }
   const hostname = host.replace(/^\[|\]$/g, "");
@@ -305,7 +368,9 @@ export async function validateHostPort(host: string, port: number): Promise<Vali
   if (isPrivateIp(hostname)) {
     throw new VaultError(
       ErrorCode.SSRF_BLOCKED,
-      `SSRF blocked: ${hostname} is a private/internal IP address`,
+      subject === undefined
+        ? `SSRF blocked: ${hostname} is a private/internal IP address`
+        : vaultText`SSRF blocked: ${subject.parts} is a private/internal IP address`,
     );
   }
   if (isIpAddress(hostname)) {
@@ -314,18 +379,10 @@ export async function validateHostPort(host: string, port: number): Promise<Vali
 
   try {
     const { address } = await dns.lookup(hostname);
-    if (isPrivateIp(address)) {
-      throw new VaultError(
-        ErrorCode.SSRF_BLOCKED,
-        `SSRF blocked: ${hostname} resolves to private IP ${address}`,
-      );
-    }
+    if (isPrivateIp(address)) throw privateAnswer(hostname, address, subject);
     return { host: hostname, port, resolvedAddress: address };
   } catch (err) {
     if (err instanceof VaultError) throw err;
-    throw new VaultError(
-      ErrorCode.DNS_RESOLUTION_FAILED,
-      `DNS resolution failed for ${hostname}: ${errnoCode(err)}`,
-    );
+    throw failedLookup(hostname, err, subject);
   }
 }

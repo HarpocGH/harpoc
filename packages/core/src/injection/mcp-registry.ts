@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/client";
+import type { TextPart } from "@harpoc/shared";
 import {
   AuditEventType,
   MAX_MCP_CRASH_STDERR_TAIL_CHARS,
@@ -6,14 +7,17 @@ import {
   MCP_IDLE_TTL_MS,
   MCP_SHUTDOWN_TIMEOUT_MS,
   VaultError,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
+import { SIGNAL_WORDS } from "./error-words.js";
 import { InjectionGuard } from "./injection-guard.js";
 import type { IsolationDimensions } from "./isolation.js";
 import type { StdioChildTransport } from "./mcp-stdio-transport.js";
-import { redactSecretEncodings } from "./output-sanitizer.js";
+import { outside, redactSecretEncodings } from "./output-sanitizer.js";
 
 export type McpEntryState = "connecting" | "ready" | "closing";
 
@@ -246,7 +250,10 @@ export class McpConnectionRegistry {
       // performs — instead of publishing it into a registry nothing will walk
       // again.
       this.killEntrySync(entry);
-      throw VaultError.mcpConnectFailed(entry.serverName, "vault session ended while connecting");
+      throw VaultError.mcpConnectFailed(
+        serverOf(entry),
+        vaultText`vault session ended while connecting`,
+      );
     }
     if (superseded()) {
       // A `terminate` freed this connect's slot while it was in flight and a
@@ -259,7 +266,7 @@ export class McpConnectionRegistry {
       // successor. An empty slot still publishes: the terminate that freed it
       // awaits this connect and closes it with its own row.
       this.killEntrySync(entry);
-      throw VaultError.mcpConnectFailed(entry.serverName, "superseded while connecting");
+      throw VaultError.mcpConnectFailed(serverOf(entry), vaultText`superseded while connecting`);
     }
     entry.state = "ready";
     entry.lastUsedAt = Date.now();
@@ -278,7 +285,11 @@ export class McpConnectionRegistry {
       // reconnects fresh. A wrapper failure never reaches here: it completes
       // no handshake.
       this.handleClose(secretId, entry);
-      throw VaultError.mcpServerCrashed(entry.serverName, exit.code, exit.signal);
+      throw VaultError.mcpServerCrashed(
+        serverOf(entry),
+        exit.code,
+        exit.signal === null ? null : token(exit.signal, SIGNAL_WORDS),
+      );
     }
     this.live.set(secretId, entry);
     this.ensureSweep();
@@ -412,6 +423,10 @@ export class McpConnectionRegistry {
     if (!raw) return undefined;
     return sanitizeDownstreamStderr(raw, entry.redact);
   }
+}
+
+function serverOf(entry: McpConnectionEntry): string | TextPart {
+  return entry.redact === undefined ? entry.serverName : outside(entry.serverName, [entry.redact]);
 }
 
 /**

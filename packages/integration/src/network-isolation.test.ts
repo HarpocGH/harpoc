@@ -7,7 +7,7 @@ import type { Server as TcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { AuditEventType, ErrorCode, VaultError } from "@harpoc/shared";
+import { AuditEventType, ErrorCode, VaultError, vaultText } from "@harpoc/shared";
 import type { UseSecretAction } from "@harpoc/shared";
 import {
   controlledPathDirs,
@@ -367,7 +367,7 @@ describe("network isolation — fail-closed refusal", () => {
   // force-hook stands in (only unavailability can be forced — tightening).
   beforeEach(() => {
     if (process.platform !== "win32") {
-      forceNetworkIsolationUnavailableForTests("forced for integration test");
+      forceNetworkIsolationUnavailableForTests(vaultText`forced for integration test`);
     }
   });
 

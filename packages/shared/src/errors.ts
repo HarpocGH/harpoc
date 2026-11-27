@@ -1,3 +1,6 @@
+import { isTextPart, isVaultText, num, renderVaultText, token, vaultText } from "./error-text.js";
+import type { EchoSource, TextPart, VaultText } from "./error-text.js";
+
 // ---------------------------------------------------------------------------
 // Error codes and VaultError class
 // ---------------------------------------------------------------------------
@@ -403,41 +406,135 @@ export type SshClientUse = "bootstrap" | "render";
 export type SshBootstrapDropInWord =
   "written" | "present" | "not_asked" | "not_attempted" | "refused";
 
+export type RecordedDetails = Readonly<Record<string, TextPart>>;
+
+type ErrorRecord = { readonly message: VaultText; readonly details?: RecordedDetails };
+
+type Quoted = string | TextPart | VaultText;
+
+const RECORDS = new WeakMap<VaultError, ErrorRecord>();
+
+const NULL_WORD = token(null, [], "null");
+
+function recordable(
+  details: Record<string, unknown> | undefined,
+): details is RecordedDetails | undefined {
+  return details === undefined || Object.values(details).every(isTextPart);
+}
+
+export function renderRecordedDetails(
+  details: RecordedDetails,
+  call?: EchoSource,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(details).map(([key, part]) => {
+      const text = renderVaultText(vaultText`${part}`, call);
+      if (!isTextPart(part)) return [key, text];
+      if (part.kind === "number") return [key, Number(text)];
+      return [key, part.kind === "words" && text === "null" ? null : text];
+    }),
+  );
+}
+
+function asText(value: unknown): VaultText | undefined {
+  if (isVaultText(value)) return value;
+  return isTextPart(value) ? vaultText`${value}` : undefined;
+}
+
+function plain(value: unknown): string {
+  const text = asText(value);
+  return text === undefined ? String(value) : renderVaultText(text);
+}
+
+function loose(value: unknown): unknown {
+  const text = asText(value);
+  return text === undefined ? value : renderVaultText(text);
+}
+
+function shows(value: unknown): boolean {
+  const text = asText(value);
+  return text === undefined ? Boolean(value) : renderVaultText(text) !== "";
+}
+
+function bare(value: unknown, text: string | VaultText): string | VaultText {
+  return value === undefined || asText(value) !== undefined || typeof text === "string"
+    ? text
+    : renderVaultText(text);
+}
+
+function say(strings: TemplateStringsArray, ...values: readonly unknown[]): string | VaultText {
+  const parts: VaultText[] = [];
+  for (const value of values) {
+    const text = asText(value);
+    if (text === undefined) {
+      return values.reduce<string>(
+        (out, v, i) => `${out}${plain(v)}${strings[i + 1] ?? ""}`,
+        strings[0] ?? "",
+      );
+    }
+    parts.push(text);
+  }
+  return vaultText(strings, ...parts);
+}
+
+function serverDetails(
+  server: string | TextPart,
+  message: string | VaultText,
+): Record<string, unknown> {
+  return { server: typeof message === "string" ? loose(server) : server };
+}
+
 export class VaultError extends Error {
   readonly code: ErrorCode;
   readonly statusCode: number;
   readonly details?: Record<string, unknown>;
 
-  constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) {
-    super(message);
+  constructor(
+    code: ErrorCode,
+    message: string | VaultText,
+    details?: Record<string, unknown> | RecordedDetails,
+  ) {
+    const text = isVaultText(message) ? message : undefined;
+    super(text === undefined ? (message as string) : renderVaultText(text));
     this.name = "VaultError";
     this.code = code;
     this.statusCode = STATUS_MAP[code];
-    this.details = details;
+    if (text !== undefined && recordable(details)) {
+      const recorded = details === undefined ? undefined : Object.freeze({ ...details });
+      RECORDS.set(
+        this,
+        Object.freeze(
+          recorded === undefined ? { message: text } : { message: text, details: recorded },
+        ),
+      );
+      this.details = recorded === undefined ? undefined : renderRecordedDetails(recorded);
+    } else {
+      this.details = details;
+    }
   }
 
   static vaultLocked(): VaultError {
-    return new VaultError(ErrorCode.VAULT_LOCKED, "Vault is locked");
+    return new VaultError(ErrorCode.VAULT_LOCKED, vaultText`Vault is locked`);
   }
 
   static vaultNotFound(): VaultError {
-    return new VaultError(ErrorCode.VAULT_NOT_FOUND, "Vault not found");
+    return new VaultError(ErrorCode.VAULT_NOT_FOUND, vaultText`Vault not found`);
   }
 
   static vaultAlreadyExists(): VaultError {
     return new VaultError(
       ErrorCode.VAULT_ALREADY_EXISTS,
-      "A vault already exists at this location; use unlock instead",
+      vaultText`A vault already exists at this location; use unlock instead`,
     );
   }
 
   static secretNotFound(handle?: string): VaultError {
-    const msg = handle ? `Secret not found: ${handle}` : "Secret not found";
+    const msg = handle ? `Secret not found: ${handle}` : bare(handle, vaultText`Secret not found`);
     return new VaultError(ErrorCode.SECRET_NOT_FOUND, msg);
   }
 
   static accessDenied(detail?: string): VaultError {
-    const msg = detail ? `Access denied: ${detail}` : "Access denied";
+    const msg = detail ? `Access denied: ${detail}` : bare(detail, vaultText`Access denied`);
     return new VaultError(ErrorCode.ACCESS_DENIED, msg);
   }
 
@@ -452,7 +549,7 @@ export class VaultError extends Error {
     );
   }
 
-  static invalidInput(message: string): VaultError {
+  static invalidInput(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INVALID_INPUT, message);
   }
 
@@ -461,7 +558,7 @@ export class VaultError extends Error {
   }
 
   static invalidPassword(): VaultError {
-    return new VaultError(ErrorCode.INVALID_PASSWORD, "Invalid password");
+    return new VaultError(ErrorCode.INVALID_PASSWORD, vaultText`Invalid password`);
   }
 
   static duplicateSecret(name: string): VaultError {
@@ -478,52 +575,62 @@ export class VaultError extends Error {
     return new VaultError(ErrorCode.SCHEMA_VALIDATION_ERROR, message);
   }
 
-  static internalError(message: string): VaultError {
+  static internalError(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INTERNAL_ERROR, message);
   }
 
-  static vaultCorrupted(detail?: string): VaultError {
-    const msg = detail ? `Vault corrupted: ${detail}` : "Vault corrupted";
+  static vaultCorrupted(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Vault corrupted: ${detail}`
+      : bare(detail, vaultText`Vault corrupted`);
     return new VaultError(ErrorCode.VAULT_CORRUPTED, msg);
   }
 
-  static encryptionError(detail?: string): VaultError {
-    const msg = detail ? `Encryption error: ${detail}` : "Encryption error";
+  static encryptionError(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Encryption error: ${detail}`
+      : bare(detail, vaultText`Encryption error`);
     return new VaultError(ErrorCode.ENCRYPTION_ERROR, msg);
   }
 
   static databaseError(detail?: string): VaultError {
-    const msg = detail ? `Database error: ${detail}` : "Database error";
+    const msg = detail ? `Database error: ${detail}` : bare(detail, vaultText`Database error`);
     return new VaultError(ErrorCode.DATABASE_ERROR, msg);
   }
 
-  static secretExpired(handle?: string): VaultError {
-    const msg = handle ? `Secret expired: ${handle}` : "Secret expired";
+  static secretExpired(handle?: Quoted): VaultError {
+    const msg = shows(handle)
+      ? say`Secret expired: ${handle}`
+      : bare(handle, vaultText`Secret expired`);
     return new VaultError(ErrorCode.SECRET_EXPIRED, msg);
   }
 
-  static secretRevoked(handle?: string): VaultError {
-    const msg = handle ? `Secret revoked: ${handle}` : "Secret revoked";
+  static secretRevoked(handle?: Quoted): VaultError {
+    const msg = shows(handle)
+      ? say`Secret revoked: ${handle}`
+      : bare(handle, vaultText`Secret revoked`);
     return new VaultError(ErrorCode.SECRET_REVOKED, msg);
   }
 
   static tokenExpired(): VaultError {
-    return new VaultError(ErrorCode.TOKEN_EXPIRED, "Token expired");
+    return new VaultError(ErrorCode.TOKEN_EXPIRED, vaultText`Token expired`);
   }
 
   static tokenRevoked(): VaultError {
-    return new VaultError(ErrorCode.TOKEN_REVOKED, "Token revoked");
+    return new VaultError(ErrorCode.TOKEN_REVOKED, vaultText`Token revoked`);
   }
 
   static tokenRequired(): VaultError {
     return new VaultError(
       ErrorCode.TOKEN_REQUIRED,
-      "A launch token is required: issue one with `harpoc auth token` and pass it via the HARPOC_TOKEN environment variable (or --token-file <path>), or start with --allow-tokenless to explicitly accept unrestricted local full access",
+      vaultText`A launch token is required: issue one with \`harpoc auth token\` and pass it via the HARPOC_TOKEN environment variable (or --token-file <path>), or start with --allow-tokenless to explicitly accept unrestricted local full access`,
     );
   }
 
   static sessionFileError(detail?: string): VaultError {
-    const msg = detail ? `Session file error: ${detail}` : "Session file error";
+    const msg = detail
+      ? `Session file error: ${detail}`
+      : bare(detail, vaultText`Session file error`);
     return new VaultError(ErrorCode.SESSION_FILE_ERROR, msg);
   }
 
@@ -541,51 +648,45 @@ export class VaultError extends Error {
     );
   }
 
-  static urlNotAllowed(url?: string): VaultError {
-    const msg = url ? `URL not in secret allowlist: ${url}` : "URL not in secret allowlist";
+  static urlNotAllowed(url?: Quoted): VaultError {
+    const msg = shows(url)
+      ? say`URL not in secret allowlist: ${url}`
+      : bare(url, vaultText`URL not in secret allowlist`);
     return new VaultError(ErrorCode.URL_NOT_ALLOWED, msg);
   }
 
-  static responseModeNotAllowed(requested: string, allowed: string): VaultError {
+  static responseModeNotAllowed(requested: Quoted, allowed: Quoted): VaultError {
     return new VaultError(
       ErrorCode.RESPONSE_MODE_NOT_ALLOWED,
-      `Response mode "${requested}" not allowed: secret policy is "${allowed}" and overrides may only tighten`,
+      say`Response mode "${requested}" not allowed: secret policy is "${allowed}" and overrides may only tighten`,
     );
   }
 
-  static commandNotAllowed(command?: string): VaultError {
-    const msg = command
-      ? `Command not in secret allowlist: ${command}`
-      : "Command not in secret allowlist";
+  static commandNotAllowed(command?: Quoted): VaultError {
+    const msg = shows(command)
+      ? say`Command not in secret allowlist: ${command}`
+      : bare(command, vaultText`Command not in secret allowlist`);
     return new VaultError(ErrorCode.COMMAND_NOT_ALLOWED, msg);
   }
 
-  static networkIsolationUnavailable(reason: string): VaultError {
+  static networkIsolationUnavailable(reason: Quoted): VaultError {
     return new VaultError(
       ErrorCode.NETWORK_ISOLATION_UNAVAILABLE,
-      `Network isolation is required by this secret's policy but unavailable: ${reason}. ` +
-        "Linux needs unprivileged user namespaces (unshare, or bubblewrap's bwrap as the second tier, both under the same userns grant); " +
-        "macOS needs sandbox-exec; Windows is unsupported by design. Remove the requirement via the admin path: " +
-        "secret allow <handle> --no-network-isolation",
+      say`Network isolation is required by this secret's policy but unavailable: ${reason}. Linux needs unprivileged user namespaces (unshare, or bubblewrap's bwrap as the second tier, both under the same userns grant); macOS needs sandbox-exec; Windows is unsupported by design. Remove the requirement via the admin path: secret allow <handle> --no-network-isolation`,
     );
   }
 
-  static fsIsolationUnavailable(reason: string): VaultError {
+  static fsIsolationUnavailable(reason: Quoted): VaultError {
     return new VaultError(
       ErrorCode.FS_ISOLATION_UNAVAILABLE,
-      `Filesystem isolation was demanded by policy but cannot be delivered: ${reason}. ` +
-        `Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel, or bubblewrap's bwrap as the second tier (a read-only root bind, under the userns grant); ` +
-        `macOS needs /usr/bin/sandbox-exec; Windows is unsupported by design. ` +
-        `Lift the demand via: secret allow <handle> --no-fs-isolation`,
+      say`Filesystem isolation was demanded by policy but cannot be delivered: ${reason}. Linux needs setpriv with Landlock support (util-linux >= 2.40) on a Landlock-enabled kernel, or bubblewrap's bwrap as the second tier (a read-only root bind, under the userns grant); macOS needs /usr/bin/sandbox-exec; Windows is unsupported by design. Lift the demand via: secret allow <handle> --no-fs-isolation`,
     );
   }
 
-  static strictTreeExitUnavailable(reason: string): VaultError {
+  static strictTreeExitUnavailable(reason: Quoted): VaultError {
     return new VaultError(
       ErrorCode.STRICT_TREE_EXIT_UNAVAILABLE,
-      `Strict tree exit is required by this secret's policy but the Windows job wrapper is unavailable: ${reason}. ` +
-        "The wrapper is compiled by the .NET Framework compiler every Windows with PowerShell 5.1 carries; " +
-        "lift the demand via the admin path: secret allow <handle> --no-strict-tree-exit",
+      say`Strict tree exit is required by this secret's policy but the Windows job wrapper is unavailable: ${reason}. The wrapper is compiled by the .NET Framework compiler every Windows with PowerShell 5.1 carries; lift the demand via the admin path: secret allow <handle> --no-strict-tree-exit`,
     );
   }
 
@@ -601,88 +702,106 @@ export class VaultError extends Error {
   }
 
   static processSpawnFailed(detail?: string): VaultError {
-    const msg = detail ? `Process spawn failed: ${detail}` : "Process spawn failed";
+    const msg = detail
+      ? `Process spawn failed: ${detail}`
+      : bare(detail, vaultText`Process spawn failed`);
     return new VaultError(ErrorCode.PROCESS_SPAWN_FAILED, msg);
   }
 
   static processTimeout(): VaultError {
-    return new VaultError(ErrorCode.PROCESS_TIMEOUT, "Process timed out");
+    return new VaultError(ErrorCode.PROCESS_TIMEOUT, vaultText`Process timed out`);
   }
 
   static processOutputLimit(): VaultError {
-    return new VaultError(ErrorCode.PROCESS_OUTPUT_LIMIT, "Process output exceeded limit");
+    return new VaultError(ErrorCode.PROCESS_OUTPUT_LIMIT, vaultText`Process output exceeded limit`);
   }
 
-  static invalidProcessConfig(message: string): VaultError {
+  static invalidProcessConfig(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INVALID_PROCESS_CONFIG, message);
   }
 
-  static mcpServerNotConfigured(handle?: string): VaultError {
-    const msg = handle
-      ? `MCP server not configured for secret: ${handle}`
-      : "MCP server not configured for secret";
+  static mcpServerNotConfigured(handle?: Quoted): VaultError {
+    const msg = shows(handle)
+      ? say`MCP server not configured for secret: ${handle}`
+      : bare(handle, vaultText`MCP server not configured for secret`);
     return new VaultError(ErrorCode.MCP_SERVER_NOT_CONFIGURED, msg);
   }
 
-  static mcpServerMismatch(requested: string, configured: string): VaultError {
+  static mcpServerMismatch(requested: Quoted, configured: Quoted): VaultError {
     return new VaultError(
       ErrorCode.MCP_SERVER_MISMATCH,
-      `MCP server '${requested}' does not match configured server '${configured}'`,
+      say`MCP server '${requested}' does not match configured server '${configured}'`,
     );
   }
 
-  static mcpConnectFailed(server: string, detail?: string): VaultError {
-    const msg = detail
-      ? `Failed to connect to MCP server '${server}': ${detail}`
-      : `Failed to connect to MCP server '${server}'`;
-    return new VaultError(ErrorCode.MCP_CONNECT_FAILED, msg, { server });
+  static mcpConnectFailed(server: string | TextPart, detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Failed to connect to MCP server '${server}': ${detail}`
+      : bare(detail, say`Failed to connect to MCP server '${server}'`);
+    return new VaultError(ErrorCode.MCP_CONNECT_FAILED, msg, serverDetails(server, msg));
   }
 
   static mcpServerCrashed(
-    server: string,
+    server: string | TextPart,
     exitCode: number | null,
-    signal: string | null,
+    signal: string | null | TextPart,
   ): VaultError {
+    if (isTextPart(server) && (signal === null || isTextPart(signal))) {
+      return new VaultError(
+        ErrorCode.MCP_SERVER_CRASHED,
+        vaultText`MCP server '${server}' exited unexpectedly`,
+        {
+          server,
+          exit_code: exitCode === null ? NULL_WORD : num(exitCode),
+          signal: signal ?? NULL_WORD,
+        },
+      );
+    }
     return new VaultError(
       ErrorCode.MCP_SERVER_CRASHED,
-      `MCP server '${server}' exited unexpectedly`,
-      { server, exit_code: exitCode, signal },
+      `MCP server '${plain(server)}' exited unexpectedly`,
+      { server: loose(server), exit_code: exitCode, signal: loose(signal) },
     );
   }
 
-  static mcpProtocolError(server: string, detail?: string): VaultError {
-    const msg = detail
-      ? `MCP protocol error from server '${server}': ${detail}`
-      : `MCP protocol error from server '${server}'`;
-    return new VaultError(ErrorCode.MCP_PROTOCOL_ERROR, msg, { server });
+  static mcpProtocolError(server: string | TextPart, detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`MCP protocol error from server '${server}': ${detail}`
+      : bare(detail, say`MCP protocol error from server '${server}'`);
+    return new VaultError(ErrorCode.MCP_PROTOCOL_ERROR, msg, serverDetails(server, msg));
   }
 
-  static mcpTimeout(server: string): VaultError {
-    return new VaultError(ErrorCode.MCP_TIMEOUT, `MCP tool call to server '${server}' timed out`, {
-      server,
-    });
+  static mcpTimeout(server: string | TextPart): VaultError {
+    const msg = say`MCP tool call to server '${server}' timed out`;
+    return new VaultError(ErrorCode.MCP_TIMEOUT, msg, serverDetails(server, msg));
   }
 
   static oauthFlowFailed(detail?: string): VaultError {
-    const msg = detail ? `OAuth flow failed: ${detail}` : "OAuth flow failed";
+    const msg = detail
+      ? `OAuth flow failed: ${detail}`
+      : bare(detail, vaultText`OAuth flow failed`);
     return new VaultError(ErrorCode.OAUTH_FLOW_FAILED, msg);
   }
 
   static oauthCallbackTimeout(): VaultError {
-    return new VaultError(ErrorCode.OAUTH_CALLBACK_TIMEOUT, "OAuth callback timed out");
+    return new VaultError(ErrorCode.OAUTH_CALLBACK_TIMEOUT, vaultText`OAuth callback timed out`);
   }
 
   static oauthInvalidState(): VaultError {
-    return new VaultError(ErrorCode.OAUTH_INVALID_STATE, "OAuth state parameter mismatch");
+    return new VaultError(ErrorCode.OAUTH_INVALID_STATE, vaultText`OAuth state parameter mismatch`);
   }
 
   static oauthTokenExchangeFailed(detail?: string): VaultError {
-    const msg = detail ? `OAuth token exchange failed: ${detail}` : "OAuth token exchange failed";
+    const msg = detail
+      ? `OAuth token exchange failed: ${detail}`
+      : bare(detail, vaultText`OAuth token exchange failed`);
     return new VaultError(ErrorCode.OAUTH_TOKEN_EXCHANGE_FAILED, msg);
   }
 
-  static oauthRefreshFailed(detail?: string): VaultError {
-    const msg = detail ? `OAuth token refresh failed: ${detail}` : "OAuth token refresh failed";
+  static oauthRefreshFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`OAuth token refresh failed: ${detail}`
+      : bare(detail, vaultText`OAuth token refresh failed`);
     return new VaultError(ErrorCode.OAUTH_REFRESH_FAILED, msg);
   }
 
@@ -696,41 +815,49 @@ export class VaultError extends Error {
   static oauthNotConfigured(handle?: string): VaultError {
     const msg = handle
       ? `OAuth not configured for secret: ${handle}`
-      : "OAuth not configured for secret";
+      : bare(handle, vaultText`OAuth not configured for secret`);
     return new VaultError(ErrorCode.OAUTH_NOT_CONFIGURED, msg);
   }
 
   static certInvalid(detail?: string): VaultError {
-    const msg = detail ? `Certificate invalid: ${detail}` : "Certificate invalid";
+    const msg = detail
+      ? `Certificate invalid: ${detail}`
+      : bare(detail, vaultText`Certificate invalid`);
     return new VaultError(ErrorCode.CERT_INVALID, msg);
   }
 
   static certExpired(subject?: string): VaultError {
-    const msg = subject ? `Certificate expired: ${subject}` : "Certificate expired";
+    const msg = subject
+      ? `Certificate expired: ${subject}`
+      : bare(subject, vaultText`Certificate expired`);
     return new VaultError(ErrorCode.CERT_EXPIRED, msg);
   }
 
   static certPrivateKeyMismatch(): VaultError {
     return new VaultError(
       ErrorCode.CERT_PRIVATE_KEY_MISMATCH,
-      "Private key does not match certificate",
+      vaultText`Private key does not match certificate`,
     );
   }
 
   static certAcmeFailed(detail?: string): VaultError {
-    const msg = detail ? `ACME operation failed: ${detail}` : "ACME operation failed";
+    const msg = detail
+      ? `ACME operation failed: ${detail}`
+      : bare(detail, vaultText`ACME operation failed`);
     return new VaultError(ErrorCode.CERT_ACME_FAILED, msg);
   }
 
   static certCsrFailed(detail?: string): VaultError {
-    const msg = detail ? `CSR generation failed: ${detail}` : "CSR generation failed";
+    const msg = detail
+      ? `CSR generation failed: ${detail}`
+      : bare(detail, vaultText`CSR generation failed`);
     return new VaultError(ErrorCode.CERT_CSR_FAILED, msg);
   }
 
   static certNotConfigured(handle?: string): VaultError {
     const msg = handle
       ? `Certificate not configured for secret: ${handle}`
-      : "Certificate not configured for secret";
+      : bare(handle, vaultText`Certificate not configured for secret`);
     return new VaultError(ErrorCode.CERT_NOT_CONFIGURED, msg);
   }
 
@@ -742,75 +869,85 @@ export class VaultError extends Error {
   static certValueUnsupported(handle?: string): VaultError {
     const msg = handle
       ? `Certificate secrets cannot be used as a raw value: ${handle}`
-      : "Certificate secrets cannot be used as a raw value";
+      : bare(handle, vaultText`Certificate secrets cannot be used as a raw value`);
     return new VaultError(ErrorCode.CERT_VALUE_UNSUPPORTED, msg);
   }
 
-  static hostNotAllowed(host?: string): VaultError {
-    const msg = host ? `Host not in secret allowlist: ${host}` : "Host not in secret allowlist";
+  static hostNotAllowed(host?: Quoted): VaultError {
+    const msg = shows(host)
+      ? say`Host not in secret allowlist: ${host}`
+      : bare(host, vaultText`Host not in secret allowlist`);
     return new VaultError(ErrorCode.HOST_NOT_ALLOWED, msg);
   }
 
-  static dbConnectionFailed(detail?: string): VaultError {
-    const msg = detail ? `Database connection failed: ${detail}` : "Database connection failed";
+  static dbConnectionFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Database connection failed: ${detail}`
+      : bare(detail, vaultText`Database connection failed`);
     return new VaultError(ErrorCode.DB_CONNECTION_FAILED, msg);
   }
 
-  static dbQueryFailed(detail?: string): VaultError {
-    const msg = detail ? `Database query failed: ${detail}` : "Database query failed";
+  static dbQueryFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Database query failed: ${detail}`
+      : bare(detail, vaultText`Database query failed`);
     return new VaultError(ErrorCode.DB_QUERY_FAILED, msg);
   }
 
   static dbTlsRequired(): VaultError {
     return new VaultError(
       ErrorCode.DB_TLS_REQUIRED,
-      "TLS is required for this database connection; set tls_mode 'disable' to opt out",
+      vaultText`TLS is required for this database connection; set tls_mode 'disable' to opt out`,
     );
   }
 
-  static unsupportedDbEngine(engine: string): VaultError {
+  static unsupportedDbEngine(engine: Quoted): VaultError {
     return new VaultError(
       ErrorCode.UNSUPPORTED_DB_ENGINE,
-      `Unsupported database engine: ${engine}`,
+      say`Unsupported database engine: ${engine}`,
     );
   }
 
-  static invalidDatabaseConfig(message: string): VaultError {
+  static invalidDatabaseConfig(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INVALID_DATABASE_CONFIG, message);
   }
 
-  static sshConnectFailed(detail?: string): VaultError {
-    const msg = detail ? `SSH connection failed: ${detail}` : "SSH connection failed";
+  static sshConnectFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`SSH connection failed: ${detail}`
+      : bare(detail, vaultText`SSH connection failed`);
     return new VaultError(ErrorCode.SSH_CONNECT_FAILED, msg);
   }
 
-  static sshHostKeyMismatch(host?: string): VaultError {
-    const msg = host
-      ? `SSH host key does not match the pinned key for: ${host}`
-      : "SSH host key does not match the pinned key";
+  static sshHostKeyMismatch(host?: Quoted): VaultError {
+    const msg = shows(host)
+      ? say`SSH host key does not match the pinned key for: ${host}`
+      : bare(host, vaultText`SSH host key does not match the pinned key`);
     return new VaultError(ErrorCode.SSH_HOST_KEY_MISMATCH, msg);
   }
 
-  static sshAgentFailed(detail?: string): VaultError {
-    const msg = detail ? `Ephemeral ssh-agent failed: ${detail}` : "Ephemeral ssh-agent failed";
+  static sshAgentFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Ephemeral ssh-agent failed: ${detail}`
+      : bare(detail, vaultText`Ephemeral ssh-agent failed`);
     return new VaultError(ErrorCode.SSH_AGENT_FAILED, msg);
   }
 
   static sshNotConfigured(handle?: string): VaultError {
     const msg = handle
       ? `SSH host keys not pinned for secret: ${handle}`
-      : "SSH host keys not pinned for secret";
+      : bare(handle, vaultText`SSH host keys not pinned for secret`);
     return new VaultError(ErrorCode.SSH_NOT_CONFIGURED, msg);
   }
 
-  static sshClientUnsupported(directory: string): VaultError {
+  static sshClientUnsupported(directory: Quoted): VaultError {
     return new VaultError(
       ErrorCode.SSH_CLIENT_UNSUPPORTED,
-      `Unsupported ssh client: the binary resolved under ${directory} is an MSYS/Cygwin build (msys-2.0.dll or cygwin1.dll beside it), which cannot reach the vault's named-pipe ssh-agent; allowlist the native Win32-OpenSSH client (C:\\Windows\\System32\\OpenSSH\\ssh.exe) and put its directory ahead of Git's usr\\bin on PATH`,
+      say`Unsupported ssh client: the binary resolved under ${directory} is an MSYS/Cygwin build (msys-2.0.dll or cygwin1.dll beside it), which cannot reach the vault's named-pipe ssh-agent; allowlist the native Win32-OpenSSH client (C:\\Windows\\System32\\OpenSSH\\ssh.exe) and put its directory ahead of Git's usr\\bin on PATH`,
     );
   }
 
-  static invalidSshConfig(message: string): VaultError {
+  static invalidSshConfig(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INVALID_SSH_CONFIG, message);
   }
 
@@ -824,45 +961,45 @@ export class VaultError extends Error {
   static sshPasswordNotOffered(): VaultError {
     return new VaultError(
       ErrorCode.SSH_PASSWORD_NOT_OFFERED,
-      "SSH bootstrap refused: the server does not offer password login",
+      vaultText`SSH bootstrap refused: the server does not offer password login`,
     );
   }
 
   static sshPasswordRefused(): VaultError {
     return new VaultError(
       ErrorCode.SSH_PASSWORD_REFUSED,
-      "SSH bootstrap refused: the server refused the stored password; repeating the bootstrap can lock the vault host out of the server",
+      vaultText`SSH bootstrap refused: the server refused the stored password; repeating the bootstrap can lock the vault host out of the server`,
     );
   }
 
   static sshBootstrapStepFailed(
-    dropIn: SshBootstrapDropInWord,
-    key: "not_attempted" | "failed",
+    dropIn: SshBootstrapDropInWord | TextPart,
+    key: "not_attempted" | "failed" | TextPart,
   ): VaultError {
     return new VaultError(
       ErrorCode.SSH_BOOTSTRAP_STEP_FAILED,
-      `SSH bootstrap failed: no key was installed (sudoers: ${dropIn}, key: ${key})`,
+      say`SSH bootstrap failed: no key was installed (sudoers: ${dropIn}, key: ${key})`,
     );
   }
 
   static sshBootstrapUnconfirmed(): VaultError {
     return new VaultError(
       ErrorCode.SSH_BOOTSTRAP_UNCONFIRMED,
-      "SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host",
+      vaultText`SSH bootstrap unconfirmed: a bootstrap of this secret has no confirmed outcome, so the secret was ended; a key and a sudoers drop-in may be installed on the host`,
     );
   }
 
   static sshBootstrapInFlight(): VaultError {
     return new VaultError(
       ErrorCode.SSH_BOOTSTRAP_IN_FLIGHT,
-      "SSH bootstrap in flight: another bootstrap of this secret is running",
+      vaultText`SSH bootstrap in flight: another bootstrap of this secret is running`,
     );
   }
 
   static sshBootstrapOnWindows(): VaultError {
     return new VaultError(
       ErrorCode.SSH_CLIENT_UNSUPPORTED,
-      "Unsupported ssh client: the ssh bootstrap is not served on a Windows vault host",
+      vaultText`Unsupported ssh client: the ssh bootstrap is not served on a Windows vault host`,
     );
   }
 
@@ -880,26 +1017,28 @@ export class VaultError extends Error {
     );
   }
 
-  static gitOperationFailed(detail?: string): VaultError {
-    const msg = detail ? `Git operation failed: ${detail}` : "Git operation failed";
+  static gitOperationFailed(detail?: Quoted): VaultError {
+    const msg = shows(detail)
+      ? say`Git operation failed: ${detail}`
+      : bare(detail, vaultText`Git operation failed`);
     return new VaultError(ErrorCode.GIT_OPERATION_FAILED, msg);
   }
 
-  static gitUnsupportedTransport(repository?: string): VaultError {
-    const msg = repository
-      ? `Unsupported git transport for repository: ${repository}`
-      : "Unsupported git transport";
+  static gitUnsupportedTransport(repository?: Quoted): VaultError {
+    const msg = shows(repository)
+      ? say`Unsupported git transport for repository: ${repository}`
+      : bare(repository, vaultText`Unsupported git transport`);
     return new VaultError(ErrorCode.GIT_UNSUPPORTED_TRANSPORT, msg);
   }
 
-  static invalidGitConfig(message: string): VaultError {
+  static invalidGitConfig(message: string | VaultText): VaultError {
     return new VaultError(ErrorCode.INVALID_GIT_CONFIG, message);
   }
 
   static keyPassphraseInvalid(): VaultError {
     return new VaultError(
       ErrorCode.KEY_PASSPHRASE_INVALID,
-      "Could not decrypt the private key: wrong passphrase or corrupted key material",
+      vaultText`Could not decrypt the private key: wrong passphrase or corrupted key material`,
     );
   }
 
@@ -907,179 +1046,169 @@ export class VaultError extends Error {
     return new VaultError(
       ErrorCode.ENCRYPTED_KEY_UNSUPPORTED,
       message ??
-        "Encrypted OpenSSH-format keys are not supported (bcrypt-pbkdf is outside node:crypto). " +
-          "RSA/ECDSA: convert in place with `ssh-keygen -p -f <keyfile> -m PKCS8` (the passphrase " +
-          "is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot " +
-          "write PKCS#8 — strip the passphrase with `ssh-keygen -p -f <keyfile> -N ''` and " +
-          "re-import (the vault stores the key under its own encryption either way)",
+        vaultText`Encrypted OpenSSH-format keys are not supported (bcrypt-pbkdf is outside node:crypto). RSA/ECDSA: convert in place with \`ssh-keygen -p -f <keyfile> -m PKCS8\` (the passphrase is kept), then re-import — the vault decrypts at import. Ed25519: ssh-keygen cannot write PKCS#8 — strip the passphrase with \`ssh-keygen -p -f <keyfile> -N ''\` and re-import (the vault stores the key under its own encryption either way)`,
     );
   }
 
-  static dedicatedContextRequired(binary: string, context: string): VaultError {
+  static dedicatedContextRequired(binary: Quoted, context: Quoted): VaultError {
     return new VaultError(
       ErrorCode.DEDICATED_CONTEXT_REQUIRED,
-      `'${binary}' has a dedicated injection context and cannot be run through the process ` +
-        `context: its command allowlist entry exists so the '${context}' context can spawn it ` +
-        `under vault-authored arguments. Use action.type '${context}' instead`,
+      say`'${binary}' has a dedicated injection context and cannot be run through the process context: its command allowlist entry exists so the '${context}' context can spawn it under vault-authored arguments. Use action.type '${context}' instead`,
     );
   }
 
   static keyBundleUnsupported(): VaultError {
     return new VaultError(
       ErrorCode.KEY_BUNDLE_UNSUPPORTED,
-      "The file contains additional PEM blocks alongside an encrypted private key (a " +
-        "certificate bundle). Decrypt-at-import would silently drop everything but the key — " +
-        "import the key alone, or use --no-decrypt to store the bundle verbatim (the key then " +
-        "stays encrypted and is unusable for SSH until re-imported on its own)",
+      vaultText`The file contains additional PEM blocks alongside an encrypted private key (a certificate bundle). Decrypt-at-import would silently drop everything but the key — import the key alone, or use --no-decrypt to store the bundle verbatim (the key then stays encrypted and is unusable for SSH until re-imported on its own)`,
     );
   }
 
-  static recipientNotAllowed(recipient: string): VaultError {
+  static recipientNotAllowed(recipient: Quoted): VaultError {
     return new VaultError(
       ErrorCode.RECIPIENT_NOT_ALLOWED,
-      `Recipient not in secret allowlist: ${recipient}`,
+      say`Recipient not in secret allowlist: ${recipient}`,
     );
   }
 
   static attachmentPolicyRequired(): VaultError {
     return new VaultError(
       ErrorCode.ATTACHMENT_POLICY_REQUIRED,
-      "Attachments require an explicit recipient allowlist before they can be sent: " +
-        "configure one via secret allow <handle> --recipient",
+      vaultText`Attachments require an explicit recipient allowlist before they can be sent: configure one via secret allow <handle> --recipient`,
     );
   }
 
-  static attachmentRejected(reason: string): VaultError {
-    return new VaultError(ErrorCode.ATTACHMENT_REJECTED, `Attachment rejected: ${reason}`);
+  static attachmentRejected(reason: Quoted): VaultError {
+    return new VaultError(ErrorCode.ATTACHMENT_REJECTED, say`Attachment rejected: ${reason}`);
   }
 
-  static imapMutationNotAllowed(operation: string): VaultError {
+  static imapMutationNotAllowed(operation: Quoted): VaultError {
     return new VaultError(
       ErrorCode.IMAP_MUTATION_NOT_ALLOWED,
-      `IMAP mutation '${operation}' is not allowed: this secret's IMAP policy is read-only`,
+      say`IMAP mutation '${operation}' is not allowed: this secret's IMAP policy is read-only`,
     );
   }
 
-  static smtpStarttlsUnavailable(host: string): VaultError {
+  static smtpStarttlsUnavailable(host: Quoted): VaultError {
     return new VaultError(
       ErrorCode.SMTP_STARTTLS_UNAVAILABLE,
-      `SMTP STARTTLS is required but not available on ${host}`,
+      say`SMTP STARTTLS is required but not available on ${host}`,
     );
   }
 
-  static smtpDeliveryFailed(origin: string): VaultError {
-    return new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, `SMTP delivery failed: ${origin}`);
+  static smtpDeliveryFailed(origin: Quoted): VaultError {
+    return new VaultError(ErrorCode.SMTP_DELIVERY_FAILED, say`SMTP delivery failed: ${origin}`);
   }
 
-  static imapOperationFailed(origin: string, operation: string): VaultError {
+  static imapOperationFailed(origin: Quoted, operation: Quoted): VaultError {
     return new VaultError(
       ErrorCode.IMAP_OPERATION_FAILED,
-      `IMAP operation '${operation}' failed: ${origin}`,
+      say`IMAP operation '${operation}' failed: ${origin}`,
     );
   }
 
-  static imapMoveUnsupported(origin: string): VaultError {
+  static imapMoveUnsupported(origin: Quoted): VaultError {
     return new VaultError(
       ErrorCode.IMAP_OPERATION_FAILED,
-      `IMAP operation 'move' refused: ${origin} advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), so a move could only complete with a mailbox-wide EXPUNGE; use 'copy', then 'store' (\\Deleted) and 'expunge' explicitly if that is acceptable`,
+      say`IMAP operation 'move' refused: ${origin} advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), so a move could only complete with a mailbox-wide EXPUNGE; use 'copy', then 'store' (\\Deleted) and 'expunge' explicitly if that is acceptable`,
     );
   }
 
-  static websocketConnectFailed(origin: string): VaultError {
+  static websocketConnectFailed(origin: Quoted): VaultError {
     return new VaultError(
       ErrorCode.WEBSOCKET_CONNECT_FAILED,
-      `WebSocket connection failed: ${origin}`,
+      say`WebSocket connection failed: ${origin}`,
     );
   }
 
   static sftpOperationFailed(exitCode: number): VaultError {
     return new VaultError(
       ErrorCode.SFTP_OPERATION_FAILED,
-      `SFTP operation failed (exit code ${exitCode})`,
+      say`SFTP operation failed (exit code ${num(exitCode)})`,
     );
   }
 
   static localPathNotAllowed(): VaultError {
     return new VaultError(
       ErrorCode.LOCAL_PATH_NOT_ALLOWED,
-      "sftp local path is not inside a directory the secret's policy lists",
+      vaultText`sftp local path is not inside a directory the secret's policy lists`,
     );
   }
 
   static renderEntryNotFound(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_ENTRY_NOT_FOUND,
-      "SFTP render refused: the secret's injection policy holds no render entry of that name",
+      vaultText`SFTP render refused: the secret's injection policy holds no render entry of that name`,
     );
   }
 
   static renderInFlight(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_IN_FLIGHT,
-      "SFTP render in flight: another render to the same host, port and path is running",
+      vaultText`SFTP render in flight: another render to the same host, port and path is running`,
     );
   }
 
   static renderSlotRefused(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_SLOT_REFUSED,
-      "SFTP render refused: a slot of the entry's template cannot be served to this call",
+      vaultText`SFTP render refused: a slot of the entry's template cannot be served to this call`,
     );
   }
 
   static renderSlotUnsupported(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_SLOT_UNSUPPORTED,
-      "SFTP render refused: a slot's secret is one a render does not serve",
+      vaultText`SFTP render refused: a slot's secret is one a render does not serve`,
     );
   }
 
   static renderNotApproved(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_NOT_APPROVED,
-      "SFTP render refused: a slot's secret has not approved the entry as it stands",
+      vaultText`SFTP render refused: a slot's secret has not approved the entry as it stands`,
     );
   }
 
   static renderValueUnsupported(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_VALUE_UNSUPPORTED,
-      "SFTP render refused: a value does not fit the template: every value is UTF-8 text without a NUL, 1 to 65536 bytes, and beside other text only of A-Z, a-z, 0-9 and . _ ~ + / = : @ % -",
+      vaultText`SFTP render refused: a value does not fit the template: every value is UTF-8 text without a NUL, 1 to 65536 bytes, and beside other text only of A-Z, a-z, 0-9 and . _ ~ + / = : @ % -`,
     );
   }
 
   static renderOnlyKey(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_ONLY_KEY,
-      "Use refused: the secret holds a render entry and serves the sftp render alone",
+      vaultText`Use refused: the secret holds a render entry and serves the sftp render alone`,
     );
   }
 
   static renderFailed(): VaultError {
     return new VaultError(
       ErrorCode.RENDER_FAILED,
-      "SFTP render failed: the file is not confirmed written; the key's audit row holds the reason",
+      vaultText`SFTP render failed: the file is not confirmed written; the key's audit row holds the reason`,
     );
   }
 
   static localPathProtected(): VaultError {
     return new VaultError(
       ErrorCode.LOCAL_PATH_NOT_ALLOWED,
-      "git working directory is inside a directory the vault protects",
+      vaultText`git working directory is inside a directory the vault protects`,
     );
   }
 
   static workTreeHoldsProtectedPath(): VaultError {
     return new VaultError(
       ErrorCode.LOCAL_PATH_NOT_ALLOWED,
-      "git work tree holds a path the vault protects",
+      vaultText`git work tree holds a path the vault protects`,
     );
   }
 
   static dockerOperationFailed(exitCode: number): VaultError {
     return new VaultError(
       ErrorCode.DOCKER_OPERATION_FAILED,
-      `Docker operation failed (exit code ${exitCode})`,
+      say`Docker operation failed (exit code ${num(exitCode)})`,
     );
   }
 
@@ -1160,14 +1289,14 @@ export class VaultError extends Error {
   static proxyCaExists(): VaultError {
     return new VaultError(
       ErrorCode.DUPLICATE_SECRET,
-      "The Harpoc CA already exists (secret://harpoc-ca); harpoc proxy ca init --force replaces it",
+      vaultText`The Harpoc CA already exists (secret://harpoc-ca); harpoc proxy ca init --force replaces it`,
     );
   }
 
   static proxyCaNotConfigured(): VaultError {
     return new VaultError(
       ErrorCode.CERT_NOT_CONFIGURED,
-      "No Harpoc CA in this vault (secret://harpoc-ca); harpoc proxy ca init creates one",
+      vaultText`No Harpoc CA in this vault (secret://harpoc-ca); harpoc proxy ca init creates one`,
     );
   }
 
@@ -1189,14 +1318,14 @@ export class VaultError extends Error {
   static invalidUnlockKey(detail?: string): VaultError {
     return new VaultError(
       ErrorCode.INVALID_UNLOCK_KEY,
-      detail === undefined ? "Invalid unlock key" : `Invalid unlock key: ${detail}`,
+      detail === undefined ? vaultText`Invalid unlock key` : `Invalid unlock key: ${detail}`,
     );
   }
 
   static unlockKeyNotEnrolled(): VaultError {
     return new VaultError(
       ErrorCode.UNLOCK_KEY_NOT_ENROLLED,
-      "No unlock key is enrolled for this vault (harpoc unlock-key enroll)",
+      vaultText`No unlock key is enrolled for this vault (harpoc unlock-key enroll)`,
     );
   }
 
@@ -1215,14 +1344,21 @@ export class VaultError extends Error {
   static unlockKeyPasswordRequired(): VaultError {
     return new VaultError(
       ErrorCode.UNLOCK_KEY_PASSWORD_REQUIRED,
-      "Enrolling or revoking an unlock key requires an unlock by password in this process",
+      vaultText`Enrolling or revoking an unlock key requires an unlock by password in this process`,
     );
   }
 
-  static responseTooLarge(origin: string, maxBytes: number): VaultError {
+  static responseTooLarge(origin: Quoted, maxBytes: number): VaultError {
+    const text = asText(origin);
     return new VaultError(
       ErrorCode.RESPONSE_TOO_LARGE,
-      `Response body from ${origin} exceeds the ${maxBytes}-byte limit`,
+      text === undefined
+        ? `Response body from ${plain(origin)} exceeds the ${maxBytes}-byte limit`
+        : vaultText`Response body from ${text} exceeds the ${num(maxBytes)}-byte limit`,
     );
   }
+}
+
+export function recordOf(err: unknown): ErrorRecord | undefined {
+  return err instanceof VaultError ? RECORDS.get(err) : undefined;
 }

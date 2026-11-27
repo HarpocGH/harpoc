@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ErrorCode } from "@harpoc/shared";
+import { ErrorCode, vaultText } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
@@ -137,7 +137,7 @@ describe("spawnCaptured — the standard input seam", () => {
   });
 
   it("isolation that cannot be delivered", async () => {
-    forceFsIsolationUnavailableForTests("test");
+    forceFsIsolationUnavailableForTests(vaultText`test`);
     const input = randomBytes(FOUR_MIB);
     await expectVaultError(
       () =>

@@ -11,6 +11,8 @@ import {
   SSH_HOST_KEY_TYPES,
   SSH_INSTALL_KEY_TYPES,
   VaultError,
+  token,
+  vaultText,
 } from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import {
@@ -33,11 +35,19 @@ import {
 import { controlledPathDirs, resolveExecutable } from "./injection/allowlist.js";
 import { parseSshPublicKey } from "./injection/ssh-common-keys.js";
 import { refuseUnsupportedSshClient } from "./injection/ssh-common-version.js";
-import type { BootstrapCall, BootstrapOutcome } from "./injection/ssh-injector-bootstrap.js";
+import type {
+  BootstrapCall,
+  BootstrapOutcome,
+  SpawnAuditFields,
+} from "./injection/ssh-injector-bootstrap.js";
 import { refuseWindowsVaultHost, runBootstrap } from "./injection/ssh-injector-bootstrap.js";
+import {
+  STATUS_DROP_IN_WORDS,
+  STATUS_KEY_WORDS,
+} from "./injection/ssh-injector-bootstrap-script.js";
 import type { SecretManager } from "./secrets/secret-manager.js";
 import type { SqliteStore } from "./storage/sqlite-store.js";
-import type { SshBootstrapSeam } from "./vault-engine.js";
+import type { SpawnAuditKeyRecord, SshBootstrapSeam } from "./vault-engine.js";
 import { VaultEngine } from "./vault-engine.js";
 
 vi.mock("./crypto/argon2.js", async (importOriginal) =>
@@ -296,6 +306,15 @@ describe("the engine's bootstrap seam", () => {
       refuseOldClient: refuseUnsupportedSshClient,
       run: runBootstrap,
     });
+  });
+
+  it("the lists are exhaustive by type", () => {
+    const exact: Record<keyof SpawnAuditFields, true> = {} as SpawnAuditKeyRecord;
+    // @ts-expect-error a field without its key
+    const widened: Record<keyof (SpawnAuditFields & { added?: true }), true> =
+      {} as SpawnAuditKeyRecord;
+    expect(typeof exact).toBe("object");
+    expect(typeof widened).toBe("object");
   });
 
   it.runIf(process.platform === "win32")(
@@ -1002,7 +1021,10 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
       what: "refused: a failed step",
       outcome: {
         kind: "refused",
-        error: VaultError.sshBootstrapStepFailed("refused", "not_attempted"),
+        error: VaultError.sshBootstrapStepFailed(
+          token("refused", STATUS_DROP_IN_WORDS),
+          token("not_attempted", STATUS_KEY_WORDS),
+        ),
         status: { dropIn: "refused", key: "not_attempted" },
         spawn: SPAWN,
       } as BootstrapOutcome,
@@ -1031,7 +1053,7 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
       what: "not spawned: the seam refused the isolation",
       outcome: {
         kind: "not_spawned",
-        error: VaultError.networkIsolationUnavailable("no network namespace on this host"),
+        error: VaultError.networkIsolationUnavailable(vaultText`no network namespace on this host`),
         spawn: { network_isolation: true, fs_isolation: false },
       } as BootstrapOutcome,
       row: {
@@ -1049,7 +1071,7 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
         kind: "not_spawned",
         error: new VaultError(
           ErrorCode.FILE_IO_ERROR,
-          "a temporary file of the ssh bootstrap could not be prepared",
+          vaultText`a temporary file of the ssh bootstrap could not be prepared`,
         ),
       } as BootstrapOutcome,
       row: { outcome: "not_spawned", error: ErrorCode.FILE_IO_ERROR, secret_ended: false },
@@ -1084,9 +1106,9 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
     expect(calls).toHaveLength(1);
   });
 
-  it("the outcome's row takes the seam's eleven fields by name, last: a field of another name neither overwrites nor joins the engine's", async () => {
+  it("the outcome's row takes the seam's ten fields by name, last: a field of another name neither overwrites nor joins the engine's", async () => {
     await storeSecret();
-    const eleven = {
+    const ten = {
       exit_code: 255,
       timed_out: true,
       truncated: true,
@@ -1094,7 +1116,6 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
       isolation_mechanism: "unshare",
       fs_isolation: true,
       fs_isolation_mechanism: "landlock",
-      sanitized: true,
       descendant_sweep: { killed: 1, failed: false },
       tree_kill: "job",
       strict_tree_exit: true,
@@ -1115,7 +1136,8 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
             drop_in: "written",
             mark: "gone",
             stdout: "a line of the host",
-            ...eleven,
+            sanitized: true,
+            ...ten,
           },
         }) as unknown as BootstrapOutcome,
     );
@@ -1128,14 +1150,14 @@ describe.skipIf(SSH_ON_PATH === null)("useSecret — a bootstrap that reaches th
       outcome: "refused",
       error: ErrorCode.SSH_PASSWORD_REFUSED,
       secret_ended: false,
-      ...eleven,
+      ...ten,
     });
     expect(Object.keys(detail as object)).toStrictEqual([
       ...Object.keys(B0),
       "outcome",
       "error",
       "secret_ended",
-      ...Object.keys(eleven),
+      ...Object.keys(ten),
     ]);
   });
 
@@ -1784,7 +1806,10 @@ describe.skipIf(SSH_ON_PATH === null)(
     };
     const stepFailed: BootstrapOutcome = {
       kind: "refused",
-      error: VaultError.sshBootstrapStepFailed("refused", "not_attempted"),
+      error: VaultError.sshBootstrapStepFailed(
+        token("refused", STATUS_DROP_IN_WORDS),
+        token("not_attempted", STATUS_KEY_WORDS),
+      ),
       status: { dropIn: "refused", key: "not_attempted" },
       spawn: SPAWN,
     };

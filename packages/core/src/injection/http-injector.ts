@@ -7,6 +7,7 @@ import type {
   HttpResult,
   InjectionConfig,
   ResponseMode,
+  TextPart,
 } from "@harpoc/shared";
 import {
   DEFAULT_HTTP_TIMEOUT_MS,
@@ -14,7 +15,9 @@ import {
   MAX_HTTP_RESPONSE_BYTES,
   VaultError,
   contentLengthExceeds,
+  echoField,
   readBodyCapped,
+  vaultText,
 } from "@harpoc/shared";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { Response as UndiciResponse } from "undici";
@@ -22,7 +25,9 @@ import type { AuditAttribution } from "../audit/attribution.js";
 import { withAttribution } from "../audit/attribution.js";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import { matchesUrlAllowlist } from "./allowlist.js";
-import { redactErrorMessage, redactSecretEncodings } from "./output-sanitizer.js";
+import { passError } from "./error-pass.js";
+import { outside, redactSecretEncodings } from "./output-sanitizer.js";
+import type { ValidationSubject } from "./url-validator.js";
 import { validateUrl } from "./url-validator.js";
 
 type PinnedLookup = (
@@ -105,13 +110,13 @@ export function applyInjectionConfig(
       if (!injection.header_name) {
         throw new VaultError(
           ErrorCode.INVALID_INJECTION_CONFIG,
-          "header_name required for header injection",
+          vaultText`header_name required for header injection`,
         );
       }
       if (injection.header_name === "__proto__") {
         throw new VaultError(
           ErrorCode.INVALID_INJECTION_CONFIG,
-          "header_name must not be __proto__",
+          vaultText`header_name must not be __proto__`,
         );
       }
       outHeaders[injection.header_name] = valueStr;
@@ -120,7 +125,7 @@ export function applyInjectionConfig(
       if (!injection.query_param) {
         throw new VaultError(
           ErrorCode.INVALID_INJECTION_CONFIG,
-          "query_param required for query injection",
+          vaultText`query_param required for query injection`,
         );
       }
       url.searchParams.set(injection.query_param, valueStr);
@@ -170,6 +175,11 @@ function redactHttpResult(result: HttpResult, valueStr: string): boolean {
       result.headers[key] = out;
     }
   }
+  if (result.redirect_warning) {
+    const out = redactSecretEncodings(result.redirect_warning, valueStr);
+    changed = changed || out !== result.redirect_warning;
+    result.redirect_warning = out;
+  }
   return changed;
 }
 
@@ -190,8 +200,12 @@ export class HttpInjector {
     signal?: AbortSignal,
   ): Promise<HttpResult> {
     try {
+      const subject: ValidationSubject = {
+        parts: echoField(request, "url"),
+        values: [Buffer.from(secretValue).toString("utf8")],
+      };
       // Validate URL (includes DNS rebinding check)
-      const validated = await validateUrl(request.url);
+      const validated = await validateUrl(request.url, undefined, subject);
       if (signal?.aborted) throw VaultError.vaultLocked();
       const url = validated.url;
 
@@ -241,6 +255,7 @@ export class HttpInjector {
           request.urlAllowlist ?? [],
           pins,
           dispatcher,
+          subject,
         );
       } finally {
         // destroy(), not close(): the abort at `timeoutMs` settles the fetch
@@ -286,7 +301,7 @@ export class HttpInjector {
       // redirect targets and driver messages are attacker-influenced text, and
       // a thrown message reaches the model through the MCP tool result and the
       // REST error body without passing any result-shaped redaction.
-      const err = redactErrorMessage(rawErr, [Buffer.from(secretValue).toString("utf8")]);
+      const err = passError(rawErr, [Buffer.from(secretValue).toString("utf8")]);
       if (err instanceof VaultError) {
         this.auditLogger?.log(
           withAttribution(
@@ -361,11 +376,13 @@ export class HttpInjector {
     urlAllowlist: string[],
     pins: Map<string, string[]>,
     dispatcher: Agent,
+    subject: ValidationSubject,
   ): Promise<HttpResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     let currentUrl = url;
+    let currentTarget = subject.parts;
     let currentHeaders = { ...headers };
     let remainingRedirects = HttpInjector.MAX_REDIRECTS;
     let redirectWarning: string | undefined;
@@ -385,7 +402,7 @@ export class HttpInjector {
         if (response.status < 300 || response.status >= 400) {
           const result = await this.buildResponse(
             response,
-            currentUrl,
+            currentTarget,
             responseMode,
             responseHeaderAllowlist,
           );
@@ -396,14 +413,14 @@ export class HttpInjector {
         const location = response.headers.get("location");
 
         if (followRedirects === "none" || !location) {
-          return this.buildResponse(response, currentUrl, responseMode, responseHeaderAllowlist);
+          return this.buildResponse(response, currentTarget, responseMode, responseHeaderAllowlist);
         }
 
         // This hop's body is never read — release the connection before following.
         await response.body?.cancel().catch(() => {});
 
         if (remainingRedirects <= 0) {
-          throw new VaultError(ErrorCode.REDIRECT_POLICY_VIOLATION, "Too many redirects");
+          throw new VaultError(ErrorCode.REDIRECT_POLICY_VIOLATION, vaultText`Too many redirects`);
         }
         remainingRedirects--;
 
@@ -424,7 +441,7 @@ export class HttpInjector {
           // attacker-controlled and can carry the value back (H2).
           throw new VaultError(
             ErrorCode.REDIRECT_POLICY_VIOLATION,
-            `Redirect target blocked: ${redirectUrl.origin}`,
+            vaultText`Redirect target blocked: ${outside(redirectUrl.origin, subject.values)}`,
           );
         }
 
@@ -433,7 +450,7 @@ export class HttpInjector {
         // request to a non-allowlisted target, whichever follow_redirects mode
         // is active. Checked before the hop executes.
         if (!matchesUrlAllowlist(redirectUrl.toString(), urlAllowlist)) {
-          throw VaultError.urlNotAllowed(redirectUrl.origin);
+          throw VaultError.urlNotAllowed(outside(redirectUrl.origin, subject.values));
         }
 
         const originalUrl = new URL(currentUrl);
@@ -464,6 +481,7 @@ export class HttpInjector {
         }
 
         currentUrl = redirectUrl.toString();
+        currentTarget = outside(redirectUrl.origin, subject.values);
       }
     } finally {
       clearTimeout(timeout);
@@ -472,7 +490,7 @@ export class HttpInjector {
 
   private async buildResponse(
     response: UndiciResponse,
-    currentUrl: string,
+    target: TextPart,
     responseMode: ResponseMode,
     responseHeaderAllowlist: string[],
   ): Promise<HttpResult> {
@@ -505,10 +523,9 @@ export class HttpInjector {
     // never truncated — a cut mid-string can split an echoed credential past
     // the redactor. The thrown VaultError lands in `executeWithSecret`'s own
     // catch, which writes the failed row.
-    const origin = new URL(currentUrl).origin;
     if (contentLengthExceeds(response.headers, MAX_HTTP_RESPONSE_BYTES)) {
       await response.body?.cancel().catch(() => {});
-      throw VaultError.responseTooLarge(origin, MAX_HTTP_RESPONSE_BYTES);
+      throw VaultError.responseTooLarge(target, MAX_HTTP_RESPONSE_BYTES);
     }
 
     let body: string | undefined;
@@ -517,7 +534,7 @@ export class HttpInjector {
         response.body as ReadableStream<Uint8Array> | null,
         MAX_HTTP_RESPONSE_BYTES,
       );
-      if (!read.ok) throw VaultError.responseTooLarge(origin, MAX_HTTP_RESPONSE_BYTES);
+      if (!read.ok) throw VaultError.responseTooLarge(target, MAX_HTTP_RESPONSE_BYTES);
       body = new TextDecoder().decode(read.bytes);
     } catch (err) {
       if (err instanceof VaultError) throw err;

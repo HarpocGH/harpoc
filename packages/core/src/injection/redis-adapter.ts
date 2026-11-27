@@ -1,4 +1,4 @@
-import { isDecimalInteger, VaultError } from "@harpoc/shared";
+import { isDecimalInteger, VaultError, vaultText } from "@harpoc/shared";
 import type { DbCommandAdapter, DbConnectOptions, DbQueryResult } from "./db-adapters.js";
 import { identityCheckerFor } from "./db-adapters.js";
 
@@ -25,7 +25,9 @@ import { identityCheckerFor } from "./db-adapters.js";
 export class RedisAdapter implements DbCommandAdapter {
   async execute(opts: DbConnectOptions, command: unknown): Promise<DbQueryResult> {
     if (!isDecimalInteger(opts.database)) {
-      throw VaultError.invalidDatabaseConfig("redis database must be a non-negative integer index");
+      throw VaultError.invalidDatabaseConfig(
+        vaultText`redis database must be a non-negative integer index`,
+      );
     }
 
     const { createClient } = await import("redis");

@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseAction, InjectionPolicy } from "@harpoc/shared";
+import { vaultText } from "@harpoc/shared";
 import { DatabaseInjector } from "./database-injector.js";
 import type { DbEngineAdapter } from "./db-adapters.js";
 import { forceFsIsolationUnavailableForTests } from "./fs-isolation.js";
@@ -59,8 +60,8 @@ describe("request-mediated contexts spawn no child under the isolation flags (M-
     vi.mocked(requireIsolation).mockClear();
     vi.mocked(spawnCaptured).mockClear();
     vi.mocked(spawn).mockClear();
-    forceNetworkIsolationUnavailableForTests("forced: no network tier");
-    forceFsIsolationUnavailableForTests("forced: no filesystem tier");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced: no network tier`);
+    forceFsIsolationUnavailableForTests(vaultText`forced: no filesystem tier`);
   });
 
   afterEach(() => {

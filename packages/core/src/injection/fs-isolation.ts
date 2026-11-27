@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { VaultError } from "@harpoc/shared";
+import type { VaultText } from "@harpoc/shared";
+import { VaultError, token, vaultText } from "@harpoc/shared";
 import {
   BWRAP_COMBINED_PREFIX_ARGS,
   BWRAP_FS_PREFIX_ARGS,
   LINUX_BWRAP_CANDIDATES,
 } from "./bwrap.js";
+import { PLATFORM_WORDS } from "./error-words.js";
 
 /**
  * Filesystem isolation for process-mediated spawns (thesis §4.5.3 layer 4).
@@ -142,7 +144,7 @@ function requireProbePayload(probeBinary: (path: string) => boolean): string {
   const trueBin = findPinnedBinary(POSIX_TRUE_CANDIDATES, probeBinary);
   if (!trueBin) {
     throw VaultError.fsIsolationUnavailable(
-      "no /usr/bin/true or /bin/true available for the capability probe",
+      vaultText`no /usr/bin/true or /bin/true available for the capability probe`,
     );
   }
   return trueBin;
@@ -156,20 +158,20 @@ function requireProbePayload(probeBinary: (path: string) => boolean): string {
 async function resolveBwrap(
   probeBinary: (path: string) => boolean,
   runProbe: (command: string, args: string[]) => Promise<boolean>,
-  primaryReason: string,
+  primaryReason: VaultText,
   prefixArgs: readonly string[],
-  probeFailure: string,
+  probeFailure: VaultText,
 ): Promise<ResolvedIsolation> {
   const bwrap = findPinnedBinary(LINUX_BWRAP_CANDIDATES, probeBinary);
   if (!bwrap) {
     throw VaultError.fsIsolationUnavailable(
-      `${primaryReason}; bwrap not found in /usr/bin or /bin`,
+      vaultText`${primaryReason}; bwrap not found in /usr/bin or /bin`,
     );
   }
   const trueBin = requireProbePayload(probeBinary);
   if (!(await runProbe(bwrap, [...prefixArgs, trueBin]))) {
     throw VaultError.fsIsolationUnavailable(
-      `${primaryReason}; ${probeFailure} (bubblewrap needs the unprivileged user-namespace grant)`,
+      vaultText`${primaryReason}; ${probeFailure} (bubblewrap needs the unprivileged user-namespace grant)`,
     );
   }
   return { wrapper: bwrap, prefixArgs: [...prefixArgs], mechanism: "bwrap" };
@@ -205,31 +207,32 @@ async function resolveFsIsolation(seams?: FsIsolationSeams): Promise<ResolvedIso
 
   if (platform === "linux") {
     const setpriv = findPinnedBinary(LINUX_SETPRIV_CANDIDATES, probeBinary);
-    let primaryReason = "setpriv not found in /usr/bin or /bin";
+    let primaryReason: VaultText = vaultText`setpriv not found in /usr/bin or /bin`;
     if (setpriv) {
       const trueBin = requireProbePayload(probeBinary);
       if (await runProbe(setpriv, [...LANDLOCK_PREFIX_ARGS, trueBin])) {
         return { wrapper: setpriv, prefixArgs: [...LANDLOCK_PREFIX_ARGS], mechanism: "landlock" };
       }
-      primaryReason =
-        "Landlock unavailable (setpriv --landlock-access probe failed; needs util-linux >= 2.40 on a Landlock-enabled kernel)";
+      primaryReason = vaultText`Landlock unavailable (setpriv --landlock-access probe failed; needs util-linux >= 2.40 on a Landlock-enabled kernel)`;
     }
     return resolveBwrap(
       probeBinary,
       runProbe,
       primaryReason,
       BWRAP_FS_PREFIX_ARGS,
-      "bwrap --ro-bind probe failed",
+      vaultText`bwrap --ro-bind probe failed`,
     );
   }
 
   if (platform === "darwin") {
     if (!probeBinary(DARWIN_SANDBOX_EXEC)) {
-      throw VaultError.fsIsolationUnavailable(`sandbox-exec not found at ${DARWIN_SANDBOX_EXEC}`);
+      throw VaultError.fsIsolationUnavailable(
+        vaultText`sandbox-exec not found at /usr/bin/sandbox-exec`,
+      );
     }
     const trueBin = requireProbePayload(probeBinary);
     if (!(await runProbe(DARWIN_SANDBOX_EXEC, ["-p", SANDBOX_EXEC_DENY_WRITE_PROFILE, trueBin]))) {
-      throw VaultError.fsIsolationUnavailable("sandbox-exec deny-write probe failed");
+      throw VaultError.fsIsolationUnavailable(vaultText`sandbox-exec deny-write probe failed`);
     }
     return {
       wrapper: DARWIN_SANDBOX_EXEC,
@@ -238,7 +241,9 @@ async function resolveFsIsolation(seams?: FsIsolationSeams): Promise<ResolvedIso
     };
   }
 
-  throw VaultError.fsIsolationUnavailable(`unsupported platform: ${platform}`);
+  throw VaultError.fsIsolationUnavailable(
+    vaultText`unsupported platform: ${token(platform, PLATFORM_WORDS)}`,
+  );
 }
 
 async function resolveCombinedIsolation(seams?: FsIsolationSeams): Promise<ResolvedIsolation> {
@@ -250,16 +255,20 @@ async function resolveCombinedIsolation(seams?: FsIsolationSeams): Promise<Resol
     return resolveBwrap(
       probeBinary,
       runProbe,
-      "combined network+filesystem isolation on linux takes one bwrap wrapper when unshare and Landlock are not both available",
+      vaultText`combined network+filesystem isolation on linux takes one bwrap wrapper when unshare and Landlock are not both available`,
       BWRAP_COMBINED_PREFIX_ARGS,
-      "bwrap --ro-bind --unshare-net probe failed",
+      vaultText`bwrap --ro-bind --unshare-net probe failed`,
     );
   }
   if (platform !== "darwin") {
-    throw VaultError.fsIsolationUnavailable(`unsupported platform: ${platform}`);
+    throw VaultError.fsIsolationUnavailable(
+      vaultText`unsupported platform: ${token(platform, PLATFORM_WORDS)}`,
+    );
   }
   if (!probeBinary(DARWIN_SANDBOX_EXEC)) {
-    throw VaultError.fsIsolationUnavailable(`sandbox-exec not found at ${DARWIN_SANDBOX_EXEC}`);
+    throw VaultError.fsIsolationUnavailable(
+      vaultText`sandbox-exec not found at /usr/bin/sandbox-exec`,
+    );
   }
   const trueBin = requireProbePayload(probeBinary);
   if (
@@ -269,7 +278,9 @@ async function resolveCombinedIsolation(seams?: FsIsolationSeams): Promise<Resol
       trueBin,
     ]))
   ) {
-    throw VaultError.fsIsolationUnavailable("sandbox-exec deny-network+deny-write probe failed");
+    throw VaultError.fsIsolationUnavailable(
+      vaultText`sandbox-exec deny-network+deny-write probe failed`,
+    );
   }
   return {
     wrapper: DARWIN_SANDBOX_EXEC,
@@ -295,7 +306,7 @@ async function resolveCombinedIsolation(seams?: FsIsolationSeams): Promise<Resol
  */
 let cachedFsResolution: Promise<ResolvedIsolation> | null = null;
 let cachedCombinedResolution: Promise<ResolvedIsolation> | null = null;
-let forcedUnavailableForTests: string | null = null;
+let forcedUnavailableForTests: VaultText | null = null;
 
 /** Single-slot only-success cache with self-clearing rejection (see above). */
 function resolveCached(
@@ -380,6 +391,6 @@ export function resetFsIsolationProbeForTests(): void {
  * fail-closed path on hosts where the probe would succeed. Only unavailability
  * can be forced (tightening); there is no way to force "available".
  */
-export function forceFsIsolationUnavailableForTests(reason: string | null): void {
+export function forceFsIsolationUnavailableForTests(reason: VaultText | null): void {
   forcedUnavailableForTests = reason;
 }

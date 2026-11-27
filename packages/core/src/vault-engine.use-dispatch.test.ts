@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuditEventType, ErrorCode, MAX_PROCESS_OUTPUT_BYTES, VaultState } from "@harpoc/shared";
+import {
+  AuditEventType,
+  ErrorCode,
+  MAX_PROCESS_OUTPUT_BYTES,
+  VaultState,
+  vaultText,
+} from "@harpoc/shared";
 import { expectAbsent, expectVaultError } from "@harpoc/test-utils";
 import { VaultEngine } from "./vault-engine.js";
 import { forceNetworkIsolationUnavailableForTests } from "./injection/network-isolation.js";
@@ -91,7 +97,7 @@ describe("useSecret (process injection)", () => {
   });
 
   it("refuses fail-closed when policy demands isolation the platform cannot deliver", async () => {
-    forceNetworkIsolationUnavailableForTests("forced for test");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced for test`);
     try {
       await engine.setInjectionPolicy(
         "secret://proc",
@@ -117,7 +123,7 @@ describe("useSecret (process injection)", () => {
   });
 
   it("control: the same use without the isolation flag executes", async () => {
-    forceNetworkIsolationUnavailableForTests("forced for test");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced for test`);
     try {
       await engine.setInjectionPolicy(
         "secret://proc",

@@ -779,3 +779,34 @@ describe("no third-party crypto library beside argon2 (M-T2a-10)", () => {
     expect(declarationsOf("argon2")).toEqual(["packages/core/package.json dependencies"]);
   });
 });
+
+const OUTSIDE_PART_SITES = [
+  "packages/core/src/injection/output-sanitizer.ts",
+  "packages/shared/src/error-text.ts",
+];
+
+describe("an error text's outside part", () => {
+  it("outsidePart is called by core's sanitizer alone", () => {
+    const sources = WORKSPACE.flatMap((pkg) => {
+      const srcDir = resolve(monorepoRoot, "packages", pkg, "src");
+      if (!existsSync(srcDir)) return [];
+      return readdirSync(srcDir, { recursive: true, encoding: "utf8" })
+        .map((path) => `packages/${pkg}/src/${path.split(sep).join("/")}`)
+        .filter(
+          (path) =>
+            /\.tsx?$/.test(path) &&
+            !/\.test\.tsx?$/.test(path) &&
+            !path.split("/").includes("__fixtures__"),
+        );
+    });
+    const callers = sources
+      .filter((path) =>
+        /(?<![\w$.])outsidePart(?![\w$])/.test(
+          stripSource(readFileSync(resolve(monorepoRoot, path), "utf8")).code,
+        ),
+      )
+      .sort();
+    expect(callers).toContain("packages/core/src/injection/output-sanitizer.ts");
+    expect(callers.filter((path) => !OUTSIDE_PART_SITES.includes(path))).toEqual([]);
+  });
+});

@@ -1,6 +1,6 @@
 // packages/core/src/injection/escape-tolerant.test.ts
 import { describe, it, expect } from "vitest";
-import { redactEscapeTolerant } from "./escape-tolerant.js";
+import { findEscapeTolerant } from "./escape-tolerant.js";
 import { expectAbsent } from "@harpoc/test-utils";
 
 const R = "[REDACTED]";
@@ -8,6 +8,34 @@ const LITERAL_TOKEN = "tok-en";
 const REPEATED_TOKEN = "ab";
 const ESCAPE_LETTER_TOKEN = "u";
 const ESCAPE_UNIT_TOKEN = "u0062";
+
+/** The needle's literal occurrences and `findEscapeTolerant`'s matches, merged, each written as `replacement`. */
+function redactEscapeTolerant(text: string, needle: string, replacement: string): string {
+  const found: number[] = [];
+  if (needle.length > 0) {
+    for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + 1)) {
+      found.push(i, i + needle.length);
+    }
+  }
+  findEscapeTolerant(text, needle, found);
+  const spans: [number, number][] = [];
+  for (let i = 0; i < found.length; i += 2)
+    spans.push([found[i] as number, found[i + 1] as number]);
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const [start, end] of spans) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && start < last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    out += text.slice(cursor, start) + replacement;
+    cursor = end;
+  }
+  return out + text.slice(cursor);
+}
 
 describe("redactEscapeTolerant", () => {
   it("redacts a literal occurrence", () => {

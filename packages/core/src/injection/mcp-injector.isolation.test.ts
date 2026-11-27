@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InjectionPolicy, McpAction, McpServerConfig } from "@harpoc/shared";
-import { ErrorCode, VaultError } from "@harpoc/shared";
+import { ErrorCode, VaultError, vaultText } from "@harpoc/shared";
 import type { AuditLogger } from "../audit/audit-logger.js";
 import {
   NODE,
@@ -71,8 +71,8 @@ afterEach(async () => {
 describe("McpInjector — isolation: refused on a host that cannot deliver (§4.5.3 layer 4)", () => {
   beforeEach(() => {
     composerMock.mockClear();
-    forceNetworkIsolationUnavailableForTests("forced: no network tier");
-    forceFsIsolationUnavailableForTests("forced: no filesystem tier");
+    forceNetworkIsolationUnavailableForTests(vaultText`forced: no network tier`);
+    forceFsIsolationUnavailableForTests(vaultText`forced: no filesystem tier`);
   });
   afterEach(async () => {
     forceNetworkIsolationUnavailableForTests(null);
