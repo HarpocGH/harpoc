@@ -3447,36 +3447,45 @@ describe("the MCP context's sites", () => {
     );
   });
 
-  it("the job wrapper's failure at the connect: its line outside text", async () => {
-    underJobTier();
-    const handle = await mcpSecret(
-      WORD_SPAWN,
-      stdioServer(
-        "srv",
-        wrapperFailingServer(`harpoc-job: CreateProcess ${WORD_SPAWN} error`, false),
-      ),
-    );
+  it.runIf(process.platform === "win32")(
+    "the job wrapper's failure at the connect: its line outside text",
+    async () => {
+      underJobTier();
+      const handle = await mcpSecret(
+        WORD_SPAWN,
+        stdioServer(
+          "srv",
+          wrapperFailingServer(`harpoc-job: CreateProcess ${WORD_SPAWN} error`, false),
+        ),
+      );
 
-    const text = await refusedText(handle, mcpUse("srv"), ErrorCode.MCP_CONNECT_FAILED);
+      const text = await refusedText(handle, mcpUse("srv"), ErrorCode.MCP_CONNECT_FAILED);
 
-    expect(text).toBe(
-      "Failed to connect to MCP server 'srv': spawn failed: harpoc-job: CreateProcess [REDACTED] error",
-    );
-  });
+      expect(text).toBe(
+        "Failed to connect to MCP server 'srv': spawn failed: harpoc-job: CreateProcess [REDACTED] error",
+      );
+    },
+  );
 
-  it("the job wrapper's failure under a call: its line outside text", async () => {
-    underJobTier();
-    const handle = await mcpSecret(
-      WORD_SPAWN,
-      stdioServer("srv", wrapperFailingServer(`harpoc-job: assign ${WORD_SPAWN} failed: 5`, true)),
-    );
+  it.runIf(process.platform === "win32")(
+    "the job wrapper's failure under a call: its line outside text",
+    async () => {
+      underJobTier();
+      const handle = await mcpSecret(
+        WORD_SPAWN,
+        stdioServer(
+          "srv",
+          wrapperFailingServer(`harpoc-job: assign ${WORD_SPAWN} failed: 5`, true),
+        ),
+      );
 
-    const text = await refusedText(handle, mcpUse("srv"), ErrorCode.MCP_CONNECT_FAILED);
+      const text = await refusedText(handle, mcpUse("srv"), ErrorCode.MCP_CONNECT_FAILED);
 
-    expect(text).toBe(
-      "Failed to connect to MCP server 'srv': spawn failed: harpoc-job: assign [REDACTED] failed: 5",
-    );
-  });
+      expect(text).toBe(
+        "Failed to connect to MCP server 'srv': spawn failed: harpoc-job: assign [REDACTED] failed: 5",
+      );
+    },
+  );
 
   it("a crash under a call: the server outside text, the exit a number", async () => {
     const handle = await mcpSecret(WORD_EXITED, stdioServer(WORD_EXITED));
