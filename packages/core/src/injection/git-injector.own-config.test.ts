@@ -116,8 +116,8 @@ type Floor = Parameters<GitInjector["executeWithSecret"]>[6];
 type SpawnCall = Parameters<typeof spawnCaptured>;
 
 const BEFORE_THE_LISTING: Record<LocalOperation, string[]> = {
-  pull: ["rev-parse", "rev-parse", "for-each-ref", "fetch"],
-  fetch: ["rev-parse", "config", "for-each-ref", "fetch"],
+  pull: ["rev-parse", "config", "rev-parse", "for-each-ref", "fetch"],
+  fetch: ["rev-parse", "config", "config", "for-each-ref", "fetch"],
 };
 
 const OK_STEP: SpawnCapturedResult = {
@@ -161,6 +161,10 @@ function isListing(args: string[]): boolean {
     args.includes("--name-only") &&
     !args.includes("--fixed-value")
   );
+}
+
+function isRefStorageRead(args: string[]): boolean {
+  return args.includes("extensions.refStorage");
 }
 
 /** A path as git prints it, with forward slashes. */
@@ -346,9 +350,10 @@ describe.skipIf(GIT === null)(
       );
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote lookup and the listing; every other step succeeds. */
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote lookup and the listing; every other step succeeds. */
     function script(listing: Partial<SpawnCapturedResult> = {}, probe = probeAnswer()): void {
       spawnMock.mockImplementation((_cmd, args) => {
+        if (isRefStorageRead(args)) return Promise.resolve({ ...OK_STEP, exit_code: 1 });
         if (isListing(args)) {
           return Promise.resolve({ ...OK_STEP, stdout: NO_HIT_LISTING, ...listing });
         }
@@ -362,7 +367,7 @@ describe.skipIf(GIT === null)(
     }
 
     function expectServed(operation: LocalOperation): void {
-      expect(steps()).toEqual([...BEFORE_THE_LISTING[operation], "config", operation]);
+      expect(steps()).toEqual([...BEFORE_THE_LISTING[operation], "config", "config", operation]);
       const [, last] = calls().at(-1) as SpawnCall;
       expect(isNetwork(last)).toBe(false);
     }
@@ -385,7 +390,7 @@ describe.skipIf(GIT === null)(
         const result = await use(operation, "outside a daemon");
         expect(result.exit_code).toBe(0);
         expectServed(operation);
-        const [, args, opts] = calls()[4] as SpawnCall;
+        const [, args, opts] = calls()[5] as SpawnCall;
         expect(args).toEqual([
           ...FORCED,
           "config",
@@ -421,7 +426,7 @@ describe.skipIf(GIT === null)(
     );
 
     it.each(LOCAL_OPERATIONS)(
-      "with an empty allowlist no step but the listing holds LC_ALL: %s, its probes, its network step and its local step",
+      "with an empty allowlist no step but the listing and the reads of the ref storage hold LC_ALL: %s, its probes, its network step and its local step",
       async (operation) => {
         script();
         const result = await use(operation, "outside a daemon");
@@ -430,15 +435,21 @@ describe.skipIf(GIT === null)(
         expect(
           calls()
             .filter(([, , opts]) => "LC_ALL" in (opts.env as object))
-            .map(([, args]) => (isListing(args) ? "the listing" : gitSubcommand(args))),
-        ).toEqual(["the listing"]);
+            .map(([, args]) =>
+              isListing(args)
+                ? "the listing"
+                : isRefStorageRead(args)
+                  ? "a read of the ref storage"
+                  : gitSubcommand(args),
+            ),
+        ).toEqual(["a read of the ref storage", "the listing", "a read of the ref storage"]);
       },
     );
 
     const UTF8_LOCALE = { LC_ALL: "C.UTF-8", LANG: "C.UTF-8", LC_CTYPE: "C.UTF-8" };
 
     it.each(LOCAL_OPERATIONS)(
-      "the listing alone runs in the C locale: %s with LC_ALL, LANG and LC_CTYPE allowlisted and C.UTF-8 in the process",
+      "the listing and the reads of the ref storage alone run in the C locale: %s with LC_ALL, LANG and LC_CTYPE allowlisted and C.UTF-8 in the process",
       async (operation) => {
         script();
         const result = await withProcessEnv(UTF8_LOCALE, () =>
@@ -447,12 +458,14 @@ describe.skipIf(GIT === null)(
         expect(result.exit_code).toBe(0);
         expectServed(operation);
         const inTheTree = calls().filter(([, args]) => !isNetwork(args));
+        const reads = inTheTree.filter(([, args]) => isRefStorageRead(args));
         const [listing, ...others] = [
           ...inTheTree.filter(([, args]) => isListing(args)),
-          ...inTheTree.filter(([, args]) => !isListing(args)),
+          ...inTheTree.filter(([, args]) => !isListing(args) && !isRefStorageRead(args)),
         ] as [SpawnCall, ...SpawnCall[]];
         const [, , probeOpts] = calls()[0] as SpawnCall;
         expect(listing[2].env).toEqual({ ...probeOpts.env, LC_ALL: "C" });
+        expect(reads.map(([, , opts]) => opts.env)).toEqual([listing[2].env, listing[2].env]);
         expect(others).toHaveLength(4);
         for (const [, , opts] of others) {
           const env = opts.env as Record<string, string>;
@@ -487,7 +500,7 @@ describe.skipIf(GIT === null)(
         script({ stdout: "hook.x.command\0core.sshcommand\0" });
         const result = await use("push", model);
         expect(result.exit_code).toBe(0);
-        expect(steps()).toEqual(["rev-parse", "symbolic-ref", "for-each-ref", "push"]);
+        expect(steps()).toEqual(["rev-parse", "config", "symbolic-ref", "for-each-ref", "push"]);
         expect(calls().filter(([, args]) => isListing(args))).toEqual([]);
       },
     );
@@ -635,8 +648,8 @@ describe.skipIf(GIT === null)(
           transport: "ssh",
           host: SSH_HOST,
         });
-        const [, , networkOpts] = calls()[3] as SpawnCall;
-        const [, , listingOpts] = calls()[4] as SpawnCall;
+        const [, , networkOpts] = calls()[4] as SpawnCall;
+        const [, , listingOpts] = calls()[5] as SpawnCall;
         expect("SSH_AUTH_SOCK" in (networkOpts.env as object)).toBe(true);
         expect("SSH_AUTH_SOCK" in (listingOpts.env as object)).toBe(false);
       },

@@ -78,9 +78,9 @@ const WIN32_FLOORED = ["pull", "push", "fetch"] as const;
 const PLANS: Record<GitOperation, readonly string[]> = {
   clone: ["network", "network", "local"],
   "ls-remote": ["network"],
-  pull: ["local", "local", "local", "network", "local", "local"],
-  push: ["local", "local", "local", "network"],
-  fetch: ["local", "local", "local", "network", "local", "local"],
+  pull: ["local", "local", "local", "local", "network", "local", "local", "local"],
+  push: ["local", "local", "local", "local", "network"],
+  fetch: ["local", "local", "local", "local", "network", "local", "local", "local"],
 };
 
 const RESOLVED_HOST = "https://git.example/org/repo.git";
@@ -230,6 +230,9 @@ beforeEach(() => {
   vi.mocked(validateUrl).mockClear();
   spawnMock.mockReset();
   spawnMock.mockImplementation((_cmd, args) => {
+    if (args.includes("extensions.refStorage")) {
+      return Promise.resolve({ ...OK_RESULT, exit_code: 1 });
+    }
     const sub = gitSubcommand(args);
     const stdout = args.includes("--show-toplevel")
       ? `${scratch}\n`

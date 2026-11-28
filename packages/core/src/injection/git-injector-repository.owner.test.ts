@@ -13,7 +13,7 @@ import {
 import type { Stats } from "node:fs";
 import { lstat, stat } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode } from "@harpoc/shared";
 import { expectVaultError } from "@harpoc/test-utils";
@@ -36,6 +36,20 @@ const WIN32 = process.platform === "win32";
 const OWNER = "working_directory's repository belongs to another account";
 const CHANGEABLE = "working_directory's repository can be changed by another account";
 const HEAD_REF = "ref: refs/heads/main\n";
+const NON_UTF8_NAMES = !WIN32 && takesNonUtf8Name();
+
+/** Whether the temporary directory's file system, where every fixture of this suite lies, takes a name that is no UTF-8. */
+function takesNonUtf8Name(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), "harpoc-git-owner-probe-"));
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(join(dir, "e")), Buffer.from([0xff])]), "");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
 
 type Call = "lstat" | "stat";
 
@@ -501,6 +515,292 @@ describe.skipIf(WIN32)(
         );
         expect(err.message).toBe(CHANGEABLE);
         await expect(assertRepositoryOwned(held, false)).resolves.toBeUndefined();
+      });
+
+      describe("and those above a linked path's target as the link spells it, which is no link", () => {
+        /** `path` made a directory of the account's own, `0o755`. */
+        function held(path: string): string {
+          mkdirSync(path);
+          chmodSync(path, 0o755);
+          return path;
+        }
+
+        interface LinkedPath {
+          /** The path that becomes the link. */
+          link: string;
+          /** The last name of what the link leads to. */
+          name: string;
+          /** Makes what the link leads to at `target`. */
+          place: (target: string) => void;
+          /** The repository to judge, once the link is there. */
+          served: () => ServedRepository;
+        }
+
+        /** A top whose `.git` becomes the link; the git directory is `gitDir`, else where the link leads. */
+        function linkedEntry(
+          name: string,
+          place: (target: string) => void,
+          gitDir?: string,
+        ): LinkedPath {
+          const linkedTop = held(join(root, "linked"));
+          const link = join(linkedTop, ".git");
+          return {
+            link,
+            name,
+            place,
+            served: () => ({
+              top: linkedTop,
+              entry: link,
+              gitDir: gitDir ?? realpathSync(link),
+              commonDir: null,
+            }),
+          };
+        }
+
+        async function expectRefusedInADaemonAlone(judged: ServedRepository): Promise<void> {
+          const err = await expectVaultError(
+            () => assertRepositoryOwned(judged, true),
+            ErrorCode.INVALID_GIT_CONFIG,
+          );
+          expect(err.message).toBe(CHANGEABLE);
+          await expect(assertRepositoryOwned(judged, false)).resolves.toBeUndefined();
+        }
+
+        const GIT_DIRECTORY_LINK = "the .git entry, a link to a git directory";
+        const UNDER_0777 = "a target under a 0777 directory";
+
+        const LINKED: ReadonlyArray<readonly [string, () => LinkedPath]> = [
+          [GIT_DIRECTORY_LINK, () => linkedEntry("linked.git", gitDirectory)],
+          [
+            "the .git entry, a link to a gitfile",
+            () => {
+              const gitDir = gitDirectory(join(root, "sep.git"));
+              return linkedEntry(
+                "gitfile",
+                (target) => {
+                  writeFileSync(written(target), `gitdir: ${gitDir}\n`);
+                },
+                gitDir,
+              );
+            },
+          ],
+          [
+            "the git directory's config",
+            () => {
+              const link = join(repo.gitDir, "config");
+              unlinkSync(link);
+              return { link, name: "config", place: written, served: () => repo };
+            },
+          ],
+          [
+            "config.worktree",
+            () => ({
+              link: join(repo.gitDir, "config.worktree"),
+              name: "config.worktree",
+              place: written,
+              served: () => repo,
+            }),
+          ],
+          [
+            "the commondir file",
+            () => {
+              const commonDir = gitDirectory(join(root, "common"));
+              return {
+                link: join(repo.gitDir, "commondir"),
+                name: "commondir",
+                place: (target) => {
+                  writeFileSync(written(target), `${commonDir}\n`);
+                },
+                served: () => ({ ...repo, commonDir }),
+              };
+            },
+          ],
+          [
+            "the common directory's config",
+            () => {
+              const served = linked();
+              const link = join(served.commonDir as string, "config");
+              unlinkSync(link);
+              return { link, name: "config", place: written, served: () => served };
+            },
+          ],
+        ];
+
+        /** Makes the target through `place` and answers the spelling the link gets. */
+        type Spelling = (link: string, name: string, place: (target: string) => void) => string;
+
+        const REFUSED: ReadonlyArray<readonly [string, Spelling]> = [
+          [
+            UNDER_0777,
+            (_link, name, place) => {
+              const target = join(openParent(0o777), name);
+              place(target);
+              return target;
+            },
+          ],
+          [
+            "a link to a link whose final target is held",
+            (_link, name, place) => {
+              const store = held(join(root, "store"));
+              place(join(store, name));
+              const hop = join(store, "hop");
+              symlinkSync(join(store, name), hop);
+              return hop;
+            },
+          ],
+          [
+            "a target spelled through a linked directory, <held>/alias/<name>",
+            (_link, name, place) => {
+              const real = held(join(root, "real"));
+              place(join(real, name));
+              const store = held(join(root, "store"));
+              symlinkSync(real, join(store, "alias"));
+              return join(store, "alias", name);
+            },
+          ],
+          [
+            "a target spelled through a linked directory and a doubled separator, <held>/alias//<name>",
+            (_link, name, place) => {
+              const real = held(join(root, "real"));
+              place(join(real, name));
+              const store = held(join(root, "store"));
+              symlinkSync(real, join(store, "alias"));
+              return [store, "alias", "", name].join(sep);
+            },
+          ],
+          [
+            "a target spelled <held>/alias/../real/<name>, <held>/real/<name> there too",
+            (_link, name, place) => {
+              const store = held(join(root, "store"));
+              place(join(held(join(store, "real")), name));
+              const elsewhere = held(join(store, "elsewhere"));
+              place(join(held(join(elsewhere, "real")), name));
+              symlinkSync(held(join(elsewhere, "inner")), join(store, "alias"));
+              return [store, "alias", "..", "real", name].join(sep);
+            },
+          ],
+        ];
+
+        const SERVED: ReadonlyArray<readonly [string, Spelling]> = [
+          [
+            "a relative target, ../store/<name>",
+            (link, name, place) => {
+              place(join(held(join(dirname(link), "..", "store")), name));
+              return ["..", "store", name].join(sep);
+            },
+          ],
+          [
+            "an absolute target",
+            (_link, name, place) => {
+              const target = join(held(join(root, "store")), name);
+              place(target);
+              return target;
+            },
+          ],
+        ];
+
+        function linkedBy(make: () => LinkedPath, spelling: Spelling): ServedRepository {
+          const { link, name, place, served } = make();
+          symlinkSync(spelling(link, name, place), link);
+          return served();
+        }
+
+        it.each(
+          REFUSED.flatMap(([kind, spelling]) =>
+            LINKED.map(
+              ([path, make]) =>
+                [
+                  kind,
+                  path,
+                  kind === UNDER_0777 && path === GIT_DIRECTORY_LINK
+                    ? " (no pin of the target's walk: the target is the git directory, whose 0777 parent the walk above its config refuses already)"
+                    : "",
+                  spelling,
+                  make,
+                ] as const,
+            ),
+          ),
+        )(
+          "%s refuses in a daemon, outside one it is served: %s%s",
+          async (_kind, _path, _note, spelling, make) => {
+            await expectRefusedInADaemonAlone(linkedBy(make, spelling));
+          },
+        );
+
+        it.each([sep, `${sep}${sep}`])(
+          "the .git entry linked to <held>/hop%s, hop a link to a held git directory, refuses in a daemon, outside one it is served",
+          async (trailing) => {
+            const entry = linkedEntry("real.git", gitDirectory);
+            const store = held(join(root, "store"));
+            const hop = join(store, "hop");
+            symlinkSync(gitDirectory(join(store, "real.git")), hop);
+            symlinkSync(`${hop}${trailing}`, entry.link);
+            await expectRefusedInADaemonAlone(entry.served());
+          },
+        );
+
+        it("the .git entry linked to <held>/hop/, hop a link to <0777>/hop2 and hop2 one to a held git directory, refuses in a daemon, outside one it is served", async () => {
+          const entry = linkedEntry("real.git", gitDirectory);
+          const store = held(join(root, "store"));
+          const hop2 = join(openParent(0o777), "hop2");
+          symlinkSync(gitDirectory(join(store, "real.git")), hop2);
+          const hop = join(store, "hop");
+          symlinkSync(hop2, hop);
+          symlinkSync(`${hop}${sep}`, entry.link);
+          await expectRefusedInADaemonAlone(entry.served());
+        });
+
+        it.each([sep, `${sep}${sep}`])(
+          "the .git entry linked to <held>/real.git%s, no further link, is served in a daemon and outside one",
+          async (trailing) => {
+            const entry = linkedEntry("real.git", gitDirectory);
+            const real = gitDirectory(join(held(join(root, "store")), "real.git"));
+            symlinkSync(`${real}${trailing}`, entry.link);
+            const judged = entry.served();
+            await expect(assertRepositoryOwned(judged, true)).resolves.toBeUndefined();
+            await expect(assertRepositoryOwned(judged, false)).resolves.toBeUndefined();
+          },
+        );
+
+        it("a target lstat cannot read refuses in a daemon, outside one it is served", async () => {
+          const config = join(repo.gitDir, "config");
+          unlinkSync(config);
+          const target = written(join(held(join(root, "store")), "config"));
+          symlinkSync(target, config);
+          refuseLstat(target, "EACCES");
+          await expectRefusedInADaemonAlone(repo);
+        });
+
+        it.skipIf(!NON_UTF8_NAMES)(
+          "a target spelled in bytes that are no UTF-8 refuses in a daemon, outside one it is served, though its U+FFFD spelling is held too (skipped where the temporary directory's file system refuses a name that is no UTF-8)",
+          async () => {
+            const config = join(repo.gitDir, "config");
+            unlinkSync(config);
+            const store = held(join(root, "store"));
+            written(join(held(join(store, "\uFFFD")), "config"));
+            const raw = Buffer.concat([Buffer.from(`${store}${sep}`), Buffer.from([0xff])]);
+            mkdirSync(raw);
+            chmodSync(raw, 0o755);
+            const target = Buffer.concat([raw, Buffer.from(`${sep}config`)]);
+            writeFileSync(target, "");
+            chmodSync(target, 0o644);
+            symlinkSync(target, config);
+            await expectRefusedInADaemonAlone(repo);
+          },
+        );
+
+        it.each(
+          SERVED.flatMap(([kind, spelling]) =>
+            LINKED.map(([path, make]) => [kind, path, spelling, make] as const),
+          ),
+        )(
+          "%s under held directories is served in a daemon and outside one: %s",
+          async (_kind, _path, spelling, make) => {
+            const linkedRepo = linkedBy(make, spelling);
+            await expect(assertRepositoryOwned(linkedRepo, true)).resolves.toBeUndefined();
+            await expect(assertRepositoryOwned(linkedRepo, false)).resolves.toBeUndefined();
+          },
+        );
       });
     });
   },

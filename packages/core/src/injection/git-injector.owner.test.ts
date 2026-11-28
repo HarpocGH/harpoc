@@ -222,10 +222,13 @@ describe.skipIf(WIN32 || GIT === null)(
       );
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
     function script(): void {
       const gitDir = join(tree(), ".git");
       spawnMock.mockImplementation((_cmd, args) => {
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_STEP, exit_code: 1 });
+        }
         const sub = gitSubcommand(args);
         let stdout = "";
         if (args.includes("--git-path")) {

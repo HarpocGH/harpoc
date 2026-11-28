@@ -330,7 +330,7 @@ describe.skipIf(GIT === null)(
       return dir;
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
     function script(
       answers: { probe?: string; topLevel?: string } = {},
       failing?: { step: (args: string[]) => boolean; result: SpawnCapturedResult },
@@ -339,6 +339,9 @@ describe.skipIf(GIT === null)(
       const topLevel = answers.topLevel ?? answer(tree());
       spawnMock.mockImplementation((_cmd, args) => {
         if (failing?.step(args) === true) return Promise.resolve(failing.result);
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_STEP, exit_code: 1 });
+        }
         const sub = gitSubcommand(args);
         let stdout = "";
         if (args.includes("--git-path")) stdout = probe;
@@ -376,7 +379,7 @@ describe.skipIf(GIT === null)(
     ];
 
     it.each(TOP_LEVEL_PROBES)(
-      "the probe's argv: %s asks for its git directory and its common directory, and a pull alone for its top level next",
+      "the probe's argv: %s asks for its git directory and its common directory, and a pull alone for its top level after the read of the ref storage",
       async (operation, topLevelProbes) => {
         script();
         const result = await use(operation);
@@ -388,7 +391,7 @@ describe.skipIf(GIT === null)(
         expect(asked.map(([, a, o]) => [a, o.cwd])).toEqual(
           topLevelProbes.map((probe) => [[...FORCED, ...probe], tree()]),
         );
-        expect(asked.map((call) => calls().indexOf(call))).toEqual(topLevelProbes.map(() => 1));
+        expect(asked.map((call) => calls().indexOf(call))).toEqual(topLevelProbes.map(() => 2));
       },
     );
 
@@ -447,7 +450,7 @@ describe.skipIf(GIT === null)(
         [operation, "git directory", 1] as const,
         [operation, "common directory", 1] as const,
       ]),
-      ["pull", "top level", 2],
+      ["pull", "top level", 3],
     ];
     const UNDER_THE_FLOOR_SPELLINGS: ReadonlyArray<readonly [string, () => string]> = [
       ["inside the vault's directory", underTheVault],
@@ -496,7 +499,7 @@ describe.skipIf(GIT === null)(
         expect(result.exit_code).toBe(0);
         const inTheTree = calls().filter(([, args]) => !isNetwork(args));
         expect(inTheTree.map(([, , opts]) => opts.cwd)).toEqual(
-          Array<string>(operation === "push" ? 3 : 5).fill(tree()),
+          Array<string>(operation === "push" ? 4 : 7).fill(tree()),
         );
         const [, last] = calls().at(-1) as SpawnCall;
         expect(last.filter((a) => a.startsWith("--work-tree="))).toEqual(
@@ -528,7 +531,7 @@ describe.skipIf(GIT === null)(
         [operation, "git directory", 1] as const,
         [operation, "common directory", 1] as const,
       ]),
-      ["pull", "top level", 2],
+      ["pull", "top level", 3],
     ];
     const ANOTHER_READING_CASES = ANOTHER_READING.flatMap(([operation, which, answeredBy]) =>
       (["with a floor", "without a floor"] as const).map(
@@ -610,7 +613,7 @@ describe.skipIf(GIT === null)(
         (operation) =>
           [operation, "first probe", (args: string[]) => args.includes("--git-path"), 1] as const,
       ),
-      ["pull", "top-level probe", (args: string[]) => args.includes("--show-toplevel"), 2],
+      ["pull", "top-level probe", (args: string[]) => args.includes("--show-toplevel"), 3],
     ];
     const FAILED_PROBE_CASES = FAILED_PROBES.flatMap(([operation, which, step, answeredBy]) =>
       FAILED_STEPS.map(
@@ -688,7 +691,7 @@ describe.skipIf(GIT === null)(
             },
           ],
         ]);
-        expect(calls()).toHaveLength(3);
+        expect(calls()).toHaveLength(4);
         expect(networkSteps()).toEqual([]);
       },
     );
@@ -807,7 +810,7 @@ describe.skipIf(GIT === null)(
         const result = await use("pull", floorAt(vaultDir), named);
         expect(result.exit_code).toBe(0);
         const inTheTree = calls().filter(([, args]) => !isNetwork(args));
-        expect(inTheTree.map(([, , opts]) => opts.cwd)).toEqual(Array<string>(5).fill(named));
+        expect(inTheTree.map(([, , opts]) => opts.cwd)).toEqual(Array<string>(7).fill(named));
         const [, last] = calls().at(-1) as SpawnCall;
         expect(last.filter((a) => a.startsWith("--work-tree="))).toEqual([`--work-tree=${named}`]);
       },
@@ -1021,7 +1024,7 @@ describe.skipIf(GIT === null)(
         );
         expect(err.message).toBe(HOLDS_PROTECTED);
         expect(log.mock.calls).toEqual([[failedRow("pull")]]);
-        expect(calls()).toHaveLength(2);
+        expect(calls()).toHaveLength(3);
 
         for (const operation of ["push", "fetch"] as const) {
           spawnMock.mockClear();
@@ -1087,7 +1090,7 @@ describe.skipIf(GIT === null)(
         ErrorCode.GIT_OPERATION_FAILED,
       );
       expect(err.message).toBe(UNRESOLVED);
-      expect(calls()).toHaveLength(2);
+      expect(calls()).toHaveLength(3);
     });
 
     async function expectReadAsAnother(name: string, floored: boolean): Promise<void> {
@@ -1099,7 +1102,7 @@ describe.skipIf(GIT === null)(
         ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       );
       expect(err.message).toBe(PROTECTED);
-      expect(calls()).toHaveLength(2);
+      expect(calls()).toHaveLength(3);
     }
 
     it.each([

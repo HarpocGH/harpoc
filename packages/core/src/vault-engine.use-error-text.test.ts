@@ -475,6 +475,8 @@ const MSYS_TEXT_TAIL =
 const UNRESOLVED_TEXT = "Git operation failed: could not resolve the working tree's repository";
 const OWN_CONFIGURATION_TEXT =
   "working_directory's repository configures a program or an address rewrite of its own";
+const FOREIGN_REF_STORAGE_TEXT =
+  "working_directory's repository names a ref storage the vault does not serve";
 
 const VALUE_COMMAND = "cmdvalue";
 const VALUE_TOOL = "valuetool";
@@ -517,6 +519,7 @@ const WORD_PREPARED = "prepared";
 const WORD_OUTSIDE = "outside";
 const WORD_LISTED = "listed";
 const WORD_PROGRAM = "program";
+const WORD_STORAGE = "storage";
 const WORD_REWRITE = "rewrite";
 const WORD_PARSE = "parse";
 const WORD_LITERAL = "literal";
@@ -694,7 +697,15 @@ describe("the process context's sites", () => {
 });
 
 type GitStep =
-  "probe" | "toplevel" | "symbolic" | "remotes" | "refs" | "network" | "listing" | "local";
+  | "probe"
+  | "refStorage"
+  | "toplevel"
+  | "symbolic"
+  | "remotes"
+  | "refs"
+  | "network"
+  | "listing"
+  | "local";
 type GitAnswer =
   Partial<SpawnCapturedResult> | ((cwd: string | undefined) => Partial<SpawnCapturedResult>);
 interface WorkTree {
@@ -705,6 +716,7 @@ interface WorkTree {
 function gitStepOf(args: readonly string[]): GitStep {
   if (args.some((arg) => arg.startsWith("--git-dir="))) return "network";
   if (args.includes("--absolute-git-dir")) return "probe";
+  if (args.includes("extensions.refStorage")) return "refStorage";
   if (args.includes("--show-toplevel")) return "toplevel";
   if (args.includes("symbolic-ref")) return "symbolic";
   if (args.includes("--fixed-value")) return "remotes";
@@ -741,6 +753,7 @@ function probeAnswer(
 function answerGitSteps(tree: WorkTree, over: Partial<Record<GitStep, GitAnswer>> = {}): void {
   const answers: Record<GitStep, GitAnswer> = {
     probe: { stdout: `${probeAnswer(tree)}\n` },
+    refStorage: { exit_code: 1 },
     toplevel: { stdout: `${tree.top}\n` },
     symbolic: { stdout: "refs/heads/main\n" },
     remotes: { stdout: "remote.origin.url\0" },
@@ -1314,6 +1327,14 @@ describe("the git context's sites", () => {
       () => ({ listing: { exit_code: 0, stdout: "hook.x.command\0" } }),
       ErrorCode.INVALID_GIT_CONFIG,
       OWN_CONFIGURATION_TEXT,
+    ],
+    [
+      "the repository names a ref storage with a path",
+      WORD_STORAGE,
+      { operation: "push" },
+      () => ({ refStorage: { stdout: "files:///x\0" } }),
+      ErrorCode.INVALID_GIT_CONFIG,
+      FOREIGN_REF_STORAGE_TEXT,
     ],
   ];
 

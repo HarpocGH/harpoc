@@ -458,6 +458,9 @@ describeGitSsh(
       scratch = repository(mkdtempSync(join(tmpdir(), "harpoc-git-ssh-host-")));
       spawnMock.mockReset();
       spawnMock.mockImplementation((_cmd, args) => {
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_RESULT, exit_code: 1 });
+        }
         const sub = gitSubcommand(args);
         const stdout = args.includes("--show-toplevel")
           ? `${scratch}\n`

@@ -57,7 +57,9 @@ import {
   localStepConfig,
   NO_ALTERNATE_REFS,
   ownConfigListingArgs,
+  refStorageArgs,
   removeRepositoryVariables,
+  servesRefStorage,
   writeLocalStepVariables,
 } from "./git-injector-local-steps.js";
 import {
@@ -1261,19 +1263,18 @@ function assertSafeArgs(operation: GitAction["operation"], args: string[] | unde
 }
 
 /**
- * A clone without working_directory gives git one positional, the repository,
- * and git takes a second one as the destination: `clone <arg> -- <repository>`
- * clones `<arg>` into a directory named after the validated URL (S5, reproduced
- * on git 2.54 — `--` alone does not close it). With working_directory a third
- * positional is git's own usage error. A push's or a pull's positional would
- * be git's repository, with the vault's `-- <repository>` demoted to a
- * refspec: a push aborts on that refspec before connecting, but only
- * incidentally, and an scp-form repository is a valid refspec, so the
- * credential-free local pull connected to the positional's host. A fetch's
- * positional would be the local step's repository, and an ls-remote's the
- * repository its credential-bearing step lists (git stops at it, so the
- * vault's `-- <repository>` becomes a pattern). All five therefore take
- * option-shaped arguments only; a value goes in the `--option=value` form.
+ * A clone gives git two positionals, the repository and the destination —
+ * without working_directory the one the vault derives (directoryOutsideFloor)
+ * —, and a caller's third is git's own usage error. A clone without
+ * working_directory refuses one all the same, before any git process. A push's
+ * or a pull's positional would be git's repository, with the vault's
+ * `-- <repository>` demoted to a refspec: a push aborts on that refspec before
+ * connecting, but only incidentally, and an scp-form repository is a valid
+ * refspec, so the credential-free local pull connected to the positional's
+ * host. A fetch's positional would be the local step's repository, and an
+ * ls-remote's the repository its credential-bearing step lists (git stops at
+ * it, so the vault's `-- <repository>` becomes a pattern). All five therefore
+ * take option-shaped arguments only; a value goes in the `--option=value` form.
  */
 function assertNoPositional(action: GitAction): void {
   const subject =
@@ -1449,43 +1450,45 @@ function spelledDirectory(action: GitAction): string | null {
 }
 
 /**
- * The directory an operation names, as it is judged and git is handed it: the
- * caller's spelling resolved as the system resolves it, links followed, a part
- * that does not exist yet joined on. The floor's refusal where it lies inside
- * the floor, where it cannot be resolved so, where git would read the resolved
- * spelling as another directory, where it holds a `.git` name, and for a clone
- * where its destination lies inside a directory with a git directory's shape;
- * undefined where git is handed none. A pull, a push and a fetch are judged by
- * what git reports there as well (runRelayed).
+ * The directory an operation hands git, as it is judged (judgedDirectory): a
+ * `working_directory`, and for a clone without one the directory git would
+ * derive from the repository (`derivedCloneDirectory`), spelled below the
+ * process's directory as resolved. The process's directory is judged first:
+ * the floor's refusal where it cannot be resolved, on win32 where its spelling
+ * holds a name Windows reads differently, and where it holds a `.git` name,
+ * lies inside the floor or lies inside a directory with a git directory's
+ * shape. Undefined for an ls-remote, which is handed none. A pull, a push and
+ * a fetch are judged by what git reports there as well (runRelayed).
  */
 async function directoryOutsideFloor(
   action: GitAction,
   local: FloorPaths | undefined,
 ): Promise<string | undefined> {
   if (action.operation === "ls-remote") return undefined;
-  const spelled = spelledDirectory(action);
-  const resolved =
-    spelled === null || holdsNameWin32ReadsDifferently(spelled, process.platform)
-      ? null
-      : await resolveSpelledDirectory(spelled);
-  if (local === undefined && !action.working_directory) {
-    if (
-      resolved !== null &&
-      (holdsDotGitName(resolved) || (await cloneLiesInGitDirectory(action, resolved)))
-    ) {
-      throw VaultError.localPathProtected();
-    }
-    return undefined;
-  }
-  if (
-    resolved === null ||
-    holdsDotGitName(resolved) ||
-    (local !== undefined && (await isProtectedPath(resolved, local.vaultFiles, local.daemon)))
-  ) {
+  const clone = action.operation === "clone";
+  if (action.working_directory) return judgedDirectory(spelledDirectory(action), clone, local);
+  const processDirectory = await spelledOutsideFloor(spelledDirectory(action), local);
+  if (await liesInGitDirectory(processDirectory)) throw VaultError.localPathProtected();
+  const name = derivedCloneDirectory(action.repository, process.platform) as string;
+  const separator = processDirectory.endsWith(sep) ? "" : sep;
+  return judgedDirectory(`${processDirectory}${separator}${name}`, clone, local);
+}
+
+/**
+ * A directory git is handed, resolved outside the floor (spelledOutsideFloor);
+ * the floor's refusal also for a clone whose destination's parent lies inside
+ * a directory with a git directory's shape, and where the resolved path holds a
+ * name win32 reads differently, U+FFFD or an unpaired surrogate.
+ */
+async function judgedDirectory(
+  spelled: string | null,
+  clone: boolean,
+  local: FloorPaths | undefined,
+): Promise<string> {
+  const resolved = await spelledOutsideFloor(spelled, local);
+  if (clone && (await liesInGitDirectory(dirname(resolved)))) {
     throw VaultError.localPathProtected();
   }
-  if (await cloneLiesInGitDirectory(action, resolved)) throw VaultError.localPathProtected();
-  if (!action.working_directory) return undefined;
   if (
     holdsNameWin32ReadsDifferently(resolved, process.platform) ||
     holdsNameNotWrittenAsStored(resolved)
@@ -1496,16 +1499,28 @@ async function directoryOutsideFloor(
 }
 
 /**
- * Whether a clone would make its directory inside one with a git directory's
- * shape: walked from the parent of the destination it names, and without
- * `working_directory` from the process's directory, where git makes the
- * derived one.
+ * A spelled directory resolved as the system resolves it, links followed, a
+ * part that does not exist yet joined on; the floor's refusal where it cannot
+ * be resolved so, on win32 where its spelling holds a name Windows reads
+ * differently, where the resolved path holds a `.git` name, and where it lies
+ * inside the floor.
  */
-async function cloneLiesInGitDirectory(action: GitAction, resolved: string): Promise<boolean> {
-  return (
-    action.operation === "clone" &&
-    (await liesInGitDirectory(action.working_directory ? dirname(resolved) : resolved))
-  );
+async function spelledOutsideFloor(
+  spelled: string | null,
+  local: FloorPaths | undefined,
+): Promise<string> {
+  const resolved =
+    spelled === null || holdsNameWin32ReadsDifferently(spelled, process.platform)
+      ? null
+      : await resolveSpelledDirectory(spelled);
+  if (
+    resolved === null ||
+    holdsDotGitName(resolved) ||
+    (local !== undefined && (await isProtectedPath(resolved, local.vaultFiles, local.daemon)))
+  ) {
+    throw VaultError.localPathProtected();
+  }
+  return resolved;
 }
 
 interface StepOptions {
@@ -1596,7 +1611,7 @@ async function runPlan(
       return runRelayedClone(
         action,
         opts.networkRepository,
-        opts.directory,
+        opts.directory as string,
         hooksDir,
         networkConfig,
         networkEnv,
@@ -1696,18 +1711,20 @@ function parseRemoteHead(stdout: string): {
  * remote gets a sha256 relay — a fetch across formats fails), and `fetch`
  * takes every branch and tag (the remote's
  * detached HEAD as well). The caller's clone is then made from the relay by a
- * credential-free `git clone <args> -- <repository> [dest]` with the relay
- * standing in for the repository (`url.<file://relay>.insteadOf`), so git
- * names the destination after the repository, records it as `origin`, and
- * applies every caller option as it would. The options that shape the
- * transfer reach the fetch too (cloneFetchArgs); the others act on the local
- * clone alone. An empty remote advertises no HEAD; the relay's is then
- * `refs/heads/master`, git's own default.
+ * credential-free `git clone <args> -- <repository> <destination>` with the
+ * relay standing in for the repository (`url.<file://relay>.insteadOf`), so git
+ * records the repository as `origin` and applies every caller option as it
+ * would; the destination is the judged one, without `working_directory` the
+ * directory git would name after the repository (directoryOutsideFloor),
+ * resolved. The options that shape the transfer reach the fetch too
+ * (cloneFetchArgs); the others act on the local clone alone. An empty remote
+ * advertises no HEAD; the relay's is then `refs/heads/master`, git's own
+ * default.
  */
 async function runRelayedClone(
   action: GitAction,
   networkRepository: string,
-  directory: string | undefined,
+  directory: string,
   hooksDir: string,
   networkConfig: string[],
   networkEnv: Record<string, string>,
@@ -1771,7 +1788,7 @@ async function runRelayedClone(
         ...args,
         "--",
         action.repository,
-        ...(directory !== undefined ? [directory] : []),
+        directory,
       ],
       undefined,
       localEnv,
@@ -1863,10 +1880,10 @@ function remoteOf(listing: string, repository: TextPart): string {
  * network step (`fetch` of the remote's HEAD or of the fetch's refspecs, or
  * the `push`) runs with `--git-dir` of the relay repository the vault wrote
  * (createRelayRepo). A step that fails ends the operation with its result,
- * the first probe, a pull's top level and the listing of the repository's own
- * configuration before the local step with the vault's refusal. The probes
- * among them are read unredacted — the vault parses their output and returns
- * it only on a failure, redacted then (RG-6).
+ * the first probe, the reads of the ref storage, a pull's top level and the
+ * listing of the repository's own configuration before the local step with
+ * the vault's refusal. The probes among them are read unredacted — the vault
+ * parses their output and returns it only on a failure, redacted then (RG-6).
  */
 async function runRelayed(
   action: GitAction,
@@ -1885,6 +1902,8 @@ async function runRelayed(
   const forced = forcedGitConfig(hooksDir);
   const local = (args: string[]) => step([...forced, ...args], repo.top, localEnv);
   const localProbe = (args: string[]) => probeStep([...forced, ...args], repo.top, localEnv);
+  const listingEnv = withCLocale(localEnv);
+  const listingProbe = (args: string[]) => probeStep([...forced, ...args], repo.top, listingEnv);
 
   const probe = await localProbe([
     "rev-parse",
@@ -1917,6 +1936,7 @@ async function runRelayed(
   if (answeredGitDir !== repo.gitDir || answeredCommonDir !== (repo.commonDir ?? repo.gitDir)) {
     throw VaultError.gitOperationFailed(UNRESOLVED_REPOSITORY);
   }
+  await refuseForeignRefStorage(listingProbe);
 
   let workTree: string | null = null;
   if (action.operation === "pull") {
@@ -1991,15 +2011,11 @@ async function runRelayed(
       ...(refspecs ? refspecs.network : [`+HEAD:${RELAY_FETCHED_REF}`]),
     ]);
     if (!succeeded(fetched)) return fetched;
-    const listingEnv = withCLocale(localEnv);
-    await refuseOwnConfiguration(
-      (args) => probeStep([...forced, ...args], repo.top, listingEnv),
-      action.repository,
-      floor?.daemon !== undefined,
-    );
+    await refuseOwnConfiguration(listingProbe, action.repository, floor?.daemon !== undefined);
     if (floor?.daemon !== undefined && (await holdsLegacyRemoteFile(repo, action.repository))) {
       throw VaultError.invalidGitConfig(OWN_CONFIGURATION);
     }
+    await refuseForeignRefStorage(listingProbe);
     const merged = await local([
       ...localStepConfig(NULL_GIT_CONFIG),
       "-c",
@@ -2026,6 +2042,7 @@ async function runRelayed(
 const UNRESOLVED_REPOSITORY = vaultText`could not resolve the working tree's repository`;
 const OWN_CONFIGURATION = vaultText`working_directory's repository configures a program or an address rewrite of its own`;
 const UNLISTED_CONFIGURATION = vaultText`the repository's configuration could not be listed`;
+const FOREIGN_REF_STORAGE = vaultText`working_directory's repository names a ref storage the vault does not serve`;
 
 /**
  * A copy of `env` with `LC_ALL=C` written last, no other spelling of the name
@@ -2042,12 +2059,22 @@ function withCLocale(env: Record<string, string>): Record<string, string> {
   return copy;
 }
 
+/** A read of the repository's configuration that answered: exit 0, or exit 1 with nothing printed, in time and uncut. */
+function configurationAnswered(r: SpawnCapturedResult): boolean {
+  return (
+    !r.timed_out &&
+    !r.spawn_failed &&
+    !r.truncated &&
+    (r.exit_code === 0 || (r.exit_code === 1 && r.stdout === ""))
+  );
+}
+
 /**
- * A7: the repository's own configuration, listed as the last act before the
- * local step. A hook defined in `config` and a remote group named like the
- * repository refuse in both models, the pattern's other hits in a daemon; a
- * listing that fails or is cut refuses and returns nothing of its output,
- * which can hold an address.
+ * A7: the repository's own configuration, listed after the network fetch,
+ * before the local step. A hook defined in `config` and a remote group named
+ * like the repository refuse in both models, the pattern's other hits in a
+ * daemon; a listing that fails or is cut refuses and returns nothing of its
+ * output, which can hold an address.
  */
 async function refuseOwnConfiguration(
   localProbe: (args: string[]) => Promise<SpawnCapturedResult>,
@@ -2055,16 +2082,26 @@ async function refuseOwnConfiguration(
   daemon: boolean,
 ): Promise<void> {
   const r = await localProbe(ownConfigListingArgs());
-  const answered =
-    !r.timed_out &&
-    !r.spawn_failed &&
-    !r.truncated &&
-    (r.exit_code === 0 || (r.exit_code === 1 && r.stdout === ""));
-  if (!answered) throw VaultError.gitOperationFailed(UNLISTED_CONFIGURATION);
+  if (!configurationAnswered(r)) throw VaultError.gitOperationFailed(UNLISTED_CONFIGURATION);
   const { hookCommand, remoteGroup, programOrRewrite } = judgeOwnConfig(r.stdout, repository);
   if (hookCommand || remoteGroup || (daemon && programOrRewrite)) {
     throw VaultError.invalidGitConfig(OWN_CONFIGURATION);
   }
+}
+
+/**
+ * The repository's `extensions.refStorage`, read right after the first probe
+ * and again as the last act before a pull's and a fetch's local step: absent,
+ * `files` and `reftable` are served; any other value, a format with a path
+ * among them, refuses in both models. A read that fails or is cut refuses and
+ * returns nothing of its output, which can hold a path.
+ */
+async function refuseForeignRefStorage(
+  localProbe: (args: string[]) => Promise<SpawnCapturedResult>,
+): Promise<void> {
+  const r = await localProbe(refStorageArgs());
+  if (!configurationAnswered(r)) throw VaultError.gitOperationFailed(UNLISTED_CONFIGURATION);
+  if (!servesRefStorage(r.stdout)) throw VaultError.invalidGitConfig(FOREIGN_REF_STORAGE);
 }
 
 /**

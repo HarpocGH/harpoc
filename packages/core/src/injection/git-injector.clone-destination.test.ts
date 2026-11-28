@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import type { InjectionPolicy } from "@harpoc/shared";
@@ -196,12 +196,17 @@ it("ssh-live tier: required legs fail instead of skipping when git is unresolvab
 describe.skipIf(GIT === null)(
   "a clone's destination inside a directory with a git directory's shape, scripted (skipped where no supported git resolves)",
   () => {
-    function use(operation: Operation, workingDirectory: string | undefined, floor: Floor) {
+    function use(
+      operation: Operation,
+      workingDirectory: string | undefined,
+      floor: Floor,
+      repository: string = HTTPS_REPOSITORY,
+    ) {
       return new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
         {
           type: "git",
           operation,
-          repository: HTTPS_REPOSITORY,
+          repository,
           ...(workingDirectory !== undefined ? { working_directory: workingDirectory } : {}),
         },
         SCRIPTED_SECRET,
@@ -213,18 +218,24 @@ describe.skipIf(GIT === null)(
       );
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
-    function script(tree: string = join(root, "tree")): void {
-      const gitDir = join(tree, ".git");
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
+    function script(
+      tree: string = join(root, "tree"),
+      gitDir: string = join(tree, ".git"),
+      commonDir: string = gitDir,
+    ): void {
       const probe = answer(
-        join(gitDir, "objects"),
-        join(gitDir, "shallow"),
+        join(commonDir, "objects"),
+        join(commonDir, "shallow"),
         "sha1",
         gitDir,
-        gitDir,
+        commonDir,
         "false",
       );
       spawnMock.mockImplementation((_cmd, args) => {
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_STEP, exit_code: 1 });
+        }
         const sub = gitSubcommand(args);
         let stdout = "";
         if (args.includes("--git-path")) stdout = probe;
@@ -235,11 +246,15 @@ describe.skipIf(GIT === null)(
       });
     }
 
-    async function expectRefused(workingDirectory: string | undefined, floor: Floor) {
+    async function expectRefused(
+      workingDirectory: string | undefined,
+      floor: Floor,
+      repository: string = HTTPS_REPOSITORY,
+    ) {
       script();
       const before = entries(root);
       const err = await expectVaultError(
-        () => use("clone", workingDirectory, floor),
+        () => use("clone", workingDirectory, floor, repository),
         ErrorCode.LOCAL_PATH_NOT_ALLOWED,
       );
       expect(err.message).toBe(PROTECTED);
@@ -249,8 +264,8 @@ describe.skipIf(GIT === null)(
       expect(entries(root)).toEqual(before);
     }
 
-    /** The clone ran: its two network steps, then the local step, handed `destination` where one is named. */
-    function expectCloned(destination: string | undefined): void {
+    /** The clone ran: its two network steps, then the local step, handed `destination`. */
+    function expectCloned(destination: string, repository: string = HTTPS_REPOSITORY): void {
       expect(calls().map(([, args]) => gitSubcommand(args))).toEqual([
         "ls-remote",
         "fetch",
@@ -258,11 +273,32 @@ describe.skipIf(GIT === null)(
       ]);
       const [, local] = calls()[2] as SpawnCall;
       expect(isNetwork(local)).toBe(false);
-      expect(local.slice(local.indexOf("--"))).toEqual([
-        "--",
-        HTTPS_REPOSITORY,
-        ...(destination !== undefined ? [destination] : []),
-      ]);
+      expect(local.slice(local.indexOf("--"))).toEqual(["--", repository, destination]);
+    }
+
+    /** Runs `fn` while `process.cwd()` answers `dir`. */
+    async function inProcessDirectory(dir: string, fn: () => Promise<void>): Promise<void> {
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(dir);
+      try {
+        await fn();
+      } finally {
+        cwd.mockRestore();
+      }
+    }
+
+    /** `<root>/cwd`, the process's directory of a clone without working_directory. */
+    function processDirectory(): string {
+      const dir = join(root, "cwd");
+      mkdirSync(dir);
+      return dir;
+    }
+
+    /** A link at `at` whose target is gone: a junction on win32, which needs no privilege. */
+    function danglingLink(at: string): void {
+      const gone = join(root, "gone");
+      mkdirSync(gone);
+      symlinkSync(gone, at, WIN32 ? "junction" : "dir");
+      rmSync(gone, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
 
     const DESTINATIONS: ReadonlyArray<readonly [string, (served: string) => string]> = [
@@ -360,7 +396,7 @@ describe.skipIf(GIT === null)(
     );
 
     it.each(FLOORS)(
-      "a clone without working_directory is served where the process's directory is a subdirectory of an ordinary work tree, %s",
+      "a clone without working_directory is served where the process's directory is a subdirectory of an ordinary work tree, and git is handed the directory it would derive there, resolved: <root>/tree/sub/repo, %s",
       async (_how, floor) => {
         const sub = join(workTree(join(root, "tree")), "sub");
         mkdirSync(sub);
@@ -369,12 +405,145 @@ describe.skipIf(GIT === null)(
         try {
           const result = await use("clone", undefined, floor());
           expect(result.exit_code).toBe(0);
-          expectCloned(undefined);
+          expectCloned(join(sub, "repo"));
         } finally {
           cwd.mockRestore();
         }
       },
     );
+
+    it.each(FLOORS)(
+      "a clone without working_directory is refused where the name git derives is a link that leads nowhere: <root>/cwd/repo, %s",
+      async (_how, floor) => {
+        const cwd = processDirectory();
+        danglingLink(join(cwd, "repo"));
+        await inProcessDirectory(cwd, () => expectRefused(undefined, floor()));
+      },
+    );
+
+    // Only the Win32 path layer drops a name's trailing dot.
+    it.runIf(WIN32).each(FLOORS)(
+      "a clone without working_directory is refused where the name git derives from https://8.8.8.8/org/repo. is one Windows reads differently, %s",
+      async (_how, floor) => {
+        const cwd = processDirectory();
+        await inProcessDirectory(cwd, () =>
+          expectRefused(undefined, floor(), "https://8.8.8.8/org/repo."),
+        );
+      },
+    );
+
+    it.each(FLOORS)(
+      "a clone without working_directory is refused where the process's directory, resolved, holds U+FFFD: <root>/a\\ufffdb, %s",
+      async (_how, floor) => {
+        const cwd = join(root, "a\uFFFDb");
+        mkdirSync(cwd);
+        await inProcessDirectory(cwd, () => expectRefused(undefined, floor()));
+      },
+    );
+
+    it.each(
+      (
+        [
+          ["U+FFFD", "https://8.8.8.8/org/\uFFFD.git"],
+          ["an unpaired surrogate", "https://8.8.8.8/org/\uD800.git"],
+        ] as const
+      ).flatMap(([label, repository]) =>
+        FLOORS.map(([how, floor]) => [label, how, repository, floor] as const),
+      ),
+    )(
+      "a clone without working_directory is refused where the name git derives holds %s, %s",
+      async (_label, _how, repository, floor) => {
+        const cwd = processDirectory();
+        await inProcessDirectory(cwd, () => expectRefused(undefined, floor(), repository));
+      },
+    );
+
+    it.skipIf(WIN32).each(FLOORS)(
+      "a clone without working_directory is refused where the name git derives is longer than a name may be, 256 bytes, %s (skipped on win32, where the system answers that such a name is not there, so it is joined on and git fails to make it)",
+      async (_how, floor) => {
+        const cwd = processDirectory();
+        await inProcessDirectory(cwd, () =>
+          expectRefused(undefined, floor(), `https://8.8.8.8/org/${"x".repeat(256)}.git`),
+        );
+      },
+    );
+
+    it("a clone without working_directory is refused where the name git derives is the vault's own directory: <root>/vault from https://8.8.8.8/org/vault.git, with a floor", async () => {
+      await inProcessDirectory(root, () =>
+        expectRefused(undefined, floorAt(vaultDir), "https://8.8.8.8/org/vault.git"),
+      );
+    });
+
+    it.each(FLOORS)(
+      "a clone without working_directory from the file system's root hands git the root and the derived name with no separator between them beyond the root's own, %s",
+      async (_how, floor) => {
+        const top = parse(root).root;
+        const repository = "https://8.8.8.8/org/harpoc-clone-from-the-root.git";
+        script();
+        await inProcessDirectory(top, async () => {
+          const result = await use("clone", undefined, floor(), repository);
+          expect(result.exit_code).toBe(0);
+        });
+        expectCloned(`${top}harpoc-clone-from-the-root`, repository);
+      },
+    );
+
+    // Only the Win32 file API refuses `|` in a name.
+    it.runIf(WIN32)(
+      "a clone without working_directory whose derived name holds a character NTFS forbids, re|po, is not refused: git, run for real after scripted network steps, fails to make the directory, a result with its exit code and a success row",
+      async () => {
+        const cwd = processDirectory();
+        spawnMock.mockImplementation((cmd, args, opts) =>
+          isNetwork(args) ? Promise.resolve(OK_STEP) : realSpawnCaptured(cmd, args, opts),
+        );
+        const saved = process.cwd();
+        process.chdir(cwd);
+        let result;
+        try {
+          result = await use(
+            "clone",
+            undefined,
+            floorAt(vaultDir),
+            "https://8.8.8.8/org/re|po.git",
+          );
+        } finally {
+          process.chdir(saved);
+        }
+        expect(result.exit_code, result.stderr).toBe(128);
+        expect(result.error).toBeUndefined();
+        expect(log.mock.calls).toEqual([
+          [
+            expect.objectContaining({
+              eventType: "secret.use",
+              success: true,
+              detail: expect.objectContaining({
+                context: "git",
+                operation: "clone",
+                exit_code: 128,
+              }),
+            }),
+          ],
+        ]);
+        expect(readdirSync(cwd)).toEqual([]);
+      },
+    );
+
+    it("a clone without working_directory is refused where the process's directory cannot be read, without a floor", async () => {
+      const cwd = vi.spyOn(process, "cwd").mockImplementation(() => {
+        throw new Error("the process's directory was removed");
+      });
+      try {
+        await expectRefused(undefined, undefined);
+      } finally {
+        cwd.mockRestore();
+      }
+    });
+
+    it("a clone without working_directory is refused where the process's directory does not resolve: <root>/cwd, a link that leads nowhere, without a floor", async () => {
+      const cwd = join(root, "cwd");
+      danglingLink(cwd);
+      await inProcessDirectory(cwd, () => expectRefused(undefined, undefined));
+    });
 
     it.each(
       TREE_OPERATIONS.flatMap((operation) =>
@@ -392,6 +561,34 @@ describe.skipIf(GIT === null)(
             .filter(([, args]) => isNetwork(args))
             .map(([, args]) => gitSubcommand(args)),
         ).toEqual([operation === "push" ? "push" : "fetch"]);
+      },
+    );
+
+    it.each(FLOORS)(
+      "a linked work tree laid inside a bare repository: a clone into <root>/served/wt/sub/new is refused, while a pull, a push and a fetch in <root>/served/wt/sub are served, %s",
+      async (_how, floor) => {
+        const bare = shaped();
+        const gitDir = join(bare, "worktrees", "wt");
+        mkdirSync(gitDir, { recursive: true });
+        writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/wt\n");
+        writeFileSync(join(gitDir, "commondir"), "../..\n");
+        const tree = join(bare, "wt");
+        const sub = join(tree, "sub");
+        mkdirSync(sub, { recursive: true });
+        writeFileSync(join(tree, ".git"), `gitdir: ${gitDir}\n`);
+        await expectRefused(join(sub, "new"), floor());
+        for (const operation of TREE_OPERATIONS) {
+          spawnMock.mockReset();
+          log.mockClear();
+          script(tree, gitDir, bare);
+          const result = await use(operation, sub, floor());
+          expect(result.exit_code).toBe(0);
+          expect(
+            calls()
+              .filter(([, args]) => isNetwork(args))
+              .map(([, args]) => gitSubcommand(args)),
+          ).toEqual([operation === "push" ? "push" : "fetch"]);
+        }
       },
     );
   },
@@ -415,9 +612,14 @@ describe.skipIf(GIT === null)(
 
     const address = () => `http://127.0.0.1:${String(server.port)}/repo.git`;
 
-    function clone(destination: string, floor: Floor) {
+    function clone(destination: string | undefined, floor: Floor) {
       return new GitInjector({ log } as unknown as AuditLogger).executeWithSecret(
-        { type: "git", operation: "clone", repository: address(), working_directory: destination },
+        {
+          type: "git",
+          operation: "clone",
+          repository: address(),
+          ...(destination !== undefined ? { working_directory: destination } : {}),
+        },
         SERVED_SECRET,
         policy([`http://127.0.0.1:${String(server.port)}/*`]),
         undefined,
@@ -425,6 +627,25 @@ describe.skipIf(GIT === null)(
         undefined,
         floor,
       );
+    }
+
+    /** A clone without working_directory, the process's directory moved to `cwd` for it. */
+    async function cloneFrom(cwd: string, floor: Floor) {
+      const saved = process.cwd();
+      process.chdir(cwd);
+      try {
+        return await clone(undefined, floor);
+      } finally {
+        process.chdir(saved);
+      }
+    }
+
+    /** `<root>/cwd` with a link at `repo`, the name git derives from the address, to `target`: a junction on win32. */
+    function linkedName(target: string): string {
+      const cwd = join(root, "cwd");
+      mkdirSync(cwd);
+      symlinkSync(target, join(cwd, "repo"), WIN32 ? "junction" : "dir");
+      return cwd;
     }
 
     beforeAll(async () => {
@@ -506,6 +727,79 @@ describe.skipIf(GIT === null)(
       expect(result.exit_code, result.stderr).toBe(0);
       expect(existsSync(join(destination, "alternates"))).toBe(true);
       expect(existsSync(join(destination, ".git", "HEAD"))).toBe(true);
+    }, 120_000);
+
+    it.each(FLOORS)(
+      "a clone without working_directory where the name git derives is a link to an ordinary empty directory lands in that directory, and git is handed it resolved: %s",
+      async (_how, floor) => {
+        const target = join(root, "target");
+        mkdirSync(target);
+        const cwd = linkedName(target);
+        const result = await cloneFrom(cwd, floor());
+        expect(result.exit_code, result.stderr).toBe(0);
+        const [, local] = calls()[2] as SpawnCall;
+        expect(local.at(-1)).toBe(target);
+        expect(result.stderr).toContain(`Cloning into '${target}'...`);
+        expect(existsSync(join(target, "top.txt"))).toBe(true);
+        expect(existsSync(join(target, ".git", "HEAD"))).toBe(true);
+        expect(readdirSync(cwd)).toEqual(["repo"]);
+      },
+      120_000,
+    );
+
+    it("a clone without working_directory where the name git derives is a link into a directory under the floor is refused, nothing written there, no git process beyond the version read", async () => {
+      const target = join(vaultDir, "inside");
+      mkdirSync(target);
+      const cwd = linkedName(target);
+      const err = await expectVaultError(
+        () => cloneFrom(cwd, floorAt(vaultDir)),
+        ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      );
+      expect(err.message).toBe(PROTECTED);
+      expect(readdirSync(target)).toEqual([]);
+      expect(readVersion).toHaveBeenCalledTimes(1);
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(log.mock.calls).toEqual([[failedRow("clone", "LOCAL_PATH_NOT_ALLOWED")]]);
+    }, 120_000);
+
+    it.each(FLOORS)(
+      "a clone without working_directory where the name git derives is a link into a bare repository's empty objects/info is refused, nothing written there, no git process beyond the version read: %s",
+      async (_how, floor) => {
+        const bare = join(root, "served");
+        git(root, "init", "-q", "--bare", bare);
+        const info = join(bare, "objects", "info");
+        expect(readdirSync(info)).toEqual([]);
+        const cwd = linkedName(info);
+        const err = await expectVaultError(
+          () => cloneFrom(cwd, floor()),
+          ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+        );
+        expect(err.message).toBe(PROTECTED);
+        expect(readdirSync(info)).toEqual([]);
+        expect(readVersion).toHaveBeenCalledTimes(1);
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(log.mock.calls).toEqual([[failedRow("clone", "LOCAL_PATH_NOT_ALLOWED")]]);
+      },
+      120_000,
+    );
+
+    it("a clone without working_directory where the name git derives is an existing non-empty directory is git's failure: a result with its exit code and a success row, the directory untouched", async () => {
+      const cwd = join(root, "cwd");
+      mkdirSync(join(cwd, "repo"), { recursive: true });
+      writeFileSync(join(cwd, "repo", "kept.txt"), "kept\n");
+      const result = await cloneFrom(cwd, floorAt(vaultDir));
+      expect(result.exit_code, result.stderr).toBe(128);
+      expect(result.error).toBeUndefined();
+      expect(log.mock.calls).toEqual([
+        [
+          expect.objectContaining({
+            eventType: "secret.use",
+            success: true,
+            detail: expect.objectContaining({ context: "git", operation: "clone", exit_code: 128 }),
+          }),
+        ],
+      ]);
+      expect(readdirSync(join(cwd, "repo"))).toEqual(["kept.txt"]);
     }, 120_000);
   },
 );

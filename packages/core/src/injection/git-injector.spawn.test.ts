@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, GitAction, InjectionPolicy } from "@harpoc/shared";
 import { ErrorCode, VaultError } from "@harpoc/shared";
@@ -270,11 +270,12 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       const calls = spawnMock.mock.calls as SpawnCall[];
       expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
         "rev-parse",
+        "config",
         "symbolic-ref",
         "for-each-ref",
         "push",
       ]);
-      const [command, args, opts] = calls[3] as SpawnCall;
+      const [command, args, opts] = calls[4] as SpawnCall;
       expect(command).toBe(GIT);
       expect(args).toEqual([
         "-c",
@@ -290,7 +291,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(opts.cwd).toBe((args[10] as string).slice("--git-dir=".length));
       expect(opts.env.GIT_ASKPASS).toBeTruthy();
       expect(opts.env.HARPOC_GIT_ORIGIN).toBe("https://8.8.8.8");
-      for (const [, local, localOpts] of calls.slice(0, 3)) {
+      for (const [, local, localOpts] of calls.slice(0, 4)) {
         expect(local.slice(0, 8)).toEqual(FORCED);
         expect(localOpts.cwd).toBe(realpathSync.native(wd));
         expect(localOpts.env.GIT_ASKPASS).toBe("");
@@ -721,13 +722,15 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       const calls = spawnMock.mock.calls as SpawnCall[];
       expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
         "rev-parse",
+        "config",
         "rev-parse",
         "for-each-ref",
         "fetch",
         "config",
+        "config",
         "pull",
       ]);
-      const [, fetchArgs, fetchOpts] = calls[3] as SpawnCall;
+      const [, fetchArgs, fetchOpts] = calls[4] as SpawnCall;
       expect(fetchArgs).toEqual([
         "-c",
         "http.followRedirects=false",
@@ -744,7 +747,7 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
       expect(fetchOpts.cwd).toBe(relay);
       expect(fetchOpts.env.HARPOC_GIT_PASSWORD).toBe("s3cret-token-value");
 
-      const [, pullArgs, pullOpts] = calls[5] as SpawnCall;
+      const [, pullArgs, pullOpts] = calls[7] as SpawnCall;
       expect(pullArgs).toEqual([
         ...FORCED,
         // X2: the credential-free local hop speaks no transport but file.
@@ -759,7 +762,15 @@ describeGit("GitInjector HTTPS credential handling (git resolvable)", () => {
         "--",
         "https://8.8.8.8/org/repo.git",
       ]);
-      for (const [, , opts] of [calls[0], calls[1], calls[2], calls[4], calls[5]] as SpawnCall[]) {
+      for (const [, , opts] of [
+        calls[0],
+        calls[1],
+        calls[2],
+        calls[3],
+        calls[5],
+        calls[6],
+        calls[7],
+      ] as SpawnCall[]) {
         expect(opts.cwd).toBe(realpathSync.native(wd));
         expect(opts.env.GIT_ASKPASS).toBe("");
         expect(opts.env.HARPOC_GIT_PASSWORD).toBeUndefined();
@@ -1255,14 +1266,14 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
         undefined,
       );
       const calls = spawnMock.mock.calls as SpawnCall[];
-      expect(calls).toHaveLength(6);
+      expect(calls).toHaveLength(8);
       for (const [, args] of calls) {
         const at = args.findIndex((a) => a.startsWith("core.hooksPath="));
         expect(at).toBeGreaterThan(0);
         expect(args[at - 1]).toBe("-c");
         expect(at).toBeLessThan(args.indexOf(gitSubcommand(args) as string));
       }
-      expect((calls[5] as SpawnCall)[2].cwd).toBe(realpathSync.native(wd));
+      expect((calls[7] as SpawnCall)[2].cwd).toBe(realpathSync.native(wd));
     } finally {
       rmSync(wd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -1524,17 +1535,35 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
     {
       operation: "pull",
       tree: true,
-      steps: ["rev-parse", "rev-parse", "for-each-ref", "fetch", "config", "pull"],
+      steps: [
+        "rev-parse",
+        "config",
+        "rev-parse",
+        "for-each-ref",
+        "fetch",
+        "config",
+        "config",
+        "pull",
+      ],
     },
     {
       operation: "push",
       tree: true,
-      steps: ["rev-parse", "symbolic-ref", "for-each-ref", "push"],
+      steps: ["rev-parse", "config", "symbolic-ref", "for-each-ref", "push"],
     },
     {
       operation: "fetch",
       tree: true,
-      steps: ["rev-parse", "config", "for-each-ref", "fetch", "config", "fetch"],
+      steps: [
+        "rev-parse",
+        "config",
+        "config",
+        "for-each-ref",
+        "fetch",
+        "config",
+        "config",
+        "fetch",
+      ],
     },
   ] as const)(
     "$operation: the credential-bearing step is handed the URL the vault judged; every other step keeps the caller's spelling (C-19)",
@@ -1581,7 +1610,9 @@ describeGit("GitInjector HTTPS target control beyond the URL string (H6)", () =>
           expect(args[args.indexOf("--") + 1] === CALLER_SPELLING).toBe(true);
         }
         if (operation === "fetch") {
-          const [, lookup] = calls.find(([, a]) => gitSubcommand(a) === "config") as SpawnCall;
+          const [, lookup] = calls.find(
+            ([, a]) => gitSubcommand(a) === "config" && !a.includes("extensions.refStorage"),
+          ) as SpawnCall;
           expect(lookup.at(-1) === CALLER_SPELLING).toBe(true);
         }
       } finally {
@@ -1662,6 +1693,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       "clone",
       "--",
       "git@github.com:org/repo.git",
+      `${realpathSync.native(process.cwd())}${sep}repo`,
     ]);
     expect(cloneOpts.env.SSH_AUTH_SOCK).toBeUndefined();
     expect(cloneOpts.env.GIT_SSH_COMMAND).toBeUndefined();
@@ -1702,11 +1734,12 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       const calls = spawnMock.mock.calls as SpawnCall[];
       expect(calls.map(([, a]) => gitSubcommand(a))).toEqual([
         "rev-parse",
+        "config",
         "symbolic-ref",
         "for-each-ref",
         "push",
       ]);
-      const [command, args, opts] = calls[3] as SpawnCall;
+      const [command, args, opts] = calls[4] as SpawnCall;
       expect(command).toBe(GIT);
       expect(args).toEqual([
         ...FORCED,
@@ -1722,7 +1755,7 @@ describeGitSsh("GitInjector SSH transport hardening (git + ssh resolvable)", () 
       expect(opts.env.GIT_CONFIG_NOSYSTEM).toBe("1");
       expect(opts.env.GIT_CONFIG_GLOBAL).toBe(NULL_GIT_CONFIG);
       expect(Object.values(opts.env).every((v) => !v.includes(PEM_ARMOR))).toBe(true);
-      for (const [, , localOpts] of calls.slice(0, 3)) {
+      for (const [, , localOpts] of calls.slice(0, 4)) {
         expect(localOpts.cwd).toBe(realpathSync.native(wd));
         expect(localOpts.env.SSH_AUTH_SOCK).toBeUndefined();
         expect(localOpts.env.GIT_SSH_COMMAND).toBeUndefined();

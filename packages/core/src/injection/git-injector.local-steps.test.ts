@@ -322,7 +322,7 @@ describe.skipIf(GIT === null)(
       );
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote lookup and the listing; every other step succeeds. */
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote lookup and the listing; every other step succeeds. */
     function script(): void {
       const probe = answer(
         join(gitDir(), "objects"),
@@ -333,6 +333,9 @@ describe.skipIf(GIT === null)(
         "false",
       );
       spawnMock.mockImplementation((_cmd, args) => {
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_STEP, exit_code: 1 });
+        }
         let stdout = "";
         if (isListing(args)) stdout = "remote.origin.url\0remote.origin.fetch\0";
         else if (args.includes("--git-path")) stdout = probe;
@@ -494,7 +497,11 @@ describe.skipIf(GIT === null)(
       expect(local.length).toBeGreaterThan(0);
       expect(network.length).toBeGreaterThan(0);
       for (const [, args, opts] of local) {
-        expect(opts.env).toEqual(isListing(args) ? { ...localEnv(), LC_ALL: "C" } : localEnv());
+        expect(opts.env).toEqual(
+          isListing(args) || args.includes("extensions.refStorage")
+            ? { ...localEnv(), LC_ALL: "C" }
+            : localEnv(),
+        );
         const env = opts.env as Record<string, string>;
         expect(env.GIT_ASKPASS).toBe("");
         expect(env.GIT_PROXY_COMMAND).toBe("");

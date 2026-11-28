@@ -206,7 +206,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
   const calls = () => spawnMock.mock.calls as SpawnCall[];
   const secret = () => new Uint8Array(Buffer.from(`git-user:${TOKEN}`));
 
-  it("fetch: three credential-free probes in the tree, the one network fetch in the relay, the credential-free local fetch with the vault's refspecs", async () => {
+  it("fetch: four credential-free probes in the tree, the one network fetch in the relay, the credential-free local fetch with the vault's refspecs", async () => {
     const result = await injector.executeWithSecret(
       {
         type: "git",
@@ -224,12 +224,14 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     expect(calls().map(([, a]) => gitSubcommand(a))).toEqual([
       "rev-parse",
       "config",
+      "config",
       "for-each-ref",
       "fetch",
       "config",
+      "config",
       "fetch",
     ]);
-    const [probe, remotes, listing, network, , local] = calls();
+    const [probe, , remotes, listing, network, , , local] = calls();
     for (const step of [probe, remotes, listing, local]) {
       const [, args, opts] = step as SpawnCall;
       expect(opts.cwd).toBe(realpathSync.native(wd));
@@ -317,7 +319,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       policy(),
       undefined,
     );
-    const [, , , network, , local] = calls();
+    const [, , , , network, , , local] = calls();
     const [, netArgs] = network as SpawnCall;
     const relay = (netArgs.find((a) => a.startsWith("--git-dir=")) as string).slice(10);
     expect(netArgs).toEqual([
@@ -380,7 +382,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       policy(),
       undefined,
     );
-    const [, , , network, , local] = calls();
+    const [, , , , network, , , local] = calls();
     expect((network as SpawnCall)[1].slice(-1)).toEqual(["+refs/heads/*:refs/heads/*"]);
     expect((local as SpawnCall)[1].slice(-1)).toEqual(["+refs/heads/*:refs/remotes/origin/*"]);
   });
@@ -408,12 +410,15 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       undefined,
     );
     expect(calls().map(([, , o]) => o.timeoutMs)).toEqual([
-      10_000, 10_000, 10_000, 10_000, 6_000, 6_000,
+      10_000, 10_000, 10_000, 10_000, 10_000, 6_000, 6_000, 6_000,
     ]);
   });
 
   it("fetch: a remote listing past the output cap is GIT_OPERATION_FAILED before any credential-bearing step (RX-B9-15)", async () => {
     spawnMock.mockImplementation((cmd, args, opts) => {
+      if (args.includes("extensions.refStorage")) {
+        return Promise.resolve({ ...OK_RESULT, exit_code: 1 });
+      }
       const sub = gitSubcommand(args);
       if (sub === "config") return Promise.resolve({ ...OK_RESULT, truncated: true });
       if (MOCKED.includes(sub ?? "")) return Promise.resolve(OK_RESULT);
@@ -432,12 +437,15 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     expect(err.message).toBe(
       "Git operation failed: the working tree's remote listing exceeds the output cap",
     );
-    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
+    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config", "config"]);
   });
 
   it("fetch: a failed remote lookup is returned redacted and flagged, before any credential-bearing step (RG-6)", async () => {
     const user = Buffer.from(secret()).toString("utf8").split(":")[0] as string;
     spawnMock.mockImplementation((cmd, args, opts) => {
+      if (args.includes("extensions.refStorage")) {
+        return Promise.resolve({ ...OK_RESULT, exit_code: 1 });
+      }
       const sub = gitSubcommand(args);
       if (sub === "config") {
         return Promise.resolve({
@@ -463,7 +471,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
     expect(result.stderr.includes("[REDACTED]")).toBe(true);
     const row = log.mock.calls.at(-1)?.[0] as { detail: Record<string, unknown> };
     expect(row.detail.sanitized).toBe(true);
-    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
+    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config", "config"]);
   });
 
   it("fetch: a remote whose name holds a `*` is no plain ref name, refused before any credential-bearing step", async () => {
@@ -485,7 +493,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       ErrorCode.INVALID_GIT_CONFIG,
     );
     expect(err.message).toBe(`the working tree's remote for ${REPO} is not a plain ref name`);
-    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config"]);
+    expect(calls().map(([, a]) => gitSubcommand(a))).toEqual(["rev-parse", "config", "config"]);
   });
 
   it.each([
@@ -493,9 +501,11 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "pull",
       [
         ["rev-parse", "none"],
+        ["config", "none"],
         ["rev-parse", "none"],
         ["for-each-ref", "none"],
         ["fetch", "list"],
+        ["config", "none"],
         ["config", "none"],
         ["pull", "list"],
       ],
@@ -504,6 +514,7 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       "push",
       [
         ["rev-parse", "none"],
+        ["config", "none"],
         ["symbolic-ref", "none"],
         ["for-each-ref", "none"],
         ["push", "list"],
@@ -514,8 +525,10 @@ describeGit("fetch and ls-remote step plans (M6)", () => {
       [
         ["rev-parse", "none"],
         ["config", "none"],
+        ["config", "none"],
         ["for-each-ref", "none"],
         ["fetch", "list"],
+        ["config", "none"],
         ["config", "none"],
         ["fetch", "list"],
       ],
@@ -635,7 +648,7 @@ describeGitSsh("the fetch step plan over SSH (RX-B9-17)", () => {
     rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
-  it("step 4 alone carries GIT_SSH_COMMAND and the agent socket; the probes and the local fetch carry neither", async () => {
+  it("step 5 alone carries GIT_SSH_COMMAND and the agent socket; the probes and the local fetch carry neither", async () => {
     const { privateKey: keyPem } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
       privateKeyEncoding: { type: "pkcs1", format: "pem" },
@@ -654,12 +667,14 @@ describeGitSsh("the fetch step plan over SSH (RX-B9-17)", () => {
     expect(calls().map(([, a]) => gitSubcommand(a))).toEqual([
       "rev-parse",
       "config",
+      "config",
       "for-each-ref",
       "fetch",
       "config",
+      "config",
       "fetch",
     ]);
-    const [probe, remotes, listing, network, , local] = calls();
+    const [probe, , remotes, listing, network, , , local] = calls();
     const [, netArgs, netOpts] = network as SpawnCall;
     expect(netArgs.some((a) => a.startsWith("--git-dir="))).toBe(true);
     expect(netOpts.env.GIT_SSH_COMMAND).toContain("IdentitiesOnly=yes");

@@ -12,7 +12,9 @@ import {
   localStepConfig,
   OWN_CONFIG_PATTERN,
   ownConfigListingArgs,
+  refStorageArgs,
   removeRepositoryVariables,
+  servesRefStorage,
   writeLocalStepVariables,
 } from "./git-injector-local-steps.js";
 
@@ -141,6 +143,40 @@ describe("the listing of a repository's own configuration (A7)", () => {
       expect(new RegExp(OWN_CONFIG_PATTERN).test(name)).toBe(false);
     },
   );
+});
+
+describe("the read of the repository's ref storage", () => {
+  it("the read's words are a new array each time", () => {
+    expect(refStorageArgs()).toEqual([
+      "config",
+      "-z",
+      "--get-all",
+      "--end-of-options",
+      "extensions.refStorage",
+    ]);
+    const first = refStorageArgs();
+    first.push("--extra");
+    expect(refStorageArgs()).toHaveLength(5);
+  });
+
+  it.each(["", "files\0", "reftable\0", "files\0reftable\0"])(
+    "no value, or values of files and reftable alone, is served: %j",
+    (stdout) => {
+      expect(servesRefStorage(stdout)).toBe(true);
+    },
+  );
+
+  it.each([
+    "files:///x\0",
+    "reftable://x\0",
+    "files://\0",
+    "Files\0",
+    "files\n\0",
+    "files\0files:///x\0",
+    "\0",
+  ])("any other answer is not served: %j", (stdout) => {
+    expect(servesRefStorage(stdout)).toBe(false);
+  });
 });
 
 describe("the judgement of the listing (A7, G3-4)", () => {

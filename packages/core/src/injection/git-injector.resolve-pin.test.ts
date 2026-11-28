@@ -108,9 +108,9 @@ function policy(repository: string): InjectionPolicy {
 const PLANS = [
   ["clone", ["network", "network", "local"]],
   ["ls-remote", ["network"]],
-  ["pull", ["local", "local", "local", "network", "local", "local"]],
-  ["push", ["local", "local", "local", "network"]],
-  ["fetch", ["local", "local", "local", "network", "local", "local"]],
+  ["pull", ["local", "local", "local", "local", "network", "local", "local", "local"]],
+  ["push", ["local", "local", "local", "local", "network"]],
+  ["fetch", ["local", "local", "local", "local", "network", "local", "local", "local"]],
 ] as const;
 const IP_PLANS = PLANS.filter(([operation]) => operation !== "ls-remote");
 

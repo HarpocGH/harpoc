@@ -1,7 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import { constants } from "node:fs";
 import type { Stats } from "node:fs";
-import { lstat, open, realpath, stat } from "node:fs/promises";
+import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { VaultError, vaultText } from "@harpoc/shared";
@@ -111,22 +111,33 @@ function withoutTrailingLineBreaks(content: Buffer): Buffer {
 }
 
 /**
- * The path a gitfile names, read as git reads it (`read_gitfile_gently` in
- * `setup.c`) or more strictly: the bytes `gitdir: `, then, every trailing line
- * feed and carriage return cut, a valid UTF-8 path without NUL, line feed or
- * carriage return that neither begins nor ends with a space or a tab and, on
- * win32, is not drive-relative; null for anything else.
+ * The path a `commondir` file names, read as git reads it or more strictly:
+ * every trailing line feed and carriage return cut, a valid UTF-8 path
+ * without NUL, line feed or carriage return that neither begins nor ends with
+ * a space or a tab and, on win32, is neither drive-relative nor rooted by one
+ * separator without a drive; null for anything else.
  */
-export function gitfilePath(content: Buffer, platform: NodeJS.Platform): string | null {
-  const prefix = Buffer.from(GITFILE_PREFIX);
-  if (!content.subarray(0, prefix.length).equals(prefix)) return null;
-  const rest = withoutTrailingLineBreaks(content.subarray(prefix.length));
+export function commondirPath(content: Buffer, platform: NodeJS.Platform): string | null {
+  const rest = withoutTrailingLineBreaks(content);
   if (rest.length === 0 || !isUtf8(rest)) return null;
   const path = rest.toString("utf8");
   if (path.includes("\0") || path.includes("\n") || path.includes("\r")) return null;
   if (/^[ \t]|[ \t]$/.test(path)) return null;
-  if (platform === "win32" && /^[A-Za-z]:(?![\\/])/.test(path)) return null;
+  if (platform === "win32" && (/^[A-Za-z]:(?![\\/])/.test(path) || /^[\\/](?![\\/])/.test(path))) {
+    return null;
+  }
   return path;
+}
+
+/**
+ * The path a gitfile names, read as git reads it (`read_gitfile_gently` in
+ * `setup.c`) or more strictly: the bytes `gitdir: `, then a path
+ * `commondirPath` takes; null for anything else.
+ */
+export function gitfilePath(content: Buffer, platform: NodeJS.Platform): string | null {
+  const prefix = Buffer.from(GITFILE_PREFIX);
+  if (!content.subarray(0, prefix.length).equals(prefix)) return null;
+  return commondirPath(content.subarray(prefix.length), platform);
 }
 
 function notServed(): VaultError {
@@ -213,11 +224,13 @@ async function commonDirectory(gitDir: string): Promise<string | null> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  const rest = withoutTrailingLineBreaks(await smallRegularFile(file, await stat(file)));
-  if (rest.length === 0 || !isUtf8(rest)) throw notServed();
-  const path = rest.toString("utf8");
-  if (path.includes("\0")) throw notServed();
-  return realpath(relativeTo(gitDir, path));
+  const path = commondirPath(await smallRegularFile(file, await stat(file)), process.platform);
+  if (path === null) throw notServed();
+  const named = relativeTo(gitDir, path);
+  if (readsAsAnother(named)) throw notServed();
+  const commonDir = await realpath(named);
+  if (readsAsAnother(commonDir)) throw notServed();
+  return commonDir;
 }
 
 async function servedRepository(resolvedDir: string): Promise<ServedRepository> {
@@ -292,10 +305,15 @@ function judgedPaths(repo: ServedRepository): { path: string; optional: boolean 
 
 /**
  * The reading of `path` whose bits are judged, once its owner is `euid`: the
- * `lstat` one, or for a link the `stat` one, the link's own owner judged too.
- * Null for an optional path that is not there.
+ * `lstat` one, or for a link the `stat` one, the link's own owner judged too;
+ * `linked` where `lstat` read a link. Null for an optional path that is not
+ * there.
  */
-async function ownReading(path: string, optional: boolean, euid: number): Promise<Stats | null> {
+async function ownReading(
+  path: string,
+  optional: boolean,
+  euid: number,
+): Promise<{ reading: Stats; linked: boolean } | null> {
   let found: Stats;
   try {
     found = await lstat(path);
@@ -305,7 +323,7 @@ async function ownReading(path: string, optional: boolean, euid: number): Promis
     throw ofAnotherAccount();
   }
   if (found.uid !== euid) throw ofAnotherAccount();
-  if (!found.isSymbolicLink()) return found;
+  if (!found.isSymbolicLink()) return { reading: found, linked: false };
   let target: Stats;
   try {
     target = await stat(path);
@@ -313,7 +331,38 @@ async function ownReading(path: string, optional: boolean, euid: number): Promis
     throw ofAnotherAccount();
   }
   if (target.uid !== euid) throw ofAnotherAccount();
-  return target;
+  return { reading: target, linked: true };
+}
+
+/**
+ * `path` with every run of `/` written as one and no trailing `/` but a lone
+ * root's, by text alone: `lstat` follows a link before a trailing `/`, and so
+ * does the walk where a doubled one leaves a step of its chain ending in `/`.
+ */
+function singleSeparators(path: string): string {
+  const single = path.replace(/\/+/g, "/");
+  return single.length > 1 && single.endsWith("/") ? single.slice(0, -1) : single;
+}
+
+/**
+ * Whether the target `link` spells — valid UTF-8, a relative one joined to the
+ * link's directory by text, its separators as `singleSeparators` writes them,
+ * every `.` and `..` kept — is no link and lies under held directories
+ * (`isHeldPath`); false where it cannot be read. Off win32 alone.
+ */
+async function targetHeld(link: string, ownGroup: number | undefined): Promise<boolean> {
+  try {
+    const bytes = await readlink(link, { encoding: "buffer" });
+    if (!isUtf8(bytes)) return false;
+    const spelled = bytes.toString("utf8");
+    const target = singleSeparators(
+      isAbsolute(spelled) ? spelled : `${dirname(link)}${sep}${spelled}`,
+    );
+    if ((await lstat(target)).isSymbolicLink()) return false;
+    return await isHeldPath(target, ownGroup);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -321,10 +370,12 @@ async function ownReading(path: string, optional: boolean, euid: number): Promis
  * `.git` entry, the git directory, its `config`, `config.worktree` and
  * `commondir`, and the common directory with its `config`, a link read itself
  * and where it leads. In a daemon no other account may write one of them (a
- * group's write bit passes for the account's own primary group alone), and
- * the directories above the entry, the git directory's `config` and the
- * common directory's `config` are held (`isHeldPath`). Every owner is judged
- * before any bit; the refusals name no path.
+ * group's write bit passes for the account's own primary group alone), the
+ * directories above the entry, the git directory's `config` and the common
+ * directory's `config` are held (`isHeldPath`), and each judged path that is
+ * a link spells a target that is no link and lies under held directories
+ * (`targetHeld`). Every owner is judged before any bit; the refusals name no
+ * path.
  */
 export async function assertRepositoryOwned(
   repo: ServedRepository,
@@ -334,9 +385,12 @@ export async function assertRepositoryOwned(
   const euid = process.geteuid?.();
   if (euid === undefined) throw ofAnotherAccount();
   const readings: Stats[] = [];
+  const links: string[] = [];
   for (const { path, optional } of judgedPaths(repo)) {
-    const reading = await ownReading(path, optional, euid);
-    if (reading !== null) readings.push(reading);
+    const owned = await ownReading(path, optional, euid);
+    if (owned === null) continue;
+    readings.push(owned.reading);
+    if (owned.linked) links.push(path);
   }
   if (!daemon) return;
   const ownGroup = ownPrimaryGroup();
@@ -348,5 +402,8 @@ export async function assertRepositoryOwned(
   ];
   for (const path of walked) {
     if (!(await isHeldPath(path, ownGroup))) throw changeable();
+  }
+  for (const link of links) {
+    if (!(await targetHeld(link, ownGroup))) throw changeable();
   }
 }

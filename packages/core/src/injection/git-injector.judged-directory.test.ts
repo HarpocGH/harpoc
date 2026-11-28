@@ -22,10 +22,17 @@ import { startGitSmartHttp } from "./__fixtures__/git-smart-http.js";
 import type { Listener } from "./__fixtures__/git-smart-http.js";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
+import type { readGitVersion } from "./git-injector-version.js";
 import { GitInjector } from "./git-injector.js";
 import { spawnCaptured } from "./spawn-captured.js";
 import { expectVaultError } from "@harpoc/test-utils";
 
+const readVersion = vi.hoisted(() => vi.fn<typeof readGitVersion>());
+
+vi.mock("./git-injector-version.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./git-injector-version.js")>();
+  return { ...actual, readGitVersion: readVersion };
+});
 vi.mock("./spawn-captured.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./spawn-captured.js")>();
   return { ...actual, spawnCaptured: vi.fn() };
@@ -33,6 +40,9 @@ vi.mock("./spawn-captured.js", async (importOriginal) => {
 
 const { spawnCaptured: realSpawnCaptured } =
   await vi.importActual<typeof import("./spawn-captured.js")>("./spawn-captured.js");
+const { readGitVersion: realReadGitVersion } = await vi.importActual<
+  typeof import("./git-injector-version.js")
+>("./git-injector-version.js");
 
 const GIT = resolveSupportedGit();
 const WIN32 = process.platform === "win32";
@@ -41,6 +51,7 @@ const SERVER_USER = "vaultuser";
 const SERVER_TOKEN = "S3CRET-TOKEN-judged-directory";
 const SERVED_SECRET = new Uint8Array(Buffer.from(`${SERVER_USER}:${SERVER_TOKEN}`));
 const UNRESOLVED = "Git operation failed: could not resolve the working tree's repository";
+const NOT_SERVED = "working_directory is not in a repository the vault serves";
 const HEAD_REF = "ref: refs/heads/main\n";
 
 const TREE_OPERATIONS = ["pull", "push", "fetch"] as const;
@@ -66,7 +77,7 @@ function printed(path: string): string {
   return path.replace(/\\/g, "/");
 }
 
-function unresolvedRow(operation: TreeOperation) {
+function failedRow(operation: TreeOperation, error: "GIT_OPERATION_FAILED" | "INVALID_GIT_CONFIG") {
   return {
     eventType: "secret.use",
     secretId: "secret-1",
@@ -74,7 +85,7 @@ function unresolvedRow(operation: TreeOperation) {
       context: "git",
       operation,
       transport: "https",
-      error: "GIT_OPERATION_FAILED",
+      error,
       network_isolation: false,
       fs_isolation: false,
     },
@@ -224,6 +235,8 @@ describe.skipIf(GIT === null)(
       log = vi.fn();
       spawnMock.mockReset();
       spawnMock.mockImplementation(realSpawnCaptured);
+      readVersion.mockReset();
+      readVersion.mockImplementation(realReadGitVersion);
     });
 
     afterEach(() => {
@@ -447,7 +460,7 @@ describe.skipIf(GIT === null)(
           ErrorCode.GIT_OPERATION_FAILED,
         );
         expect(err.message).toBe(UNRESOLVED);
-        expect(log.mock.calls).toEqual([[unresolvedRow(operation)]]);
+        expect(log.mock.calls).toEqual([[failedRow(operation, "GIT_OPERATION_FAILED")]]);
         expect(server.requests.length).toBe(requests);
         expect(readdirSync(markers)).toEqual([]);
       },
@@ -455,7 +468,7 @@ describe.skipIf(GIT === null)(
 
     // Only the Win32 path layer drops a trailing dot from a name; Node reads the name as made.
     it.runIf(WIN32).each(TREE_OPERATIONS)(
-      "a difference between the vault's reading and git's ends at the probe: a %s in a linked work tree whose commondir names <wt>\\.git. beside <wt>\\.git",
+      "a difference between the vault's reading and git's ends at the discovery: a %s in a linked work tree whose commondir names <wt>\\.git. beside <wt>\\.git",
       async (operation) => {
         const { name, bare } = remote();
         const wt = join(root, "wt");
@@ -471,11 +484,13 @@ describe.skipIf(GIT === null)(
         const requests = server.requests.length;
         const err = await expectVaultError(
           () => serve(operation, name, linked),
-          ErrorCode.GIT_OPERATION_FAILED,
+          ErrorCode.INVALID_GIT_CONFIG,
         );
-        expect(err.message).toBe(UNRESOLVED);
-        expect(log.mock.calls).toEqual([[unresolvedRow(operation)]]);
+        expect(err.message).toBe(NOT_SERVED);
+        expect(log.mock.calls).toEqual([[failedRow(operation, "INVALID_GIT_CONFIG")]]);
         expect(server.requests.length).toBe(requests);
+        expect(readVersion).toHaveBeenCalledTimes(1);
+        expect(spawnMock).not.toHaveBeenCalled();
       },
     );
 

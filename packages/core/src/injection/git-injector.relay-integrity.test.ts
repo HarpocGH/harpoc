@@ -190,21 +190,21 @@ describeGit(
     it("a relay config changed before the network step refuses the pull, and no credential-bearing step runs", async () => {
       tamperAtCreation((relay) => appendFileSync(join(relay, "config"), PLANTED));
       await expectVaultError(() => run("pull"), ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "rev-parse", "for-each-ref"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "rev-parse", "for-each-ref"]);
       expect(relaysLeft()).toEqual([]);
     });
 
     it("an entry the vault did not write in the relay refuses the push before its network step", async () => {
       tamperAtCreation((relay) => writeFileSync(join(relay, "commondir"), `${wd}/.git\n`));
       await expectVaultError(() => run("push"), ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "symbolic-ref", "for-each-ref"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "symbolic-ref", "for-each-ref"]);
       expect(relaysLeft()).toEqual([]);
     });
 
     it("a relay config changed during the fetch reports the pull failed, and the local pull never runs", async () => {
       tamperDuringNetworkStep("fetch", (relay) => appendFileSync(join(relay, "config"), PLANTED));
       await expectVaultError(() => run("pull"), ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "rev-parse", "for-each-ref", "fetch"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "rev-parse", "for-each-ref", "fetch"]);
       expect(relaysLeft()).toEqual([]);
     });
 
@@ -213,7 +213,13 @@ describeGit(
         writeFileSync(join(relay, "commondir"), `${wd}/.git\n`),
       );
       await expectVaultError(() => run("push"), ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "symbolic-ref", "for-each-ref", "push"]);
+      expect(subcommands()).toEqual([
+        "rev-parse",
+        "config",
+        "symbolic-ref",
+        "for-each-ref",
+        "push",
+      ]);
       expect(relaysLeft()).toEqual([]);
     });
 
@@ -285,7 +291,7 @@ describeGit(
     it("a relay config changed before a fetch's network step refuses the fetch, and no credential-bearing step runs (M6)", async () => {
       tamperAtCreation((relay) => appendFileSync(join(relay, "config"), PLANTED));
       await expectVaultError(runFetch, ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "config", "for-each-ref"]);
       expect(relaysLeft()).toEqual([]);
     });
 
@@ -294,7 +300,7 @@ describeGit(
         writeFileSync(join(relay, "commondir"), `${wd}/.git\n`),
       );
       await expectVaultError(runFetch, ErrorCode.GIT_OPERATION_FAILED);
-      expect(subcommands()).toEqual(["rev-parse", "config", "for-each-ref", "fetch"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "config", "for-each-ref", "fetch"]);
       expect(relaysLeft()).toEqual([]);
     });
 
@@ -320,8 +326,10 @@ describeGit(
       expect(subcommands()).toEqual([
         "rev-parse",
         "config",
+        "config",
         "for-each-ref",
         "fetch",
+        "config",
         "config",
         "fetch",
       ]);
@@ -333,9 +341,11 @@ describeGit(
       expect(result.exit_code).toBe(0);
       expect(subcommands()).toEqual([
         "rev-parse",
+        "config",
         "rev-parse",
         "for-each-ref",
         "fetch",
+        "config",
         "config",
         "pull",
       ]);
@@ -389,7 +399,7 @@ describeGit(
           },
         ],
       ]);
-      expect(subcommands()).toEqual(["rev-parse", "rev-parse", "for-each-ref"]);
+      expect(subcommands()).toEqual(["rev-parse", "config", "rev-parse", "for-each-ref"]);
       expect(relaysLeft()).toEqual([]);
     });
 

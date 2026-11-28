@@ -10,6 +10,8 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
@@ -462,6 +464,30 @@ describe.skipIf(process.platform !== "linux" || GIT === null)(
         } finally {
           removeOwnEntry(moved);
           removeOwnEntry(separate);
+          await removedByAgent(sticky);
+        }
+      }, 60_000);
+
+      it("(j) a config linked to the account's own file under the agent's directory is refused before the file can be exchanged; the agent can exchange it", async (ctx) => {
+        if (!available) return ctx.skip();
+        const sticky = await madeByAgent("1777");
+        const kept = join(sticky, "config");
+        const moved = join(sticky, "moved");
+        try {
+          const made = await cloned(join(root, "linked-config"));
+          const config = join(made, ".git", "config");
+          writeFileSync(kept, readFileSync(config));
+          chmodSync(kept, 0o644);
+          unlinkSync(config);
+          symlinkSync(kept, config);
+          await refused(made, CHANGEABLE);
+          const renamed = await runAs(agent, ["mv", "--", kept, moved]);
+          expect(renamed.code, renamed.stderr).toBe(0);
+          const replaced = await runAs(agent, ["cp", "--", moved, kept]);
+          expect(replaced.code, replaced.stderr).toBe(0);
+          const owner = await runCommand("stat", ["-L", "-c", "%U", config]);
+          expect(owner.stdout.trim()).toBe(agent);
+        } finally {
           await removedByAgent(sticky);
         }
       }, 60_000);

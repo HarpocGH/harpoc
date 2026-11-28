@@ -146,6 +146,20 @@ export function ownConfigListingArgs(): string[] {
   return ["config", "-z", "--name-only", "--get-regexp", "--end-of-options", OWN_CONFIG_PATTERN];
 }
 
+/** The read of every value of the repository's `extensions.refStorage`, each behind a NUL. */
+export function refStorageArgs(): string[] {
+  return ["config", "-z", "--get-all", "--end-of-options", "extensions.refStorage"];
+}
+
+/**
+ * The read's answer (`-z`) judged: served where every value is exactly `files`
+ * or `reftable`, a format without a path; no value at all is served too.
+ */
+export function servesRefStorage(stdout: string): boolean {
+  const values = stdout.split("\0");
+  return values.pop() === "" && values.every((value) => value === "files" || value === "reftable");
+}
+
 const REMOTE_PROGRAM_VARIABLES = new Set(["uploadpack", "receivepack", "vcs", "proxy", "promisor"]);
 
 function isHookCommand(name: string): boolean {

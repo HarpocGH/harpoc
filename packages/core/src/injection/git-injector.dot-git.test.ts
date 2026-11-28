@@ -206,7 +206,7 @@ describe.skipIf(GIT === null)(
       return tree;
     }
 
-    /** spawnCaptured answers by argv: the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
+    /** spawnCaptured answers by argv: the read of the ref storage as absent, the probe, a pull's top level, the push's HEAD, the fetch's remote; every other step succeeds. */
     function script(tree: string = join(root, "tree")): void {
       const gitDir = join(tree, ".git");
       const probe = answer(
@@ -218,6 +218,9 @@ describe.skipIf(GIT === null)(
         "false",
       );
       spawnMock.mockImplementation((_cmd, args) => {
+        if (args.includes("extensions.refStorage")) {
+          return Promise.resolve({ ...OK_STEP, exit_code: 1 });
+        }
         const sub = gitSubcommand(args);
         let stdout = "";
         if (args.includes("--git-path")) stdout = probe;
@@ -432,7 +435,8 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    // A backslash separates a path on win32 alone: elsewhere git derives `org\.git`.
+    // A backslash separates a path on win32 alone: elsewhere git derives `org\.git`, a
+    // name the vault, which splits a path on either separator, reads as holding `.git`.
     it.runIf(WIN32)(
       "a clone without working_directory: the name git would derive from https://8.8.8.8/org\\.git.git is refused on win32",
       async () => {
@@ -440,10 +444,17 @@ describe.skipIf(GIT === null)(
       },
     );
 
-    it.skipIf(WIN32)(
-      "a clone without working_directory: https://8.8.8.8/org\\.git.git names a directory off win32 and reaches the first network step (skipped on win32, where a backslash separates)",
-      async () => {
-        await expectCloneReachesTheNetwork("https://8.8.8.8/org\\.git.git");
+    it.skipIf(WIN32).each(FLOORS)(
+      "a clone without working_directory: the name git derives from https://8.8.8.8/org\\.git.git off win32, org\\.git, holds a .git name as the vault reads it and is refused with the floor's refusal, nothing spawned, %s (skipped on win32, where a backslash separates)",
+      async (_label, floor) => {
+        script();
+        const err = await expectVaultError(
+          () => use("clone", undefined, floor(), "https://8.8.8.8/org\\.git.git"),
+          ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+        );
+        expect(err.message).toBe(PROTECTED);
+        expect(log.mock.calls).toEqual([[failedRow("clone", "LOCAL_PATH_NOT_ALLOWED")]]);
+        expect(spawnMock).not.toHaveBeenCalled();
       },
     );
 
@@ -471,6 +482,44 @@ describe.skipIf(GIT === null)(
         }
       },
     );
+
+    async function expectProcessDirectoryRefused(): Promise<void> {
+      script();
+      const err = await expectVaultError(
+        () => use("clone", undefined, undefined),
+        ErrorCode.LOCAL_PATH_NOT_ALLOWED,
+      );
+      expect(err.message).toBe(PROTECTED);
+      expect(log.mock.calls).toEqual([[failedRow("clone", "LOCAL_PATH_NOT_ALLOWED")]]);
+      expect(spawnMock).not.toHaveBeenCalled();
+    }
+
+    it("a clone without working_directory whose process directory cannot be read is refused with the floor's refusal, without a floor", async () => {
+      const cwd = vi.spyOn(process, "cwd").mockImplementation(() => {
+        throw new Error("the process's directory was removed");
+      });
+      try {
+        await expectProcessDirectoryRefused();
+      } finally {
+        cwd.mockRestore();
+      }
+    });
+
+    it("a clone without working_directory in a process directory with a .git name that does not resolve, <root>/x/.git/y a link that leads nowhere, is refused with the floor's refusal, without a floor", async () => {
+      const dotGit = join(root, "x", ".git");
+      mkdirSync(dotGit, { recursive: true });
+      const gone = join(root, "gone");
+      mkdirSync(gone);
+      const dir = join(dotGit, "y");
+      symlinkSync(gone, dir, WIN32 ? "junction" : "dir");
+      rmSync(gone, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(dir);
+      try {
+        await expectProcessDirectoryRefused();
+      } finally {
+        cwd.mockRestore();
+      }
+    });
 
     it.each(
       TREE_OPERATIONS.flatMap((operation) =>

@@ -18,6 +18,7 @@ import { expectVaultError } from "@harpoc/test-utils";
 import { tierRequired } from "./__fixtures__/platform-tier.js";
 import { resolveSupportedGit } from "./__fixtures__/supported-git.js";
 import {
+  commondirPath,
   derivedCloneDirectory,
   findServedRepository,
   gitfilePath,
@@ -201,9 +202,15 @@ const NOT_SERVED = "working_directory is not in a repository the vault serves";
 const HEAD_REF = "ref: refs/heads/main\n";
 const MAX_GITFILE_BYTES = 1_048_576;
 
-/** A gitfile's bytes (each code unit one byte), the path it names on linux, on win32; null where it names none. */
+/** A gitfile's bytes (each code unit one byte), the path it names on linux and darwin, on win32; null where it names none. */
 const GITFILES: ReadonlyArray<readonly [string, string | null, string | null]> = [
-  ["gitdir: /abs/x\n", "/abs/x", "/abs/x"],
+  ["gitdir: /abs/x\n", "/abs/x", null],
+  ["gitdir: /x", "/x", null],
+  ["gitdir: \\x", "\\x", null],
+  ["gitdir: /", "/", null],
+  ["gitdir: //server/share/x", "//server/share/x", "//server/share/x"],
+  ["gitdir: \\\\?\\C:\\x", "\\\\?\\C:\\x", "\\\\?\\C:\\x"],
+  ["gitdir: C:/x", "C:/x", "C:/x"],
   ["gitdir: ../x.git", "../x.git", "../x.git"],
   ["gitdir: x\r\n", "x", "x"],
   ["gitdir: x\n\n\r\n", "x", "x"],
@@ -223,18 +230,57 @@ const GITFILES: ReadonlyArray<readonly [string, string | null, string | null]> =
   ["gitdir: C:x\n", "C:x", null],
 ];
 
+/** The refused gitfiles whose x can stand for a relative path: not one rooted by a single separator. */
 const REFUSED_GITFILES = GITFILES.filter(
-  ([, linux, win32]) => (WIN32 ? win32 : linux) === null,
+  ([content, linux, win32]) =>
+    (WIN32 ? win32 : linux) === null && !/^gitdir: [\\/](?![\\/])/.test(content),
 ).map(([content]) => content);
 
 describe("gitfilePath", () => {
   it.each(
     GITFILES.flatMap(([content, linux, win32]) => [
       [shown(content), "linux", linux === null ? "no path" : shown(linux), content, linux] as const,
+      [
+        shown(content),
+        "darwin",
+        linux === null ? "no path" : shown(linux),
+        content,
+        linux,
+      ] as const,
       [shown(content), "win32", win32 === null ? "no path" : shown(win32), content, win32] as const,
     ]),
   )("%s on %s names %s", (_shown, platform, _named, content, expected) => {
     expect(gitfilePath(Buffer.from(content, "latin1"), platform)).toBe(expected);
+  });
+});
+
+/** A `commondir` file's bytes (each code unit one byte), the path it names on linux, on win32; null where it names none. */
+const COMMONDIRS: ReadonlyArray<readonly [string, string | null, string | null]> = [
+  ["../..\n", "../..", "../.."],
+  ["..\r\n", "..", ".."],
+  ["", null, null],
+  ["\n", null, null],
+  ["\xff\n", null, null],
+  ["x\x00y", null, null],
+  ["a\nb", null, null],
+  [" x", null, null],
+  ["x ", null, null],
+  ["\tx", null, null],
+  ["C:x", "C:x", null],
+  ["/x", "/x", null],
+  ["\\x", "\\x", null],
+  ["C:\\x", "C:\\x", "C:\\x"],
+  ["//s/h/x", "//s/h/x", "//s/h/x"],
+];
+
+describe("commondirPath", () => {
+  it.each(
+    COMMONDIRS.flatMap(([content, linux, win32]) => [
+      [shown(content), "linux", linux === null ? "no path" : shown(linux), content, linux] as const,
+      [shown(content), "win32", win32 === null ? "no path" : shown(win32), content, win32] as const,
+    ]),
+  )("%s on %s names %s", (_shown, platform, _named, content, expected) => {
+    expect(commondirPath(Buffer.from(content, "latin1"), platform)).toBe(expected);
   });
 });
 
@@ -295,6 +341,22 @@ describe("findServedRepository", () => {
       if (refused !== null) throw refused;
       return actual.lstat(path, options);
     });
+  }
+
+  /** `path` without its drive, each separator `separator`. */
+  function withoutDrive(path: string, separator: string): string {
+    return path.replace(/^[A-Za-z]:/, "").replace(/\\/g, separator);
+  }
+
+  /** `judge` run with the process in `root`, so a path without a drive names a path on root's drive. */
+  async function fromRoot(judge: () => Promise<void>): Promise<void> {
+    const saved = process.cwd();
+    process.chdir(root);
+    try {
+      await judge();
+    } finally {
+      process.chdir(saved);
+    }
   }
 
   const SERVED: ReadonlyArray<readonly [string, () => { named: string; repo: ServedRepository }]> =
@@ -501,6 +563,43 @@ describe("findServedRepository", () => {
       },
     ],
     [
+      "a linked work tree whose commondir holds a leading blank, the name it spells a link (a junction on win32) to the common directory",
+      () => {
+        const main = gitDirectory(join(root, "main", ".git"));
+        const linked = join(main, "worktrees", "t");
+        mkdirSync(linked, { recursive: true });
+        writeFileSync(join(linked, "HEAD"), HEAD_REF);
+        directoryLink(main, join(linked, " common"));
+        writeFileSync(join(linked, "commondir"), " common\n");
+        gitfile(`gitdir: ${linked}\n`);
+        return wt;
+      },
+    ],
+    [
+      "E's commondir naming, through a link (a junction on win32), a name that holds U+FFFD",
+      () => {
+        directoryLink(gitDirectory(join(root, "main", ".git")), join(root, "l\uFFFDnk"));
+        const linked = join(root, "linked");
+        mkdirSync(linked);
+        writeFileSync(join(linked, "HEAD"), HEAD_REF);
+        writeFileSync(join(linked, "commondir"), `${join(root, "l\uFFFDnk")}\n`);
+        gitfile(`gitdir: ${linked}\n`);
+        return wt;
+      },
+    ],
+    [
+      "E's commondir naming a link (a junction on win32) to a common directory whose name holds U+FFFD",
+      () => {
+        directoryLink(gitDirectory(join(root, "m\uFFFDin", ".git")), join(root, "main-link"));
+        const linked = join(root, "linked");
+        mkdirSync(linked);
+        writeFileSync(join(linked, "HEAD"), HEAD_REF);
+        writeFileSync(join(linked, "commondir"), `${join(root, "main-link")}\n`);
+        gitfile(`gitdir: ${linked}\n`);
+        return wt;
+      },
+    ],
+    [
       "a gitfile naming, through a link (a junction on win32), a name that holds U+FFFD",
       () => {
         directoryLink(gitDirectory(gd), join(root, "l\uFFFDnk"));
@@ -529,6 +628,48 @@ describe("findServedRepository", () => {
       directoryLink(gitDirectory(gd), join(root, "link."));
       gitfile("gitdir: ../link.\n");
       await expectNotServed(wt);
+    },
+  );
+
+  it.runIf(WIN32)(
+    "refused: a linked work tree whose commondir names <common>. beside <common>, a name that ends in a dot (win32 alone, whose path layer drops the dot Node reads as spelled)",
+    async () => {
+      const main = gitDirectory(join(root, "main", ".git"));
+      mkdirSync(`${main}.`);
+      const linked = join(main, "worktrees", "t");
+      mkdirSync(linked, { recursive: true });
+      writeFileSync(join(linked, "HEAD"), HEAD_REF);
+      writeFileSync(join(linked, "commondir"), `${main}.\n`);
+      gitfile(`gitdir: ${linked}\n`);
+      await expectNotServed(wt);
+    },
+  );
+
+  it.runIf(WIN32).each(["\\", "/"])(
+    "refused: a gitfile naming the git directory rooted by %s without a drive; with the drive it is served (win32 alone, where such a path is read on the process's drive)",
+    async (separator) => {
+      gitDirectory(gd);
+      gitfile(`gitdir: ${withoutDrive(gd, separator)}\n`);
+      await fromRoot(() => expectNotServed(wt));
+
+      gitfile(`gitdir: ${gd}\n`);
+      expect(await findServedRepository(wt)).toEqual(served(wt, gd));
+    },
+  );
+
+  it.runIf(WIN32).each(["\\", "/"])(
+    "refused: a linked work tree whose commondir names the common directory rooted by %s without a drive; with the drive it is served (win32 alone, where such a path is read on the process's drive)",
+    async (separator) => {
+      const main = gitDirectory(join(root, "main", ".git"));
+      const linked = join(main, "worktrees", "t");
+      mkdirSync(linked, { recursive: true });
+      writeFileSync(join(linked, "HEAD"), HEAD_REF);
+      writeFileSync(join(linked, "commondir"), `${withoutDrive(main, separator)}\n`);
+      gitfile(`gitdir: ${linked}\n`);
+      await fromRoot(() => expectNotServed(wt));
+
+      writeFileSync(join(linked, "commondir"), `${main}\n`);
+      expect(await findServedRepository(wt)).toEqual(served(wt, linked, main));
     },
   );
 
